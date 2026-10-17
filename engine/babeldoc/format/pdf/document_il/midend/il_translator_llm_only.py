@@ -177,6 +177,7 @@ class ILTranslatorLLMOnly:
         self.il_translator.docs = docs
         tracker = DocumentTranslateTracker()
         self.mid = 0
+        self._index_reading_order(docs)
 
         if not self.translation_config.shared_context_cross_split_part.first_paragraph:
             # Try to find the first title paragraph
@@ -258,6 +259,56 @@ class ILTranslatorLLMOnly:
                 f.write(tracker.to_json())
         logger.info(
             f"Translation completed. Total: {self.total_count}, Successful: {self.ok_count}, Fallback: {self.fallback_count}"
+        )
+
+    # Text outside the layout regions (labels inside figures) and page
+    # furniture (running heads, page numbers) is not neighbouring context.
+    NOT_CONTEXT_LABELS = frozenset({"fallback_line", "abandon"})
+
+    def _index_reading_order(self, docs: Document) -> None:
+        """Snapshot every paragraph's source text and section title.
+
+        Taken before any batch is sent: translated paragraphs get their
+        translation as text, and a batch's neighbours must stay source text.
+        A section starts at each paragraph labelled "title".
+        """
+        self._reading_order: dict[int, int] = {}
+        self._source_texts: list[str | None] = []  # None: not context
+        self._section_titles: list[str | None] = []
+        section = None
+        for page in docs.page:
+            for paragraph in page.pdf_paragraph:
+                text = (paragraph.unicode or "").strip()
+                if paragraph.layout_label == "title" and text:
+                    section = text
+                is_context = text and paragraph.layout_label not in self.NOT_CONTEXT_LABELS
+                self._reading_order[id(paragraph)] = len(self._source_texts)
+                self._source_texts.append(text if is_context else None)
+                self._section_titles.append(section)
+
+    def _paper_context_block(self, paragraphs: list[PdfParagraph]) -> str | None:
+        """The paper context of a batch, or None without a context builder.
+
+        The builder gets the titles of the sections the batch spans and the
+        source texts of the paragraphs before and after it.
+        """
+        builder = self.translation_config.batch_context_builder
+        if builder is None:
+            return None
+        positions = [
+            self._reading_order[id(p)] for p in paragraphs if id(p) in self._reading_order
+        ]
+        if not positions:
+            return builder([], [], [])
+        first, last = min(positions), max(positions)
+        titles: list[str] = []
+        for title in self._section_titles[first : last + 1]:
+            if title is not None and title not in titles:
+                titles.append(title)
+        return builder(
+            titles,
+            [t for t in self._source_texts[:first] if t is not None],
+            [t for t in self._source_texts[last + 1 :] if t is not None],
         )
 
     def _is_body_text_paragraph(self, paragraph: PdfParagraph) -> bool:
@@ -708,6 +759,9 @@ class ILTranslatorLLMOnly:
                 title_paragraph=title_paragraph,
                 local_title_paragraph=local_title_paragraph,
                 batch_text_for_glossary_matching=batch_text_for_glossary_matching,
+                paper_context_block=self._paper_context_block(
+                    batch_paragraph.paragraphs
+                ),
             )
 
             for llm_translate_tracker in llm_translate_trackers:
@@ -886,8 +940,13 @@ class ILTranslatorLLMOnly:
         title_paragraph: TitleContextSnapshot | None,
         local_title_paragraph: TitleContextSnapshot | None,
         batch_text_for_glossary_matching: str,
+        paper_context_block: str | None = None,
     ) -> str:
-        """Build LLM prompt using a single template for easier maintenance."""
+        """Build LLM prompt using a single template for easier maintenance.
+
+        A ``paper_context_block`` replaces the upstream title hints: it holds
+        the batch's section title along with the dossier and neighbours.
+        """
         # Build role block, honoring custom_system_prompt if provided.
         custom_prompt = getattr(self.translation_config, "custom_system_prompt", None)
         if custom_prompt:
@@ -923,7 +982,9 @@ class ILTranslatorLLMOnly:
                     f"{hint_idx}. The most recent title is: {local_title_paragraph.unicode}"
                 )
 
-        if contextual_lines:
+        if paper_context_block is not None:
+            contextual_hints_block = paper_context_block + "\n"
+        elif contextual_lines:
             contextual_hints_block = (
                 "## Contextual Hints for Better Translation\n"
                 + "\n".join(contextual_lines)

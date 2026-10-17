@@ -17,7 +17,7 @@ from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import FakeModel
 
 CONCURRENCY = 4
-STAGES = ["排队中", "解析版面", "翻译与审校", "排版", "完成"]
+STAGES = ["排队中", "读取全文", "生成论文档案", "解析版面", "翻译与审校", "排版", "完成"]
 # Part of the watermark sentence the engine adds unless told not to.
 WATERMARK_MARK = "funstory.ai"
 # The first line of the excerpt's abstract.
@@ -115,7 +115,7 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
 
 
 def test_no_automatic_term_extraction_requests(finished_task):
-    """Only paragraph translation requests reach the model.
+    """Only the paper dossier and paragraph translation requests reach the model.
 
     One-paragraph requests may occur: the engine redoes a paragraph whose
     answer is more than 3x its input in tokens (see backlog, ticket 02).
@@ -123,7 +123,7 @@ def test_no_automatic_term_extraction_requests(finished_task):
     kinds = {request.kind for request in finished_task["model"].requests}
 
     assert "translate_batch" in kinds
-    assert kinds <= {"translate_batch", "single_paragraph"}
+    assert kinds <= {"dossier", "translate_batch", "single_paragraph"}
 
 
 def test_requests_in_flight_reach_the_concurrency_limit(finished_task):

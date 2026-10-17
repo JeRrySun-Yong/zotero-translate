@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import threading
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -217,6 +218,8 @@ class TranslationConfig:
         metadata_extra_data: str | None = None,
         term_pool_max_workers: int | None = None,
         disable_same_text_fallback: bool = False,
+        batch_context_builder: Callable[[list[str], list[str], list[str]], str]
+        | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -376,6 +379,11 @@ class TranslationConfig:
             "cache_hit_prompt_tokens": 0,
         }
         self.disable_same_text_fallback = disable_same_text_fallback
+        # Writes the paper context block of an LLM batch prompt from the
+        # titles of the sections the batch spans and the source texts of the
+        # paragraphs before and after it (reading order). None keeps the
+        # upstream title hints.
+        self.batch_context_builder = batch_context_builder
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False
