@@ -42,6 +42,9 @@ class ModelSettings:
     reasoning_effort: str = "high"
     temperature: float = 1.0
     timeout_seconds: float = 240.0
+    max_retries: int = 3  # per request, after the first attempt (ADR 0002)
+    retry_backoff_seconds: float = 1.0  # first wait; doubles on each retry
+    cache_dir: Path | None = None  # successful responses; None turns the cache off
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -60,7 +63,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def load_model_settings(
-    env_file: Path, concurrency: int = DEFAULT_CONCURRENCY
+    env_file: Path, concurrency: int = DEFAULT_CONCURRENCY, cache_dir: Path | None = None
 ) -> ModelSettings:
     """Read ``OPENAI_BASE_URL``, ``OPENAI_API_KEY`` and ``AI_DEFAULT_MODEL``."""
     env_file = Path(env_file)
@@ -75,4 +78,10 @@ def load_model_settings(
         api_key=values["OPENAI_API_KEY"],
         model=values.get("AI_DEFAULT_MODEL") or DEFAULT_MODEL,
         concurrency=concurrency,
+        cache_dir=Path(cache_dir) if cache_dir else None,
     )
+
+
+def model_cache_dir(data_dir: Path) -> Path:
+    """Where the response cache lives inside a data directory."""
+    return Path(data_dir) / "model-cache"

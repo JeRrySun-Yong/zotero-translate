@@ -5,13 +5,22 @@ base class's default placeholders make the engine drop the letter "b"
 (BabelDOC #624). The engine's own translation cache is bypassed
 (``ignore_cache=True``): it lives in the shared engine cache folder and its
 key ignores the endpoint, so test runs against the fake model could
-otherwise pollute real runs.
+otherwise pollute real runs; the pipeline model client keeps its own
+response cache.
+
+Requests are retried by the pipeline model client. A request that fails for
+good is raised as the engine's ``TranslationRequestError``, which makes the
+engine fail the translation stage instead of keeping the source text. The
+inherited OpenAI SDK retry on HTTP 429 does not apply: our overrides replace
+the decorated methods.
 """
 
 from __future__ import annotations
 
+from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
 from babeldoc.translator.translator import OpenAITranslator
 
+from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 
 
@@ -35,7 +44,14 @@ class PipelineTranslator(OpenAITranslator):
     def do_llm_translate(self, text, rate_limit_params: dict | None = None):
         if text is None:  # the engine probes LLM support with None
             return None
-        return self.model_client.complete([{"role": "user", "content": text}])
+        validate = (rate_limit_params or {}).get("validate_output")
+        return self._complete([{"role": "user", "content": text}], validate)
 
     def do_translate(self, text, rate_limit_params: dict | None = None) -> str:
-        return self.model_client.complete(self.prompt(text))
+        return self._complete(self.prompt(text))
+
+    def _complete(self, messages: list[dict], validate=None) -> str:
+        try:
+            return self.model_client.complete(messages, validate=validate)
+        except ModelCallError as e:
+            raise TranslationRequestError(str(e)) from e

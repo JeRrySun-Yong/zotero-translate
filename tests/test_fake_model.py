@@ -67,3 +67,13 @@ def test_counts_max_requests_in_flight_under_delay(fake_model):
         t.join()
 
     assert fake_model.max_in_flight == 3
+
+
+def test_fails_the_same_request_on_each_resend_then_answers(fake_model):
+    fake_model.fail_same_request(["429", "500"], kind="translate_batch")
+    other = BATCH_PROMPT.replace("Hello", "Bye")
+
+    codes = [post(fake_model, p).status_code for p in (BATCH_PROMPT, other, BATCH_PROMPT, BATCH_PROMPT)]
+
+    assert codes == [429, 200, 500, 200]
+    assert [r.fault for r in fake_model.requests] == ["429", None, "500", None]

@@ -5,7 +5,8 @@ Test fixture only. It can:
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
 - inject errors (500, 429, timeout, empty content, invalid JSON) on the
-  N-th request of a kind;
+  N-th request of a kind, or on the first request of a kind and then on each
+  resend of that same request (``fail_same_request``);
 - inject a delay and count the maximum number of requests in flight.
 
 Request kinds are recognised from the message content:
@@ -32,6 +33,8 @@ from typing import Callable
 
 PSEUDO_PREFIX = "伪译文"
 
+_ERRORS = {"500", "429", "timeout", "empty", "invalid_json"}
+
 # Markers of the engine's one-paragraph prompts, each followed by the text.
 SINGLE_PARAGRAPH_MARKERS = (
     "Now translate the following text:\n\n",
@@ -47,6 +50,7 @@ class RecordedRequest:
     path: str
     headers: dict[str, str]
     body: dict
+    fault: str | None = None  # the injected error; None if answered normally
 
     @property
     def prompt(self) -> str:
@@ -63,6 +67,13 @@ class _Fault:
 
 
 @dataclass
+class _SameRequestFault:
+    kind: str | None
+    errors: list[str]
+    body: dict | None = None  # the first matching request; resends must equal it
+
+
+@dataclass
 class FakeModel:
     """Start with ``with FakeModel() as model:``; ``model.base_url`` is the endpoint."""
 
@@ -74,6 +85,7 @@ class FakeModel:
         self._lock = threading.Lock()
         self._in_flight = 0
         self._faults: list[_Fault] = []
+        self._same_request_faults: list[_SameRequestFault] = []
         self._responders: dict[str, Responder] = {
             "translate_batch": pseudo_translate_batch,
             "single_paragraph": pseudo_translate_single,
@@ -92,8 +104,16 @@ class FakeModel:
 
         ``error`` is one of: "500", "429", "timeout", "empty", "invalid_json".
         """
-        assert error in {"500", "429", "timeout", "empty", "invalid_json"}, error
+        assert error in _ERRORS, error
         self._faults.append(_Fault(kind=kind, nth=nth, error=error))
+
+    def fail_same_request(self, errors: list[str], *, kind: str | None = None) -> None:
+        """Fail the first request of ``kind``, then each identical resend, with ``errors`` in turn.
+
+        After the errors are used up, that request is answered normally.
+        """
+        assert errors and all(e in _ERRORS for e in errors), errors
+        self._same_request_faults.append(_SameRequestFault(kind=kind, errors=list(errors)))
 
     # -- inspection ----------------------------------------------------
 
@@ -136,15 +156,16 @@ class FakeModel:
     def _handle(self, handler: BaseHTTPRequestHandler, body: dict) -> None:
         kind = classify(body)
         with self._lock:
+            fault = self._take_same_request_fault(kind, body) or self._take_fault(kind)
             self.requests.append(
                 RecordedRequest(
                     kind=kind,
                     path=handler.path,
                     headers=dict(handler.headers.items()),
                     body=body,
+                    fault=fault,
                 )
             )
-            fault = self._take_fault(kind)
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
@@ -167,6 +188,16 @@ class FakeModel:
         finally:
             with self._lock:
                 self._in_flight -= 1
+
+    def _take_same_request_fault(self, kind: str, body: dict) -> str | None:
+        for fault in self._same_request_faults:
+            if not fault.errors:
+                continue
+            if fault.body is None and fault.kind in (None, kind):
+                fault.body = body
+            if fault.body == body:
+                return fault.errors.pop(0)
+        return None
 
     def _take_fault(self, kind: str) -> str | None:
         for fault in self._faults:

@@ -52,15 +52,27 @@ class ServiceClient:
 
     def wait(self, task_id: str, timeout: float = 300, on_poll=None) -> dict:
         """Poll until the task ends; ``on_poll(status)`` sees every poll."""
+
+        def finished(status: dict) -> bool:
+            if on_poll:
+                on_poll(status)
+            return status["state"] in TERMINAL_STATES
+
+        return self.wait_for(task_id, finished, timeout)
+
+    def wait_for(self, task_id: str, condition, timeout: float = 300) -> dict:
+        """Poll until ``condition(status)`` holds; return that status."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = self.status(task_id)
-            if on_poll:
-                on_poll(status)
-            if status["state"] in TERMINAL_STATES:
+            if condition(status):
                 return status
             time.sleep(0.2)
-        raise AssertionError(f"task {task_id} did not finish in {timeout}s")
+        raise AssertionError(f"task {task_id}: condition not met in {timeout}s")
+
+    def report(self, task_id: str) -> dict:
+        """The task report the paper task left in its task directory."""
+        return json.loads((self.data_dir / "tasks" / task_id / "report.json").read_text("utf-8"))
 
     def download(self, task_id: str, name: str) -> bytes:
         response = self.http.get(f"/tasks/{task_id}/files/{name}")
@@ -69,17 +81,23 @@ class ServiceClient:
 
 
 def launch_service(
-    model: FakeModel | None, root: Path, concurrency: int = 4, env_file: Path | None = None
+    model: FakeModel | str | None,
+    root: Path,
+    concurrency: int = 4,
+    env_file: Path | None = None,
+    data_dir: Path | None = None,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
-    The pipeline model is ``model`` (the fake), or the endpoint in ``env_file``.
+    The pipeline model is ``model`` (the fake, or an endpoint URL), or the
+    endpoint in ``env_file``. Pass ``data_dir`` to restart on earlier data.
     """
-    data_dir = root / f"data-{uuid.uuid4().hex[:6]}"
+    data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
     if env_file is None:
+        base_url = model if isinstance(model, str) else model.base_url
         env_file = root / f"model-{uuid.uuid4().hex[:6]}.env"
         env_file.write_text(
-            f"OPENAI_BASE_URL={model.base_url}\n"
+            f"OPENAI_BASE_URL={base_url}\n"
             f"OPENAI_API_KEY={FAKE_API_KEY}\n"
             f"AI_DEFAULT_MODEL={FAKE_MODEL_NAME}\n",
             encoding="utf-8",
@@ -123,11 +141,11 @@ def fake_model():
 
 @pytest.fixture
 def start_service(tmp_path):
-    """Return ``start(fake_model, concurrency=4) -> ServiceClient``."""
+    """Return ``start(fake_model, concurrency=4, data_dir=None) -> ServiceClient``."""
     started: list[ServiceClient] = []
 
-    def start(model: FakeModel, concurrency: int = 4) -> ServiceClient:
-        client = launch_service(model, tmp_path, concurrency)
+    def start(model, concurrency: int = 4, data_dir: Path | None = None) -> ServiceClient:
+        client = launch_service(model, tmp_path, concurrency, data_dir=data_dir)
         started.append(client)
         return client
 

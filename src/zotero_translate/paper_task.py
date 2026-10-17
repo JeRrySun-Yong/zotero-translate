@@ -15,6 +15,7 @@ from typing import Callable
 
 from zotero_translate.settings import ModelSettings
 from zotero_translate.task_dir import OUTPUT_FILES
+from zotero_translate.task_dir import REPORT_FILE
 
 PARSE_STAGE = "解析版面"
 TRANSLATE_STAGE = "翻译与审校"
@@ -39,6 +40,10 @@ ProgressCallback = Callable[[str, int], None]
 class PaperTaskError(Exception):
     """The paper task failed; the message is a readable Chinese reason."""
 
+    def __init__(self, message: str, failed_batches: list[dict] | None = None):
+        super().__init__(message)
+        self.failed_batches = failed_batches or []
+
 
 @dataclass
 class PaperTaskResult:
@@ -57,7 +62,8 @@ def run_paper_task(
     """Translate ``source_pdf``; write ``mono.pdf`` and ``dual.pdf`` into ``output_dir``.
 
     ``on_progress(stage, progress)`` receives our stage name and an overall
-    percentage (0-99) that never decreases.
+    percentage (0-99) that never decreases. The task report is written to
+    ``output_dir`` whether the task succeeds or fails.
     """
     from babeldoc.docvision.doclayout import DocLayoutModel
     from babeldoc.format.pdf import high_level
@@ -66,11 +72,18 @@ def run_paper_task(
     from babeldoc.translator.translator import set_translate_rate_limiter
 
     from zotero_translate.model_client import ModelClient
+    from zotero_translate.task_report import TaskReport
     from zotero_translate.translator import PipelineTranslator
 
     output_dir = Path(output_dir)
     engine_output = output_dir / "engine-output"
     client = ModelClient(settings)
+    report = TaskReport()
+
+    def progress(stage: str, percent: int) -> None:
+        report.enter_stage(stage)
+        on_progress(stage, percent)
+
     try:
         high_level.init()
         # The engine's thread pools and rate limiter must not hold requests
@@ -92,7 +105,7 @@ def run_paper_task(
             use_rich_pbar=False,
         )
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)
-        result = asyncio.run(_drive_engine(high_level, config, on_progress))
+        result = asyncio.run(_drive_engine(high_level, config, progress))
         mono = output_dir / OUTPUT_FILES["mono"]
         dual = output_dir / OUTPUT_FILES["dual"]
         if not result.mono_pdf_path or not result.dual_pdf_path:
@@ -106,17 +119,38 @@ def run_paper_task(
             model_requests=client.request_count,
             max_in_flight=client.max_in_flight,
         )
+    except PaperTaskError as e:
+        report.fail(str(e), e.failed_batches)
+        raise
+    except BaseException as e:
+        report.fail(f"论文任务出错：{type(e).__name__}: {e}")
+        raise
     finally:
+        report.write(output_dir / REPORT_FILE, client)
         client.close()
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):
+    from babeldoc.babeldoc_exception.BabelDOCException import (
+        TranslationRequestsFailedError,
+    )
+
     progress = 0
     stage = FIRST_STAGE
     on_progress(stage, progress)
     async for event in high_level.async_translate(config):
         if event["type"] == "error":
-            raise PaperTaskError(f"引擎运行出错：{event['error']}")
+            error = event["error"]
+            if isinstance(error, TranslationRequestsFailedError):
+                first = error.failures[0]
+                where = f"第 {first.page_number} 页附近" if first.page_number else "页码未知"
+                raise PaperTaskError(
+                    f"管线模型请求失败（{where}）：{first.message}",
+                    failed_batches=[
+                        {"page": f.page_number, "error": f.message} for f in error.failures
+                    ],
+                )
+            raise PaperTaskError(f"引擎运行出错：{error}")
         if event["type"] == "finish":
             return event["translate_result"]
         new_stage = max(
