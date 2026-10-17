@@ -101,8 +101,13 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
         assert request.body["temperature"] == 1.0
 
 
-def test_only_paragraph_batches_are_sent(finished_task):
-    """No automatic term extraction and no one-paragraph redo requests."""
+def test_no_automatic_term_extraction_requests(finished_task):
+    """Only paragraph translation requests reach the model.
+
+    One-paragraph requests may occur: the engine redoes a paragraph whose
+    answer is more than 3x its input in tokens (see backlog, ticket 02).
+    """
     kinds = {request.kind for request in finished_task["model"].requests}
 
-    assert kinds == {"translate_batch"}
+    assert "translate_batch" in kinds
+    assert kinds <= {"translate_batch", "single_paragraph"}
