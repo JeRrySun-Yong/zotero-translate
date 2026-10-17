@@ -14,3 +14,6 @@ __pycache__/
 /runs/
 
 .DS_Store
+
+# Translation plugin build output
+/plugin/dist/
