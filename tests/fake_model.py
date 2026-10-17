@@ -14,7 +14,8 @@ Request kinds are recognised from the message content:
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
   placeholders, numbers and key concepts are kept.
-- ``simple_translate``: the engine's one-paragraph fallback prompt.
+- ``single_paragraph``: the engine's one-paragraph prompts, which it uses to
+  redo a paragraph after a failed or rejected batch.
 - ``other``: anything else.
 """
 
@@ -31,7 +32,11 @@ from typing import Callable
 
 PSEUDO_PREFIX = "伪译文"
 
-SIMPLE_TRANSLATE_MARKER = ";; Treat next line as plain text input"
+# Markers of the engine's one-paragraph prompts, each followed by the text.
+SINGLE_PARAGRAPH_MARKERS = (
+    "Now translate the following text:\n\n",
+    ";; Treat next line as plain text input",
+)
 
 Responder = Callable[[dict], str]
 
@@ -71,7 +76,7 @@ class FakeModel:
         self._faults: list[_Fault] = []
         self._responders: dict[str, Responder] = {
             "translate_batch": pseudo_translate_batch,
-            "simple_translate": pseudo_translate_simple,
+            "single_paragraph": pseudo_translate_single,
             "other": lambda body: "ok",
         }
         self._server: ThreadingHTTPServer | None = None
@@ -179,8 +184,8 @@ class FakeModel:
 
 def classify(body: dict) -> str:
     content = _last_user_content(body)
-    if SIMPLE_TRANSLATE_MARKER in content:
-        return "simple_translate"
+    if any(marker in content for marker in SINGLE_PARAGRAPH_MARKERS):
+        return "single_paragraph"
     if batch_items(content) is not None:
         return "translate_batch"
     return "other"
@@ -222,9 +227,13 @@ def echo_batch(body: dict) -> str:
     )
 
 
-def pseudo_translate_simple(body: dict) -> str:
+def pseudo_translate_single(body: dict) -> str:
     content = _last_user_content(body)
-    return PSEUDO_PREFIX + content.split("Input:\n\n", 1)[-1]
+    for marker in ("Now translate the following text:\n\n", "Input:\n\n"):
+        if marker in content:
+            content = content.split(marker, 1)[1]
+            break
+    return PSEUDO_PREFIX + content
 
 
 def _last_user_content(body: dict) -> str:

@@ -112,7 +112,12 @@ class TaskQueue:
                 td.write_status(
                     self.tasks_dir / task_id, state="running", stage=FIRST_STAGE, progress=0
                 )
-            self._run(task_id)
+            try:
+                self._run(task_id)
+            except Exception as e:  # noqa: BLE001 - the runner thread must survive
+                td.write_status(
+                    self.tasks_dir / task_id, state="failed", error=f"无法启动论文任务：{e}"
+                )
 
     def _run(self, task_id: str) -> None:
         directory = self.tasks_dir / task_id

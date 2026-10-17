@@ -68,16 +68,22 @@ class ServiceClient:
         return response.content
 
 
-def launch_service(model: FakeModel, root: Path, concurrency: int = 4) -> ServiceClient:
-    """Start the service subprocess on a random port; data and env file under ``root``."""
+def launch_service(
+    model: FakeModel | None, root: Path, concurrency: int = 4, env_file: Path | None = None
+) -> ServiceClient:
+    """Start the service subprocess on a random port with its data under ``root``.
+
+    The pipeline model is ``model`` (the fake), or the endpoint in ``env_file``.
+    """
     data_dir = root / f"data-{uuid.uuid4().hex[:6]}"
-    env_file = root / f"model-{uuid.uuid4().hex[:6]}.env"
-    env_file.write_text(
-        f"OPENAI_BASE_URL={model.base_url}\n"
-        f"OPENAI_API_KEY={FAKE_API_KEY}\n"
-        f"AI_DEFAULT_MODEL={FAKE_MODEL_NAME}\n",
-        encoding="utf-8",
-    )
+    if env_file is None:
+        env_file = root / f"model-{uuid.uuid4().hex[:6]}.env"
+        env_file.write_text(
+            f"OPENAI_BASE_URL={model.base_url}\n"
+            f"OPENAI_API_KEY={FAKE_API_KEY}\n"
+            f"AI_DEFAULT_MODEL={FAKE_MODEL_NAME}\n",
+            encoding="utf-8",
+        )
     process = subprocess.Popen(
         [
             sys.executable,

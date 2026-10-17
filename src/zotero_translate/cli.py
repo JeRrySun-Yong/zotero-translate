@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         from zotero_translate.service import serve as serve_forever
 
+        try:  # fail at startup, not on the first task
+            s.load_model_settings(args.env_file, args.concurrency)
+        except s.SettingsError as e:
+            print(e, file=sys.stderr)
+            return 2
         serve_forever(args.data_dir, args.env_file, args.port, args.concurrency)
         return 0
     return _run(args)

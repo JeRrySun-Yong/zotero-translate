@@ -1,0 +1,69 @@
+"""The fake pipeline model fixture itself: recording, responders, faults, in-flight count."""
+
+import json
+import threading
+
+import httpx
+import pytest
+
+from tests.fake_model import PSEUDO_PREFIX
+
+BATCH_PROMPT = 'Translate.\n\n## Here is the input:\n\n[\n  {"id": 0, "input": "Hello {v1} 42", "layout_label": "text"}\n]'
+
+
+def post(model, content, timeout=10):
+    return httpx.post(
+        f"{model.base_url}/chat/completions",
+        json={"model": "m", "temperature": 1.0, "messages": [{"role": "user", "content": content}]},
+        timeout=timeout,
+    )
+
+
+def test_records_requests_and_answers_batches_with_pseudo_translation(fake_model):
+    response = post(fake_model, BATCH_PROMPT)
+
+    content = response.json()["choices"][0]["message"]["content"]
+    assert json.loads(content) == [{"id": 0, "output": PSEUDO_PREFIX + "Hello {v1} 42"}]
+    [request] = fake_model.requests
+    assert request.kind == "translate_batch"
+    assert request.body["temperature"] == 1.0
+
+
+def test_custom_responder_per_kind(fake_model):
+    fake_model.respond("other", lambda body: "custom")
+
+    assert post(fake_model, "anything").json()["choices"][0]["message"]["content"] == "custom"
+
+
+@pytest.mark.parametrize("error, status", [("500", 500), ("429", 429)])
+def test_injects_http_errors_on_the_nth_request_of_a_kind(fake_model, error, status):
+    fake_model.inject_error(error, kind="translate_batch", nth=2)
+
+    codes = [post(fake_model, BATCH_PROMPT).status_code for _ in range(3)]
+
+    assert codes == [200, status, 200]
+
+
+@pytest.mark.parametrize("error, content", [("empty", ""), ("invalid_json", "this is not json {")])
+def test_injects_bad_content(fake_model, error, content):
+    fake_model.inject_error(error)
+
+    assert post(fake_model, BATCH_PROMPT).json()["choices"][0]["message"]["content"] == content
+
+
+def test_injects_a_timeout(fake_model):
+    fake_model.inject_error("timeout")
+
+    with pytest.raises(httpx.ReadTimeout):
+        post(fake_model, BATCH_PROMPT, timeout=0.5)
+
+
+def test_counts_max_requests_in_flight_under_delay(fake_model):
+    fake_model.delay = 0.5
+    threads = [threading.Thread(target=post, args=(fake_model, "x")) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert fake_model.max_in_flight == 3
