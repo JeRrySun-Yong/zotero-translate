@@ -1013,6 +1013,8 @@ class ILTranslatorLLMOnly:
                 "## Glossary\n"
                 "If a glossary is provided:\n"
                 "- Always use the exact target term.\n"
+                "- A target term identical to its source term is a key concept of this paper: "
+                "keep it in English exactly as written, never translate it.\n"
                 "- Apply glossary items even inside tags or when broken by hyphens/line breaks.\n"
                 "- If glossary does NOT include a term, translate it naturally.\n\n"
             )

@@ -1145,6 +1145,9 @@ class ILTranslator:
             "Always use the glossary's **Target Term** for any occurrence of its **Source Term** "
             "(including variants, inside tags, or broken across lines).",
             "",
+            "A Target Term identical to its Source Term is a key concept of this paper: "
+            "keep it in English exactly as written, never translate it.",
+            "",
             "Unlisted terms are translated naturally.",
             "",
         ]

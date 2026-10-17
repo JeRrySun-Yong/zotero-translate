@@ -1,8 +1,9 @@
 """Layout of one task directory and its status file.
 
 The task directory holds the source PDF, the status file, the two output
-PDFs, the paper dossier, the task report and the log. The paper task subprocess writes the status file; the
-translation service reads it to answer status queries.
+PDFs, the paper dossier, the paper's term list, the task report and the
+log. The paper task subprocess writes the status file; the translation
+service reads it to answer status queries.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ STATUS_FILE = "status.json"
 LOG_FILE = "task.log"
 REPORT_FILE = "report.json"
 DOSSIER_FILE = "dossier.json"
+TERMS_FILE = "terms.json"
 OUTPUT_FILES = {"mono": "mono.pdf", "dual": "dual.pdf"}
+# Files that ``GET /tasks/{task_id}/files/{name}`` serves, by name.
+DOWNLOAD_FILES = {**OUTPUT_FILES, "terms": TERMS_FILE}
 
 QUEUED_STAGE = "排队中"
 DONE_STAGE = "完成"
@@ -40,4 +44,4 @@ def write_status(task_dir: Path, **fields) -> dict:
 
 
 def available_files(task_dir: Path) -> list[str]:
-    return [name for name, file in OUTPUT_FILES.items() if (Path(task_dir) / file).is_file()]
+    return [name for name, file in DOWNLOAD_FILES.items() if (Path(task_dir) / file).is_file()]

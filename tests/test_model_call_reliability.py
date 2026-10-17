@@ -49,7 +49,7 @@ def test_batch_failing_four_times_fails_the_task_and_a_resubmit_reuses_the_cache
     assert first["state"] == "failed"
     assert "管线模型" in first["error"]
     assert "第 1 页" in first["error"], first["error"]  # the excerpt has one page
-    assert first["files"] == []
+    assert first["files"] == ["terms"]  # made before translation; no PDF
     first_report = service.report(first["task_id"])
     assert len(first_report["failed_batches"]) >= 1
     assert first_report["failed_batches"][0]["page"] == 1

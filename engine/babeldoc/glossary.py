@@ -88,7 +88,11 @@ class Glossary:
             self.normalized_lookup[normalized_key] = (entry.source, entry.target)
             self.id_lookup.append((entry.source, entry.target))
 
-            hs_pattern.append((re.escape(entry.source).encode("utf-8"), idx))
+            # A hyphen may be followed by a space: the paragraph text joins a
+            # word broken after a hyphen at a line end with a space
+            # ("Agent-\nas-a-Judge" becomes "Agent- as-a-Judge").
+            pattern = re.escape(entry.source).replace(r"\-", r"\- ?")
+            hs_pattern.append((pattern.encode("utf-8"), idx))
 
         chunk_size = 20000
         for i, pattern_chunk in enumerate(

@@ -2,7 +2,8 @@
 
 ``serve`` starts the translation service. ``run`` runs one paper task on a
 PDF directly, without Zotero or the service, and writes ``mono.pdf``,
-``dual.pdf`` and ``report.json`` into the output directory. Both share the
+``dual.pdf``, ``dossier.json``, ``terms.json`` and ``report.json`` into the
+output directory. Both share the
 model response cache in the data directory.
 """
 
