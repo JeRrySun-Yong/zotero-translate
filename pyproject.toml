@@ -1,13 +1,23 @@
 # Development environment for zotero-translate.
 # Create or refresh the virtual environment with: uv sync
-# This is a virtual project (no build system yet); the engine under engine/
-# is installed in editable mode.
+# Our code lives in src/zotero_translate; the engine under engine/ is
+# installed in editable mode.
 
 [project]
 name = "zotero-translate"
-version = "0.0.0"
+version = "0.1.0"
 requires-python = "==3.12.*"
-dependencies = ["babeldoc"]
+dependencies = ["babeldoc", "httpx", "pymupdf"]
+
+[project.scripts]
+zotero-translate = "zotero_translate.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zotero_translate"]
 
 [dependency-groups]
 dev = ["pytest"]
@@ -21,3 +31,4 @@ babeldoc = { path = "engine", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["real_model: calls the real pipeline model; skipped unless ZT_REAL_MODEL_SMOKE=1"]

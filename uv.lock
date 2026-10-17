@@ -1493,9 +1493,11 @@ soap = [
 [[package]]
 name = "zotero-translate"
 version = "0.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "babeldoc" },
+    { name = "httpx" },
+    { name = "pymupdf" },
 ]
 
 [package.dev-dependencies]
@@ -1504,7 +1506,11 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "babeldoc", editable = "engine" }]
+requires-dist = [
+    { name = "babeldoc", editable = "engine" },
+    { name = "httpx" },
+    { name = "pymupdf" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest" }]
