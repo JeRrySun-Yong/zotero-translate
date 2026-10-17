@@ -65,7 +65,7 @@ def test_task_passes_through_each_stage_in_order_and_succeeds(finished_task):
 def test_progress_never_decreases(finished_task):
     progress = [status["progress"] for status in finished_task["polls"]]
     assert progress == sorted(progress)
-    assert 0 < len(set(progress))
+    assert any(0 < p < 100 for p in progress), "no progress seen while running"
 
 
 def test_mono_pdf_holds_the_pseudo_translation(finished_task):
@@ -99,3 +99,10 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
         assert request.body["model"] == FAKE_MODEL_NAME
         assert request.body["reasoning_effort"] == "high"
         assert request.body["temperature"] == 1.0
+
+
+def test_only_paragraph_batches_are_sent(finished_task):
+    """No automatic term extraction and no one-paragraph redo requests."""
+    kinds = {request.kind for request in finished_task["model"].requests}
+
+    assert kinds == {"translate_batch"}
