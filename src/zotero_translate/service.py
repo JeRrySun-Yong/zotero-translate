@@ -13,7 +13,12 @@ HTTP interface (the contract with the translation plugin):
 The service listens on 127.0.0.1 only and has no authentication. Tasks run
 first in, first out, one at a time; each paper task runs in its own
 subprocess, which reports progress through the status file in its task
-directory.
+directory. Successful model responses are cached in ``<data_dir>/model-cache``
+and shared by all tasks.
+
+When the service starts, every task left queued or running by an earlier
+service is marked as failed ("翻译服务重启，任务中断"); there is no resuming.
+A task subprocess ends itself when its service is gone.
 """
 
 from __future__ import annotations
@@ -35,8 +40,10 @@ from pathlib import Path
 from zotero_translate import __version__
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import FIRST_STAGE
+from zotero_translate.settings import model_cache_dir
 
 HOST = "127.0.0.1"
+RESTART_ERROR = "翻译服务重启，任务中断"
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -46,11 +53,23 @@ class TaskQueue:
     def __init__(self, data_dir: Path, env_file: Path, concurrency: int):
         self.tasks_dir = Path(data_dir) / "tasks"
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir = model_cache_dir(data_dir)
         self.env_file = Path(env_file)
         self.concurrency = concurrency
         self._queue: collections.deque[str] = collections.deque()  # waiting tasks
         self._cond = threading.Condition()
+        self._fail_unfinished_tasks()
         threading.Thread(target=self._run_forever, name="task-runner", daemon=True).start()
+
+    def _fail_unfinished_tasks(self) -> None:
+        for status_file in self.tasks_dir.glob(f"*/{td.STATUS_FILE}"):
+            directory = status_file.parent
+            try:
+                state = td.read_status(directory)["state"]
+            except (OSError, ValueError, KeyError):
+                continue
+            if state not in td.TERMINAL_STATES:
+                td.write_status(directory, state="failed", error=RESTART_ERROR)
 
     def submit(self, pdf: bytes, filename: str) -> str:
         task_id = uuid.uuid4().hex
@@ -130,6 +149,8 @@ class TaskQueue:
             str(self.env_file),
             "--concurrency",
             str(self.concurrency),
+            "--cache-dir",
+            str(self.cache_dir),
         ]
         with (directory / td.LOG_FILE).open("ab") as log:
             exit_code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode

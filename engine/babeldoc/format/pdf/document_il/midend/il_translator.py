@@ -12,6 +12,10 @@ from tqdm import tqdm
 
 import babeldoc.format.pdf.document_il.il_version_1 as il_version_1
 from babeldoc.babeldoc_exception.BabelDOCException import ContentFilterError
+from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
+from babeldoc.babeldoc_exception.BabelDOCException import (
+    TranslationRequestsFailedError,
+)
 from babeldoc.format.pdf.document_il import Document
 from babeldoc.format.pdf.document_il import GraphicState
 from babeldoc.format.pdf.document_il import Page
@@ -364,6 +368,10 @@ class ILTranslator:
         self.use_as_fallback = False
         self.add_content_filter_hint_lock = threading.Lock()
         self.docs = None
+        # Translation requests that failed for good, shared with the LLM-only
+        # translator that uses this one as its fallback.
+        self._request_errors: list[TranslationRequestError] = []
+        self._request_errors_lock = threading.Lock()
 
         # Pre-compile patterns for placeholder-like tokens that may be hallucinated by LLM.
         # We only consider the same shapes as our own formula & rich-text placeholders.
@@ -384,6 +392,27 @@ class ILTranslator:
             return len(self.tokenizer.encode(text, disallowed_special=()))
         except Exception:
             return 0
+
+    @property
+    def has_request_error(self) -> bool:
+        """True once a translation request failed for good: send no more requests."""
+        return bool(self._request_errors)
+
+    def record_request_error(self, error: TranslationRequestError, page: Page | None):
+        page_number = getattr(page, "page_number", None)
+        logger.error(f"Translation request failed for good on page index {page_number}: {error}")
+        with self._request_errors_lock:
+            self._request_errors.append(
+                TranslationRequestError(
+                    error.message,
+                    page_number=None if page_number is None else page_number + 1,
+                )
+            )
+
+    def raise_if_request_failed(self):
+        with self._request_errors_lock:
+            if self._request_errors:
+                raise TranslationRequestsFailedError(list(self._request_errors))
 
     def translate(self, docs: Document):
         self.docs = docs
@@ -414,6 +443,7 @@ class ILTranslator:
             ) as executor:
                 for page in docs.page:
                     self.process_page(page, executor, pbar, tracker.new_page())
+        self.raise_if_request_failed()
 
         path = self.translation_config.get_working_file_path("translate_tracking.json")
 
@@ -1226,6 +1256,8 @@ class ILTranslator:
         """Translate a paragraph using pre and post processing functions."""
         self.translation_config.raise_if_cancelled()
         with PbarContext(pbar):
+            if self.has_request_error:
+                return
             try:
                 if self.use_as_fallback:
                     # il translator llm only modifies unicode in some situations
@@ -1269,6 +1301,9 @@ class ILTranslator:
             except ContentFilterError as e:
                 logger.warning(f"ContentFilterError: {e.message}")
                 self.add_content_filter_hint(page, paragraph)
+                return
+            except TranslationRequestError as e:
+                self.record_request_error(e, page)
                 return
             except Exception as e:
                 logger.exception(

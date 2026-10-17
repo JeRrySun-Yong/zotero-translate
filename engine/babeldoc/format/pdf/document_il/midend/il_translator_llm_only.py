@@ -8,6 +8,7 @@ import Levenshtein
 import tiktoken
 from tqdm import tqdm
 
+from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
 from babeldoc.format.pdf.document_il import Document
 from babeldoc.format.pdf.document_il import Page
 from babeldoc.format.pdf.document_il import PdfFont
@@ -242,6 +243,9 @@ class ILTranslatorLLMOnly:
                             executor2,
                             translated_ids,
                         )
+        # A batch whose request failed for good fails the stage instead of
+        # leaving its paragraphs in the source language.
+        self.il_translator.raise_if_request_failed()
 
         path = self.translation_config.get_working_file_path("translate_tracking.json")
 
@@ -637,6 +641,8 @@ class ILTranslatorLLMOnly:
     ):
         """Translate a paragraph using pre and post processing functions."""
         self.translation_config.raise_if_cancelled()
+        if self.il_translator.has_request_error:
+            return
         should_translate_paragraph = []
         try:
             inputs = []
@@ -706,35 +712,21 @@ class ILTranslatorLLMOnly:
 
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_input(final_input)
+            # The translator retries an answer that does not parse like a
+            # failed request (validate_output raises on it).
             llm_output = self.translate_engine.llm_translate(
                 final_input,
                 rate_limit_params={
                     "paragraph_token_count": paragraph_token_count,
                     "request_json_mode": True,
+                    "validate_output": lambda output: self._parse_llm_output(
+                        output, len(inputs)
+                    ),
                 },
             )
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_output(llm_output)
-            llm_output = llm_output.strip()
-
-            llm_output = self._clean_json_output(llm_output)
-
-            parsed_output = json.loads(llm_output)
-
-            if isinstance(parsed_output, dict) and parsed_output.get(
-                "output", parsed_output.get("input", False)
-            ):
-                parsed_output = [parsed_output]
-
-            translation_results = {
-                item["id"]: item.get("output", item.get("input"))
-                for item in parsed_output
-            }
-
-            if len(translation_results) != len(inputs):
-                raise Exception(
-                    f"Translation results length mismatch. Expected: {len(inputs)}, Got: {len(translation_results)}"
-                )
+            translation_results = self._parse_llm_output(llm_output, len(inputs))
 
             for id_, output in translation_results.items():
                 should_fallback = True
@@ -849,6 +841,11 @@ class ILTranslatorLLMOnly:
                     else:
                         self.ok_count += 1
 
+        except TranslationRequestError as e:
+            for llm_translate_tracker in llm_translate_trackers:
+                llm_translate_tracker.set_error_message(f"Request failed for good: {e}")
+            first = should_translate_paragraph[0] if should_translate_paragraph else 0
+            self.il_translator.record_request_error(e, batch_paragraph.pages[first])
         except Exception as e:
             error_message = f"Error {e} during translation. try fallback"
             logger.warning(error_message)
@@ -981,6 +978,25 @@ class ILTranslatorLLMOnly:
             glossary_tables_block=glossary_tables_block,
             lang_out=self.translation_config.lang_out,
         )
+
+    def _parse_llm_output(self, llm_output: str, expected_count: int) -> dict:
+        """Return ``{id: output}`` from a batch answer; raise if it does not parse."""
+        parsed_output = json.loads(self._clean_json_output(llm_output.strip()))
+
+        if isinstance(parsed_output, dict) and parsed_output.get(
+            "output", parsed_output.get("input", False)
+        ):
+            parsed_output = [parsed_output]
+
+        translation_results = {
+            item["id"]: item.get("output", item.get("input")) for item in parsed_output
+        }
+
+        if len(translation_results) != expected_count:
+            raise Exception(
+                f"Translation results length mismatch. Expected: {expected_count}, Got: {len(translation_results)}"
+            )
+        return translation_results
 
     def _clean_json_output(self, llm_output: str) -> str:
         # Clean up JSON output by removing common wrapper tags
