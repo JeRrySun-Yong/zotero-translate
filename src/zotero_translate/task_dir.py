@@ -1,7 +1,7 @@
 """Layout of one task directory and its status file.
 
 The task directory holds the source PDF, the status file, the two output
-PDFs, the task report and the log. The paper task subprocess writes the status file; the
+PDFs, the paper dossier, the task report and the log. The paper task subprocess writes the status file; the
 translation service reads it to answer status queries.
 """
 
@@ -15,6 +15,7 @@ SOURCE_PDF = "source.pdf"
 STATUS_FILE = "status.json"
 LOG_FILE = "task.log"
 REPORT_FILE = "report.json"
+DOSSIER_FILE = "dossier.json"
 OUTPUT_FILES = {"mono": "mono.pdf", "dual": "dual.pdf"}
 
 QUEUED_STAGE = "排队中"

@@ -11,6 +11,8 @@ Test fixture only. It can:
 
 Request kinds are recognised from the message content:
 
+- ``dossier``: the paper dossier request, recognised by ``DOSSIER_MARKER``
+  in its instructions. The default answer is ``FAKE_DOSSIER`` as JSON.
 - ``translate_batch``: an engine paragraph batch, i.e. the prompt ends with a
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
@@ -32,6 +34,17 @@ from http.server import ThreadingHTTPServer
 from typing import Callable
 
 PSEUDO_PREFIX = "伪译文"
+
+# A phrase of the paper dossier request's instructions.
+DOSSIER_MARKER = "Return the paper dossier"
+
+FAKE_DOSSIER = {
+    "paper_title": "AutoDesign: Meta-Harness Optimization for Long-Horizon Agentic Design",
+    "discipline": "假学科：计算机视觉",
+    "paper_summary_zh": "假概要：本文提出 AutoDesign 框架。",
+    "section_summaries_zh": [{"section": "8 Conclusion", "summary_zh": "假章节摘要：结论。"}],
+    "translation_pitfalls_zh": ["假易错点：harness 不要译成线束。"],
+}
 
 _ERRORS = {"500", "429", "timeout", "empty", "invalid_json"}
 
@@ -87,6 +100,7 @@ class FakeModel:
         self._faults: list[_Fault] = []
         self._same_request_faults: list[_SameRequestFault] = []
         self._responders: dict[str, Responder] = {
+            "dossier": lambda body: json.dumps(FAKE_DOSSIER, ensure_ascii=False),
             "translate_batch": pseudo_translate_batch,
             "single_paragraph": pseudo_translate_single,
             "other": lambda body: "ok",
@@ -219,6 +233,8 @@ def classify(body: dict) -> str:
         return "single_paragraph"
     if batch_items(content) is not None:
         return "translate_batch"
+    if any(DOSSIER_MARKER in (m.get("content") or "") for m in body.get("messages", [])):
+        return "dossier"
     return "other"
 
 
