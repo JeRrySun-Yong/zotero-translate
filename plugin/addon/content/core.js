@@ -56,9 +56,13 @@ var ZoteroTranslateCore = (() => {
     failed: "失败",
   };
 
-  /** What the task window shows for one task. */
+  /** What the task window shows for one task; a waiting task shows its
+   *  place in the service's queue. */
   function taskRow(task) {
-    const status = STATUS_LABELS[task.state] || task.state;
+    let status = STATUS_LABELS[task.state] || task.state;
+    if (task.state === "queued" && task.queuePosition) {
+      status = `${status}（第 ${task.queuePosition} 位）`;
+    }
     return {
       title: task.title,
       stage: task.stage || "",
