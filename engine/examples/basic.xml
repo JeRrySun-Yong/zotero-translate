@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wp:document xmlns:wp="urn:ns:yadt:dpml">
+    <wp:page>
+        <wp:p offsetX="120pt" offsetY="100pt" width="100%" height="auto" align="justify">
+            <wp:run font-family="Arial" color="000000">
+                This is a simple paragraph with some text.
+                <wp:break type="line"/>
+                And this is a new line.
+            </wp:run>
+        </wp:p>
+    </wp:page>
+</wp:document>

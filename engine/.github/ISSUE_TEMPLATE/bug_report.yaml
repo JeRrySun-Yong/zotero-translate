@@ -1,0 +1,108 @@
+name: "🐞 Bug Report"
+description: Create a report to help us improve
+labels: ['bug']
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have searched existing issues
+          required: true
+        - label: I spent at least 5 minutes investigating and preparing this report
+          required: true
+        - label: I confirmed this is not caused by a network issue
+          required: true
+        - label: I have fully read and understood the [README](https://github.com/funstory-ai/BabelDOC/blob/main/README.md)
+          required: true
+        - label: I am certain that this issue is with BabelDOC itself and can be reproduced through the BabelDOC cli
+          required: true
+        - label: I have uploaded the original file, or confirmed that this issue is unrelated to the original file
+          required: true
+        - label: I have uploaded the log.
+          required: true
+        - label: I confirm that the latest version of BabelDOC is being used.
+          required: true
+        - label: I am aware that the issue section of this project is only for submitting bugs that are clearly related to the BabelDOC core, with complete reproduction steps and relevant logs attached.** Otherwise, issues will be closed directly.
+          required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for using **BabelDOC** and helping us improve it! 🙏
+        Please confirm again that the above checklist items have been carefully executed! (If you have not carefully executed them, the issue will be closed directly without any response)
+
+        Please also note:
+        - If you are using a downstream project like pdf2zh-next, please submit an issue directly to the downstream application. Only when you confirm that this issue is a problem with the core library of BabelDOC, submit this issue.
+        - The CLI is only used for debugging purposes, we do not provide any technical support for CLI usage.
+
+  - type: markdown
+    attributes:
+      value: |
+        Please note! Users of immersive translate online services should contact customer service and provide their translation ID. **Feedback related to online services is not handled here.**
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide your system details (required)
+      value: |
+        - OS:
+        - Python:
+        - BabelDOC:
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: describe
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Help us reproduce the issue. Issues that do not provide reproduction steps will be closed directly.
+      value: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output or Screenshots
+      description: Copy and paste any logs or attach screenshots. This will be formatted automatically.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: pdf
+    attributes:
+      label: Original PDF File
+      description: Upload the input PDF if applicable. (Issues related to specific PDFs but without uploaded files will be closed directly.)
+    validations:
+      required: false
+
+  - type: textarea
+    id: others
+    attributes:
+      label: Additional Context
+      description: Anything else we should know?
+    validations:
+      required: false

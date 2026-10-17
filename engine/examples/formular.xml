@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wp:document xmlns:wp="urn:ns:yadt:dpml">
+    <wp:page>
+        <wp:p align="center">
+            <wp:run>Here's a mathematical formula: 
+            <wp:math>\frac{-b \pm \sqrt{b^2-4ac}}{2a}</wp:math>
+            And here's a special symbol: 
+            <wp:symbol src="/path/to/symbol.svg"/>
+            </wp:run>
+
+        </wp:p>
+    </wp:page>
+</wp:document>

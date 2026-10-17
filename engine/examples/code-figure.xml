@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wp:document xmlns:wp="urn:ns:yadt:dpml">
+    <wp:page>
+        <wp:object offsetX="20pt" offsetY="20pt" width="90%" height="auto">
+            <wp:codeblock language="python">
+                <wp:codeline number="1" highlight="true">def hello_world():</wp:codeline>
+                <wp:codeline number="2">    print("Hello, World!")</wp:codeline>
+                <wp:codeline number="3" highlight="false">    return None</wp:codeline>
+            </wp:codeblock>
+        </wp:object>
+        <wp:object offsetX="20pt" offsetY="20pt" width="90%" height="auto">
+            <wp:figure 
+                src="/path/to/image.png" 
+                width="300px" 
+                height="200px"
+                caption="Sample figure caption"
+                title="Sample figure title"/>
+        </wp:object>
+    </wp:page>
+</wp:document>

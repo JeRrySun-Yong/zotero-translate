@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wp:document xmlns:wp="urn:ns:yadt:dpml">
+    <!-- 第一页：标题页 -->
+    <wp:page>
+        <wp:p offsetX="0pt" offsetY="100pt" width="100%" height="auto" align="center">
+            <wp:run font-family="Times New Roman" color="000080">
+                Technical Documentation
+                <wp:break type="line"/>
+                <wp:break type="line"/>
+            </wp:run>
+            <wp:run font-family="Arial" color="404040">
+                Version 2.0
+                <wp:break type="line"/>
+                <wp:break type="line"/>
+            </wp:run>
+            <wp:run font-family="Calibri" color="808080">
+                Last Updated: December 2024
+            </wp:run>
+        </wp:p>
+        
+        <!-- Logo -->
+        <wp:object offsetX="40%" offsetY="250pt" width="20%" height="auto">
+            <wp:figure 
+                src="/images/logo.svg" 
+                width="200px" 
+                height="200px"
+                title="Company Logo"/>
+        </wp:object>
+    </wp:page>
+
+    <!-- 第二页：目录 -->
+    <wp:page>
+        <wp:p offsetX="50pt" offsetY="30pt" width="90%" height="auto">
+            <wp:run font-family="Arial" color="000000" background-color="F0F0F0">
+                Table of Contents
+                <wp:break type="line"/>
+                <wp:break type="line"/>
+            </wp:run>
+        </wp:p>
+            
+        <wp:table frame="none" width="100%" height="auto" colsep="0" rowsep="0">
+            <wp:cols>
+                <wp:col colwidth="80%"/>
+                <wp:col colwidth="20%"/>
+            </wp:cols>
+            <wp:tbody>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>1. Introduction</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p align="right">
+                            <wp:run>3</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>2. Technical Specifications</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p align="right">
+                            <wp:run>4</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:tbody>
+        </wp:table>
+    </wp:page>
+
+    <!-- 第三页：正文开始 -->
+    <wp:page>
+        <wp:p offsetX="50pt" offsetY="30pt" width="90%" height="auto">
+            <wp:run font-family="Arial" color="000080">
+                1. Introduction
+                <wp:break type="line"/>
+                <wp:break type="line"/>
+            </wp:run>
+            <wp:run>
+                This document provides comprehensive technical specifications and implementation guidelines.
+                <wp:break type="line"/>
+                The following sections detail our system architecture and components.
+            </wp:run>
+        </wp:p>
+
+        <!-- 带数学公式的说明 -->
+        <wp:p offsetX="50pt" offsetY="30pt" width="90%" height="auto">
+            <wp:run>
+                The core algorithm complexity is calculated as follows: 
+                <wp:math>\sum_{i=1}^{n} O(n \log n)</wp:math>
+                <wp:break type="line"/>
+                Where n represents the input size.
+            </wp:run>
+        </wp:p>
+
+        <!-- 示意图 -->
+        <wp:object offsetX="50pt" offsetY="250pt" width="90%" height="auto">
+            <wp:figure 
+                src="/diagrams/architecture.svg" 
+                width="400px" 
+                height="300px"
+                caption="System Architecture Overview"
+                title="High-level system architecture diagram"/>
+        </wp:object>
+    </wp:page>
+
+    <!-- 第四页：技术规格 -->
+    <wp:page>
+        <wp:p offsetX="50pt" offsetY="30pt" width="90%" height="auto">
+            <wp:run font-family="Arial" color="000080">
+                2. Technical Specifications
+                <wp:break type="line"/>
+                <wp:break type="line"/>
+            </wp:run>
+        </wp:p>
+
+        <!-- 规格表格 -->
+        <wp:table frame="all" framestyle="single" width="100%" height="auto" rowsep="1" colsep="1">
+            <wp:cols>
+                <wp:col colwidth="30%"/>
+                <wp:col colwidth="70%"/>
+            </wp:cols>
+            <wp:thead>
+                <wp:tr>
+                    <wp:td shade="E6E6FA" borderstyle="single">
+                        <wp:p align="center">
+                            <wp:run font-family="Arial Bold">Parameter</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td shade="E6E6FA" borderstyle="single">
+                        <wp:p align="center">
+                            <wp:run font-family="Arial Bold">Specification</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:thead>
+            <wp:tbody>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Processing Speed</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>500 MIPS</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Memory Usage</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>4GB - 8GB RAM</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:tbody>
+        </wp:table>
+
+        <!-- 示例代码块 -->
+        <wp:object offsetX="50pt" offsetY="300pt" width="90%" height="auto">
+            <wp:codeblock language="python">
+                <wp:codeline number="1" highlight="true">class SystemConfig:</wp:codeline>
+                <wp:codeline number="2">    def __init__(self):</wp:codeline>
+                <wp:codeline number="3">        self.max_memory = 8192  # MB</wp:codeline>
+                <wp:codeline number="4">        self.threads = 4</wp:codeline>
+                <wp:codeline number="5" highlight="true">    def optimize(self):</wp:codeline>
+                <wp:codeline number="6">        return self.max_memory // self.threads</wp:codeline>
+            </wp:codeblock>
+        </wp:object>
+
+        <!-- 补充说明 -->
+        <wp:p offsetX="50pt" offsetY="500pt" width="90%" height="auto">
+            <wp:run color="666666">
+                Note: The above specifications are subject to environmental conditions.
+                <wp:break type="line"/>
+                Please refer to 
+            </wp:run>
+            <wp:run color="0000FF">
+                documentation
+            </wp:run>
+            <wp:run color="666666">
+                for detailed implementation guidelines.
+            </wp:run>
+        </wp:p>
+    </wp:page>
+
+    <!-- 第五页：图表和特殊内容 -->
+    <wp:page>
+        <wp:p offsetX="50pt" offsetY="30pt" width="90%" height="auto" align="center">
+            <wp:run font-family="Arial" color="000080">
+                Performance Metrics
+                <wp:break type="line"/>
+            </wp:run>
+        </wp:p>
+
+        <!-- 性能图表 -->
+        <wp:object>
+            <wp:figure 
+                src="/charts/performance.svg" 
+                width="600px" 
+                height="400px"
+                caption="System Performance Under Various Loads"
+                title="Performance Chart"/>
+        </wp:object>
+
+        <!-- 带有特殊符号的说明 -->
+        <wp:p>
+            <wp:run>
+                Status indicators: 
+                <wp:symbol src="/icons/check.svg"/>
+                - Operational, 
+                <wp:symbol src="/icons/warning.svg"/>
+                - Warning, 
+                <wp:symbol src="/icons/error.svg"/>
+                - Error
+            </wp:run>
+        </wp:p>
+
+        <!-- 复杂表格示例：合并单元格 -->
+        <wp:table frame="all" framestyle="single" width="100%">
+            <wp:cols>
+                <wp:col colwidth="25%"/>
+                <wp:col colwidth="25%"/>
+                <wp:col colwidth="25%"/>
+                <wp:col colwidth="25%"/>
+            </wp:cols>
+            <wp:thead>
+                <wp:tr>
+                    <wp:td colspan="4" align="center" shade="E0E0E0">
+                        <wp:p>
+                            <wp:run font-family="Arial Bold">System Status Overview</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:thead>
+            <wp:tbody>
+                <wp:tr>
+                    <wp:td rowspan="2">
+                        <wp:p>
+                            <wp:run>Component</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Status</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td colspan="2">
+                        <wp:p>
+                            <wp:run>Notes</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Active</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td colspan="2">
+                        <wp:p>
+                            <wp:run>Running normally</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:tbody>
+        </wp:table>
+    </wp:page>
+</wp:document>

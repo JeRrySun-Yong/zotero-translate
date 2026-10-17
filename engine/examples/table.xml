@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wp:document xmlns:wp="urn:ns:yadt:dpml">
+    <wp:page>
+        <wp:table offsetX="20pt" offsetY="20pt" width="90%" height="auto" frame="all" framestyle="single">
+            <wp:cols>
+                <wp:col colwidth="30%"/>
+                <wp:col colwidth="70%"/>
+            </wp:cols>
+            <wp:thead>
+                <wp:tr>
+                    <wp:td align="center" shade="E0E0E0">
+                        <wp:p>
+                            <wp:run font-family="Arial Bold">Header 1</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td align="center" shade="E0E0E0">
+                        <wp:p>
+                            <wp:run font-family="Arial Bold">Header 2</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:thead>
+            <wp:tbody>
+                <wp:tr>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Cell 1</wp:run>
+                        </wp:p>
+                    </wp:td>
+                    <wp:td>
+                        <wp:p>
+                            <wp:run>Cell 2</wp:run>
+                        </wp:p>
+                    </wp:td>
+                </wp:tr>
+            </wp:tbody>
+        </wp:table>
+    </wp:page>
+</wp:document>
