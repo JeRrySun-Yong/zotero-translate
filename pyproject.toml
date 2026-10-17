@@ -1,0 +1,23 @@
+# Development environment for zotero-translate.
+# Create or refresh the virtual environment with: uv sync
+# This is a virtual project (no build system yet); the engine under engine/
+# is installed in editable mode.
+
+[project]
+name = "zotero-translate"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = ["babeldoc"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+# BabelDOC 0.6.4 imports bitstring.BitStream, which bitstring 5.0 removed.
+constraint-dependencies = ["bitstring<5"]
+
+[tool.uv.sources]
+babeldoc = { path = "engine", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
