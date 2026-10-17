@@ -155,3 +155,18 @@ def test_batch_on_the_first_page_does_not_name_the_conclusion(finished_task):
         _, parts = context_parts(request.prompt)
         assert "Conclusion" not in parts[SECTION_PART]
         assert "Transforming multimodal sources" not in parts[BEFORE_PART]
+
+
+def test_dossier_without_the_spec_fields_is_retried_then_fails_the_task(
+    fake_model, start_service
+):
+    incomplete = {k: v for k, v in FAKE_DOSSIER.items() if k != "translation_pitfalls_zh"}
+    fake_model.respond("dossier", lambda body: json.dumps(incomplete, ensure_ascii=False))
+    service = start_service(fake_model)
+
+    final = service.wait(service.submit())
+
+    assert final["state"] == "failed"
+    assert "论文档案" in final["error"], final["error"]
+    assert len(fake_model.requests_of("dossier")) == 4  # first attempt + 3 retries
+    assert fake_model.requests_of("translate_batch") == []
