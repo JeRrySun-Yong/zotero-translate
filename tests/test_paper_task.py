@@ -17,6 +17,8 @@ from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import FakeModel
 
 STAGES = ["排队中", "解析版面", "翻译与审校", "排版", "完成"]
+# Part of the watermark sentence the engine adds unless told not to.
+WATERMARK_MARK = "funstory.ai"
 # The first line of the excerpt's abstract.
 SOURCE_PHRASE = "Transforming multimodal sources into condensed and structured media outputs"
 
@@ -70,6 +72,11 @@ def test_mono_pdf_holds_the_pseudo_translation(finished_task):
     mono = pdf_text(finished_task["mono"])
 
     assert PSEUDO_PREFIX in mono
+
+
+def test_pdfs_carry_no_engine_watermark(finished_task):
+    for name in ("mono", "dual"):
+        assert WATERMARK_MARK not in pdf_text(finished_task[name]), name
 
 
 def test_dual_pdf_holds_both_source_and_pseudo_translation(finished_task):
