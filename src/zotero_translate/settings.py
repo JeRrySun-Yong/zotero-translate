@@ -1,0 +1,78 @@
+"""Settings for the translation service and the paper task.
+
+Credentials (endpoint, API key, model name) come from an environment file
+outside the repository. The plugin cannot change any of these settings.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from dataclasses import field
+from pathlib import Path
+
+DEFAULT_MODEL = "gemini-3.8-flash-high"
+DEFAULT_CONCURRENCY = 40
+DEFAULT_PORT = 8920
+DEFAULT_DATA_DIR = Path(
+    os.environ.get(
+        "ZT_DATA_DIR", Path.home() / "Library" / "Application Support" / "zotero-translate"
+    )
+)
+DEFAULT_ENV_FILE = Path(
+    os.environ.get("ZT_ENV_FILE", Path.home() / ".config" / "zotero-translate" / "model.env")
+)
+
+_ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+
+
+class SettingsError(Exception):
+    """The environment file is missing or incomplete."""
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """How the pipeline model client calls the pipeline model."""
+
+    base_url: str
+    api_key: str = field(repr=False)
+    model: str = DEFAULT_MODEL
+    concurrency: int = DEFAULT_CONCURRENCY
+    reasoning_effort: str = "high"
+    temperature: float = 1.0
+    timeout_seconds: float = 240.0
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """Parse ``KEY=VALUE`` lines; ignore blank lines and comments."""
+    values: dict[str, str] = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ENV_LINE.match(line)
+        if match:
+            value = match.group(2)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            values[match.group(1)] = value
+    return values
+
+
+def load_model_settings(
+    env_file: Path, concurrency: int = DEFAULT_CONCURRENCY
+) -> ModelSettings:
+    """Read ``OPENAI_BASE_URL``, ``OPENAI_API_KEY`` and ``AI_DEFAULT_MODEL``."""
+    env_file = Path(env_file)
+    if not env_file.is_file():
+        raise SettingsError(f"找不到管线模型的环境文件：{env_file}")
+    values = read_env_file(env_file)
+    missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not values.get(k)]
+    if missing:
+        raise SettingsError(f"环境文件 {env_file} 缺少：{', '.join(missing)}")
+    return ModelSettings(
+        base_url=values["OPENAI_BASE_URL"].rstrip("/"),
+        api_key=values["OPENAI_API_KEY"],
+        model=values.get("AI_DEFAULT_MODEL") or DEFAULT_MODEL,
+        concurrency=concurrency,
+    )
