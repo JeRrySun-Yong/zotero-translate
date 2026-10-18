@@ -4,8 +4,10 @@ It records the time spent in each stage, the pipeline model client's
 counters (HTTP requests sent, cache hits, retries, the maximum number of
 requests in flight), the batches whose requests failed for good and the
 term list counts with the spellings dropped because the source lacks them,
-and for each key concept the pages of its first-mention glosses in the
-abstract and in the body.
+for each key concept the pages of its first-mention glosses in the
+abstract and in the body, the review counts (paragraphs the review changed,
+with draft and reviewed text; paragraphs that fell back to their draft) and
+the paragraphs that kept their source text, with page and reason.
 """
 
 from __future__ import annotations
@@ -15,10 +17,14 @@ import time
 from pathlib import Path
 
 from zotero_translate.model_client import ModelClient
+from zotero_translate.review import BatchReviewer
+from zotero_translate.review import KeptSource
 
 
 class TaskReport:
-    def __init__(self):
+    def __init__(self, kept: KeptSource):
+        self.kept = kept
+        self.reviewer: BatchReviewer | None = None
         self._started = time.monotonic()
         self._stages: list[list] = []  # [stage, start time, end time or None]
         self.state = "succeeded"
@@ -61,5 +67,7 @@ class TaskReport:
             "failed_batches": self.failed_batches,
             "terms": self.terms,
             "first_mentions": self.first_mentions,
+            "review": self.reviewer.report() if self.reviewer else None,
+            "kept_source_paragraphs": list(self.kept.paragraphs),
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

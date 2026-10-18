@@ -67,7 +67,12 @@ def main(argv: list[str] | None = None) -> int:
         result.model_requests,
         result.max_in_flight,
     )
-    write_status(state="succeeded", stage=td.DONE_STAGE, progress=100)
+    write_status(
+        state="succeeded",
+        stage=td.DONE_STAGE,
+        progress=100,
+        kept_source_paragraphs=result.kept_source_paragraphs,
+    )
     return 0
 
 

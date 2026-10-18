@@ -62,6 +62,7 @@ class PaperTaskResult:
     dual_pdf: Path
     model_requests: int
     max_in_flight: int
+    kept_source_paragraphs: int
 
 
 def run_paper_task(
@@ -91,6 +92,8 @@ def run_paper_task(
     from zotero_translate.first_mention import FirstMentionPlan
     from zotero_translate.model_client import ModelCallError
     from zotero_translate.model_client import ModelClient
+    from zotero_translate.review import BatchReviewer
+    from zotero_translate.review import KeptSource
     from zotero_translate.task_report import TaskReport
     from zotero_translate.terms import GLOSSARY_NAME
     from zotero_translate.terms import request_term_list
@@ -99,7 +102,8 @@ def run_paper_task(
     output_dir = Path(output_dir)
     engine_output = output_dir / "engine-output"
     client = ModelClient(settings)
-    report = TaskReport()
+    kept = KeptSource()
+    report = TaskReport(kept)
 
     def progress(stage: str, percent: int) -> None:
         report.enter_stage(stage)
@@ -131,6 +135,8 @@ def run_paper_task(
         )
         first_mentions = FirstMentionPlan(term_list.terms)
         report.first_mentions = first_mentions.placements
+        reviewer = BatchReviewer(client, dossier, kept)
+        report.reviewer = reviewer
 
         high_level.init()
         # The engine's thread pools and rate limiter must not hold requests
@@ -152,6 +158,8 @@ def run_paper_task(
             disable_same_text_fallback=True,
             batch_context_builder=BatchContext(dossier),
             first_mention_planner=first_mentions,
+            batch_reviewer=reviewer,
+            on_source_kept=kept.record,
             use_rich_pbar=False,
         )
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)
@@ -169,6 +177,7 @@ def run_paper_task(
             dual_pdf=dual,
             model_requests=client.request_count,
             max_in_flight=client.max_in_flight,
+            kept_source_paragraphs=len(kept.paragraphs),
         )
     except PaperTaskError as e:
         report.fail(str(e), e.failed_batches)

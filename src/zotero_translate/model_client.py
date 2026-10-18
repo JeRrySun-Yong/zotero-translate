@@ -40,7 +40,15 @@ Validator = Callable[[str], object]
 
 
 class ModelCallError(Exception):
-    """A model request failed for good; the message is a readable Chinese reason."""
+    """A model request failed for good; the message is a readable Chinese reason.
+
+    ``answered`` is True when at least one attempt got an answer that the
+    caller's ``validate`` rejected, i.e. the endpoint did answer.
+    """
+
+    def __init__(self, message: str, answered: bool = False):
+        super().__init__(message)
+        self.answered = answered
 
 
 class _RetryableError(Exception):
@@ -96,6 +104,7 @@ class ModelClient:
                     self.cache_hits += 1
                 return cached
         attempts = 1 + self.settings.max_retries
+        answered = False
         for attempt in range(1, attempts + 1):
             try:
                 content = self._send(body)
@@ -103,10 +112,11 @@ class ModelClient:
                     try:
                         validate(content)
                     except Exception as e:  # noqa: BLE001 - any rejection means "unparseable"
+                        answered = True
                         raise _RetryableError(f"无法解析管线模型的响应：{e}") from e
             except _RetryableError as e:
                 if attempt == attempts:
-                    raise ModelCallError(f"{e}（共尝试 {attempts} 次）") from e
+                    raise ModelCallError(f"{e}（共尝试 {attempts} 次）", answered) from e
                 wait = self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
                 logger.warning(
                     "model request failed (attempt %d/%d): %s; retrying in %.1fs",

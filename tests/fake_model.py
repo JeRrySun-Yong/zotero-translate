@@ -22,6 +22,9 @@ Request kinds are recognised from the message content:
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
   placeholders, numbers and key concepts are kept.
+- ``review``: the review of a batch's drafts, recognised by ``REVIEW_MARKER``;
+  it ends with a JSON array of ``{"id", "source", "draft", ...}`` objects.
+  The default answer returns every draft unchanged.
 - ``single_paragraph``: the engine's one-paragraph prompts, which it uses to
   redo a paragraph after a failed or rejected batch.
 - ``other``: anything else.
@@ -72,6 +75,9 @@ FAKE_TERM_LIST = {
         },
     ]
 }
+
+# A phrase of the review request's instructions.
+REVIEW_MARKER = "Review the draft translation"
 
 _ERRORS = {"500", "429", "timeout", "slow", "empty", "invalid_json"}
 
@@ -132,6 +138,7 @@ class FakeModel:
             "dossier": lambda body: json.dumps(FAKE_DOSSIER, ensure_ascii=False),
             "term_list": lambda body: json.dumps(FAKE_TERM_LIST, ensure_ascii=False),
             "translate_batch": pseudo_translate_batch,
+            "review": keep_drafts,
             "single_paragraph": pseudo_translate_single,
             "other": lambda body: "ok",
         }
@@ -265,6 +272,8 @@ def classify(body: dict) -> str:
     content = _last_user_content(body)
     if any(marker in content for marker in SINGLE_PARAGRAPH_MARKERS):
         return "single_paragraph"
+    if REVIEW_MARKER in content:
+        return "review"
     if batch_items(content) is not None:
         return "translate_batch"
     instructions = [m.get("content") or "" for m in body.get("messages", [])]
@@ -277,6 +286,15 @@ def classify(body: dict) -> str:
 
 def batch_items(content: str) -> list[dict] | None:
     """Return the trailing JSON array of ``{"id", "input"}`` items, if any."""
+    return _trailing_items(content, "input")
+
+
+def review_items(content: str) -> list[dict] | None:
+    """Return the trailing JSON array of ``{"id", "source", "draft"}`` items, if any."""
+    return _trailing_items(content, "draft")
+
+
+def _trailing_items(content: str, key: str) -> list[dict] | None:
     decoder = json.JSONDecoder()
     start = content.rfind("\n[")
     while start != -1:
@@ -288,7 +306,7 @@ def batch_items(content: str) -> list[dict] | None:
             end == len(content.rstrip())
             and isinstance(value, list)
             and value
-            and all(isinstance(i, dict) and "id" in i and "input" in i for i in value)
+            and all(isinstance(i, dict) and "id" in i and key in i for i in value)
         ):
             return value
         start = content.rfind("\n[", 0, start)
@@ -300,6 +318,14 @@ def pseudo_translate_batch(body: dict) -> str:
     return json.dumps(
         [{"id": i["id"], "output": PSEUDO_PREFIX + i["input"]} for i in items],
         ensure_ascii=False,
+    )
+
+
+def keep_drafts(body: dict) -> str:
+    """A review answer that returns every draft unchanged."""
+    items = review_items(_last_user_content(body)) or []
+    return json.dumps(
+        [{"id": i["id"], "output": i["draft"]} for i in items], ensure_ascii=False
     )
 
 
