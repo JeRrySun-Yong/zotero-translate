@@ -100,7 +100,8 @@ MALIANG_TERMS = [
     key_concept(["MLLMs", "MLLM"], "多模态大语言模型"),
     key_concept(["inspection"], "检查渲染结果"),
     key_concept(["programmable"], "以程序表达生成过程的"),
-    key_concept(["direct visual synthesis"], "直接合成像素的生成方式"),
+    # A gloss ending in a full stop: "（…。）" reads badly, the stop is dropped.
+    key_concept(["direct visual synthesis"], "直接合成像素的生成方式。"),
     key_concept(["flow-based models"], "基于流的生成模型"),
     basic_term(["rendering backends"], "渲染后端"),
 ]

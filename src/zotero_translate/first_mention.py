@@ -19,7 +19,8 @@ Only body-text paragraphs are first-mention positions: headings, captions,
 tables, footnotes, page furniture and text inside figures never are.
 
 For each key concept, the first paragraph in the abstract and the first in
-the body that contains one of its spellings get ``{"term", "gloss_zh"}``.
+the body that contains one of its spellings get ``{"term", "gloss_zh"}``
+(the gloss without a final full stop).
 Matching ignores case, whitespace and line-end hyphens, takes whole words
 (a plural "s"/"es" allowed), and skips an occurrence that lies inside a
 longer key concept's occurrence ("harness" inside "meta-harness").
@@ -44,6 +45,9 @@ _REFERENCES_HEADING = re.compile(
     r"^\W*(?:[0-9IVX]+\.?\s*)?(?:references|bibliography)\W*$", re.IGNORECASE
 )
 
+# Sentence punctuation at the end of a gloss, dropped: "（…。）" reads badly.
+_GLOSS_END = "。．.；;，,！!"
+
 Paragraph = tuple[int, str | None, str]  # page number (0-based), layout label, source text
 
 
@@ -61,7 +65,7 @@ class FirstMentionPlan:
         self._concepts = [
             _Concept(
                 first=term["english"][0],
-                gloss_zh=term["gloss_zh"],
+                gloss_zh=term["gloss_zh"].strip().rstrip(_GLOSS_END),
                 patterns=[(s, _spelling_pattern(s)) for s in term["english"]],
             )
             for term in terms
