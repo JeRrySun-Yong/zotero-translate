@@ -55,6 +55,7 @@ PROMPT_TEMPLATE = Template(
 - Tags (e.g., <style>, <b>, <code>): keep them exactly the same.  
   *Translate tag-internal text except code blocks (<code>…</code>)*.
 - Placeholders: `{v1}`, `{name}`, `%s`, `%d`, `[[...]]`, `%%...%%` — keep exactly unchanged.
+- Numbers (decimals, percentages, values with units), URLs, code identifiers, model names and dataset names: keep them exactly as in the input.
 - JSON keys or structure.
 
 $glossary_usage_rules_block$first_mention_rules_block
@@ -805,9 +806,27 @@ class ILTranslatorLLMOnly:
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_output(llm_output)
             translation_results = self._parse_llm_output(llm_output, len(inputs))
+            if self.translation_config.batch_reviewer is not None:
+                if self.il_translator.has_request_error:
+                    return
+                translation_results = self._review(
+                    translation_results,
+                    inputs,
+                    json_format_input,
+                    batch_paragraph,
+                    should_translate_paragraph,
+                    batch_text_for_glossary_matching,
+                )
 
             for id_, output in translation_results.items():
                 should_fallback = True
+                if output is None:
+                    # The review kept this paragraph's source text.
+                    should_fallback = False
+                    self.total_count += 1
+                    if pbar:
+                        pbar.advance(1)
+                    continue
                 try:
                     if not isinstance(output, str):
                         logger.warning(
@@ -962,6 +981,49 @@ class ILTranslatorLLMOnly:
                     title_paragraph=title_paragraph,
                     local_title_paragraph=local_title_paragraph,
                 )
+
+    def _review(
+        self,
+        translation_results: dict,
+        inputs: list,
+        json_format_input: list[dict],
+        batch_paragraph: BatchParagraph,
+        should_translate_paragraph: list[int],
+        batch_text: str,
+    ) -> dict:
+        """Review the batch's drafts; return {id: final text, or None to keep the source}.
+
+        Drafts that are not strings are left to the checks below, which
+        redo them one by one.
+        """
+        items = []
+        for obj in json_format_input:
+            id_ = obj["id"]
+            draft = translation_results.get(id_)
+            if not isinstance(draft, str):
+                continue
+            page = batch_paragraph.pages[should_translate_paragraph[id_]]
+            item = {
+                "id": id_,
+                "source": inputs[id_][0],
+                "draft": draft,
+                "page": page.page_number + 1,
+            }
+            if FIRST_MENTION_FIELD in obj:
+                item[FIRST_MENTION_FIELD] = obj[FIRST_MENTION_FIELD]
+            items.append(item)
+        if not items:
+            return translation_results
+        final = self.translation_config.batch_reviewer(
+            items, self._active_glossary_entries(batch_text)
+        )
+        return {**translation_results, **final}
+
+    def _active_glossary_entries(self, text: str) -> list[tuple[str, str]]:
+        entries: list[tuple[str, str]] = []
+        for glossary in self._cached_glossaries or []:
+            entries.extend(glossary.get_active_entries_for_text(text))
+        return sorted(set(entries))
 
     def _build_llm_prompt(
         self,

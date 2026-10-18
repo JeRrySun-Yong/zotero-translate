@@ -92,6 +92,7 @@ def _run(args) -> int:
     print(
         f"完成，用时 {time.monotonic() - started:.1f} 秒；"
         f"模型请求 {result.model_requests} 次，最大在途 {result.max_in_flight}；"
+        f"保留原文 {result.kept_source_paragraphs} 段；"
         f"单语译文 {result.mono_pdf}；双语对照 {result.dual_pdf}；"
         f"任务报告 {args.output_dir / 'report.json'}",
         flush=True,

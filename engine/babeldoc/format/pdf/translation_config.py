@@ -224,6 +224,11 @@ class TranslationConfig:
             [list[tuple[int, str | None, str]]], dict[int, list[dict]]
         ]
         | None = None,
+        batch_reviewer: Callable[
+            [list[dict], list[tuple[str, str]]], dict[int, str | None]
+        ]
+        | None = None,
+        on_source_kept: Callable[[int | None, str, str], None] | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -392,6 +397,15 @@ class TranslationConfig:
         # label, source text), returns paragraph index -> the first-mention
         # glosses to ask for in that paragraph ({"term", "gloss_zh"}).
         self.first_mention_planner = first_mention_planner
+        # Reviews an LLM batch after its draft translation. Given the items
+        # ({"id", "source", "draft", "page"} and the first-mention glosses
+        # field if any) and the batch's glossary entries, returns id -> the
+        # final text, or None to keep that paragraph's source text (the
+        # reviewer records it). None skips the review.
+        self.batch_reviewer = batch_reviewer
+        # Called with (1-based page, source text, reason) for a paragraph
+        # that keeps its source text because its translation failed.
+        self.on_source_kept = on_source_kept
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False

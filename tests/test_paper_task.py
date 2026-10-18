@@ -124,7 +124,7 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
 
 
 def test_no_automatic_term_extraction_requests(finished_task):
-    """Only the paper dossier, term list and paragraph translation requests reach the model.
+    """Only the paper dossier, term list, paragraph translation and review requests reach the model.
 
     One-paragraph requests may occur: the engine redoes a paragraph whose
     answer is more than 3x its input in tokens (see backlog, ticket 02).
@@ -132,7 +132,7 @@ def test_no_automatic_term_extraction_requests(finished_task):
     kinds = {request.kind for request in finished_task["model"].requests}
 
     assert "translate_batch" in kinds
-    assert kinds <= {"dossier", "term_list", "translate_batch", "single_paragraph"}
+    assert kinds <= {"dossier", "term_list", "translate_batch", "review", "single_paragraph"}
 
 
 def test_requests_in_flight_reach_the_concurrency_limit(finished_task):

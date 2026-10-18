@@ -1304,6 +1304,7 @@ class ILTranslator:
             except ContentFilterError as e:
                 logger.warning(f"ContentFilterError: {e.message}")
                 self.add_content_filter_hint(page, paragraph)
+                self._record_source_kept(page, paragraph, f"内容审查拒绝：{e.message}")
                 return
             except TranslationRequestError as e:
                 self.record_request_error(e, page)
@@ -1312,5 +1313,18 @@ class ILTranslator:
                 logger.exception(
                     f"Error translating paragraph. Paragraph: {paragraph.debug_id} ({paragraph.unicode}). Error: {e}. ",
                 )
-                # ignore error and continue
+                # ignore error and continue: the paragraph keeps its source text
+                self._record_source_kept(
+                    page, paragraph, f"逐段翻译出错：{type(e).__name__}: {e}"
+                )
                 return
+
+    def _record_source_kept(self, page: Page, paragraph: PdfParagraph, reason: str):
+        on_source_kept = self.translation_config.on_source_kept
+        if on_source_kept is not None:
+            page_number = getattr(page, "page_number", None)
+            on_source_kept(
+                None if page_number is None else page_number + 1,
+                get_paragraph_unicode(paragraph),
+                reason,
+            )
