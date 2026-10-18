@@ -88,6 +88,7 @@ def run_paper_task(
     from zotero_translate.batch_context import BatchContext
     from zotero_translate.dossier import read_full_text
     from zotero_translate.dossier import request_dossier
+    from zotero_translate.first_mention import FirstMentionPlan
     from zotero_translate.model_client import ModelCallError
     from zotero_translate.model_client import ModelClient
     from zotero_translate.task_report import TaskReport
@@ -128,6 +129,8 @@ def run_paper_task(
             GLOSSARY_NAME,
             [GlossaryEntry(source, target, "zh") for source, target in term_list.glossary_entries()],
         )
+        first_mentions = FirstMentionPlan(term_list.terms)
+        report.first_mentions = first_mentions.placements
 
         high_level.init()
         # The engine's thread pools and rate limiter must not hold requests
@@ -148,10 +151,12 @@ def run_paper_task(
             glossaries=[glossary],
             disable_same_text_fallback=True,
             batch_context_builder=BatchContext(dossier),
+            first_mention_planner=first_mentions,
             use_rich_pbar=False,
         )
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)
         result = asyncio.run(_drive_engine(high_level, config, progress))
+        report.first_mentions = first_mentions.placements
         mono = output_dir / OUTPUT_FILES["mono"]
         dual = output_dir / OUTPUT_FILES["dual"]
         if not result.mono_pdf_path or not result.dual_pdf_path:

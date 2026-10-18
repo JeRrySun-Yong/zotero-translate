@@ -3,7 +3,9 @@
 It records the time spent in each stage, the pipeline model client's
 counters (HTTP requests sent, cache hits, retries, the maximum number of
 requests in flight), the batches whose requests failed for good and the
-term list counts with the spellings dropped because the source lacks them.
+term list counts with the spellings dropped because the source lacks them,
+and for each key concept the pages of its first-mention glosses in the
+abstract and in the body.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ class TaskReport:
         self.error: str | None = None
         self.failed_batches: list[dict] = []
         self.terms: dict | None = None
+        self.first_mentions: list[dict] | None = None
 
     def enter_stage(self, stage: str) -> None:
         if self._stages and self._stages[-1][0] == stage:
@@ -57,5 +60,6 @@ class TaskReport:
             },
             "failed_batches": self.failed_batches,
             "terms": self.terms,
+            "first_mentions": self.first_mentions,
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

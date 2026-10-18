@@ -220,6 +220,10 @@ class TranslationConfig:
         disable_same_text_fallback: bool = False,
         batch_context_builder: Callable[[list[str], list[str], list[str]], str]
         | None = None,
+        first_mention_planner: Callable[
+            [list[tuple[int, str | None, str]]], dict[int, list[dict]]
+        ]
+        | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -384,6 +388,10 @@ class TranslationConfig:
         # paragraphs before and after it (reading order). None keeps the
         # upstream title hints.
         self.batch_context_builder = batch_context_builder
+        # Given every paragraph in reading order as (page number, layout
+        # label, source text), returns paragraph index -> the first-mention
+        # glosses to ask for in that paragraph ({"term", "gloss_zh"}).
+        self.first_mention_planner = first_mention_planner
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False

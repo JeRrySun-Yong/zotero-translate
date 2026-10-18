@@ -57,7 +57,7 @@ PROMPT_TEMPLATE = Template(
 - Placeholders: `{v1}`, `{name}`, `%s`, `%d`, `[[...]]`, `%%...%%` — keep exactly unchanged.
 - JSON keys or structure.
 
-$glossary_usage_rules_block
+$glossary_usage_rules_block$first_mention_rules_block
 ## Output Format
 Return a JSON array of the same length.  
 For each item:
@@ -94,6 +94,16 @@ $glossary_tables_block
 
 $json_input_str"""
 )
+
+
+FIRST_MENTION_FIELD = "first_mention_glosses"
+
+FIRST_MENTION_RULES = f"""## First-Mention Glosses
+Some input items have "{FIRST_MENTION_FIELD}": key concepts of this paper that occur in that item for the first time in the abstract or in the body. In the output of such an item:
+- At the first occurrence of each listed "term" in the item, keep the term in English exactly as written there, and put its "gloss_zh" in full-width parentheses right after it, with no space: term（gloss_zh）. Example: agentic（具备自主规划与执行能力的）.
+- Add each gloss exactly once. Add no gloss anywhere else, and do not output the "{FIRST_MENTION_FIELD}" field.
+
+"""
 
 
 class BatchParagraph:
@@ -275,6 +285,7 @@ class ILTranslatorLLMOnly:
         self._reading_order: dict[int, int] = {}
         self._source_texts: list[str | None] = []  # None: not context
         self._section_titles: list[str | None] = []
+        paragraphs: list[tuple[int, str | None, str]] = []
         section = None
         for page in docs.page:
             for paragraph in page.pdf_paragraph:
@@ -285,6 +296,13 @@ class ILTranslatorLLMOnly:
                 self._reading_order[id(paragraph)] = len(self._source_texts)
                 self._source_texts.append(text if is_context else None)
                 self._section_titles.append(section)
+                paragraphs.append((page.page_number, paragraph.layout_label, text))
+        planner = self.translation_config.first_mention_planner
+        self._first_mention_glosses = planner(paragraphs) if planner else {}
+
+    def _first_mention_glosses_of(self, paragraph: PdfParagraph) -> list[dict]:
+        position = self._reading_order.get(id(paragraph))
+        return self._first_mention_glosses.get(position, [])
 
     def _paper_context_block(self, paragraphs: list[PdfParagraph]) -> str | None:
         """The paper context of a batch, or None without a context builder.
@@ -744,6 +762,9 @@ class ILTranslatorLLMOnly:
                     and self.translation_config.add_formula_placehold_hint
                 ):
                     obj["formula_placeholders_hint"] = placeholders_hint
+                glosses = self._first_mention_glosses_of(input_text[2])
+                if glosses:
+                    obj[FIRST_MENTION_FIELD] = glosses
                 json_format_input.append(obj)
 
             json_format_input_str = json.dumps(
@@ -761,6 +782,9 @@ class ILTranslatorLLMOnly:
                 batch_text_for_glossary_matching=batch_text_for_glossary_matching,
                 paper_context_block=self._paper_context_block(
                     batch_paragraph.paragraphs
+                ),
+                has_first_mention_glosses=any(
+                    FIRST_MENTION_FIELD in obj for obj in json_format_input
                 ),
             )
 
@@ -808,7 +832,12 @@ class ILTranslatorLLMOnly:
 
                     trimed_input = re.sub(r"[. 。…，]{20,}", ".", input_unicode)
 
-                    input_token_count = self.calc_token_count(trimed_input)
+                    # A requested gloss lengthens the output; it must not
+                    # make the length check reject the translation.
+                    glosses = self._first_mention_glosses_of(inputs[id_][2])
+                    input_token_count = self.calc_token_count(
+                        trimed_input + "".join(g["gloss_zh"] for g in glosses)
+                    )
                     output_token_count = self.calc_token_count(output_unicode)
 
                     same_as_input = trimed_input == output_unicode
@@ -941,6 +970,7 @@ class ILTranslatorLLMOnly:
         local_title_paragraph: TitleContextSnapshot | None,
         batch_text_for_glossary_matching: str,
         paper_context_block: str | None = None,
+        has_first_mention_glosses: bool = False,
     ) -> str:
         """Build LLM prompt using a single template for easier maintenance.
 
@@ -1036,6 +1066,9 @@ class ILTranslatorLLMOnly:
         return PROMPT_TEMPLATE.substitute(
             role_block=role_block,
             glossary_usage_rules_block=glossary_usage_rules_block,
+            first_mention_rules_block=FIRST_MENTION_RULES
+            if has_first_mention_glosses
+            else "",
             contextual_hints_block=contextual_hints_block,
             json_input_str=json_input_str,
             glossary_tables_block=glossary_tables_block,
