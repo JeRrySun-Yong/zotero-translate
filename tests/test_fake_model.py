@@ -101,3 +101,24 @@ def test_fails_the_same_request_on_each_resend_then_answers(fake_model):
 
     assert codes == [429, 200, 500, 200]
     assert [r.fault for r in fake_model.requests] == ["429", None, "500", None]
+
+
+def test_term_list_request_gets_the_default_term_list(fake_model):
+    from tests.fake_model import FAKE_TERM_LIST
+    from tests.fake_model import TERM_LIST_MARKER
+
+    response = httpx.post(
+        f"{fake_model.base_url}/chat/completions",
+        json={
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": f"{TERM_LIST_MARKER} as JSON."},
+                {"role": "user", "content": "Paper dossier: ... Return the paper dossier ..."},
+            ],
+        },
+        timeout=10,
+    )
+
+    content = response.json()["choices"][0]["message"]["content"]
+    assert json.loads(content) == FAKE_TERM_LIST
+    assert fake_model.requests[0].kind == "term_list"

@@ -15,6 +15,9 @@ Request kinds are recognised from the message content:
 
 - ``dossier``: the paper dossier request, recognised by ``DOSSIER_MARKER``
   in its instructions. The default answer is ``FAKE_DOSSIER`` as JSON.
+- ``term_list``: the term list request, recognised by ``TERM_LIST_MARKER``
+  in its instructions. The default answer is ``FAKE_TERM_LIST`` as JSON;
+  every spelling in it appears on page 1 of AutoDesign.
 - ``translate_batch``: an engine paragraph batch, i.e. the prompt ends with a
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
@@ -46,6 +49,28 @@ FAKE_DOSSIER = {
     "paper_summary_zh": "假概要：本文提出 AutoDesign 框架。",
     "section_summaries_zh": [{"section": "8 Conclusion", "summary_zh": "假章节摘要：结论。"}],
     "translation_pitfalls_zh": ["假易错点：harness 不要译成线束。"],
+}
+
+# A phrase of the term list request's instructions.
+TERM_LIST_MARKER = "Return the term list"
+
+FAKE_TERM_LIST = {
+    "terms": [
+        {
+            "english": ["meta-harness"],
+            "category": "key_concept",
+            "chinese": None,
+            "gloss_zh": "假释义：优化框架本身的外层框架",
+            "reason": "假依据：本文的核心方法。",
+        },
+        {
+            "english": ["code agent"],
+            "category": "basic_term",
+            "chinese": "代码智能体",
+            "gloss_zh": None,
+            "reason": "假依据：已有通行译法。",
+        },
+    ]
 }
 
 _ERRORS = {"500", "429", "timeout", "slow", "empty", "invalid_json"}
@@ -105,6 +130,7 @@ class FakeModel:
         self._same_request_faults: list[_SameRequestFault] = []
         self._responders: dict[str, Responder] = {
             "dossier": lambda body: json.dumps(FAKE_DOSSIER, ensure_ascii=False),
+            "term_list": lambda body: json.dumps(FAKE_TERM_LIST, ensure_ascii=False),
             "translate_batch": pseudo_translate_batch,
             "single_paragraph": pseudo_translate_single,
             "other": lambda body: "ok",
@@ -241,7 +267,10 @@ def classify(body: dict) -> str:
         return "single_paragraph"
     if batch_items(content) is not None:
         return "translate_batch"
-    if any(DOSSIER_MARKER in (m.get("content") or "") for m in body.get("messages", [])):
+    instructions = [m.get("content") or "" for m in body.get("messages", [])]
+    if any(TERM_LIST_MARKER in text for text in instructions):
+        return "term_list"
+    if any(DOSSIER_MARKER in text for text in instructions):
         return "dossier"
     return "other"
 

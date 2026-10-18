@@ -17,7 +17,16 @@ from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import FakeModel
 
 CONCURRENCY = 4
-STAGES = ["排队中", "读取全文", "生成论文档案", "解析版面", "翻译与审校", "排版", "完成"]
+STAGES = [
+    "排队中",
+    "读取全文",
+    "生成论文档案",
+    "生成本篇术语清单",
+    "解析版面",
+    "翻译与审校",
+    "排版",
+    "完成",
+]
 # Part of the watermark sentence the engine adds unless told not to.
 WATERMARK_MARK = "funstory.ai"
 # The first line of the excerpt's abstract.
@@ -64,7 +73,7 @@ def test_task_passes_through_each_stage_in_order_and_succeeds(finished_task):
     assert final["stage"] == "完成"
     assert final["progress"] == 100
     assert final["error"] is None
-    assert set(final["files"]) >= {"mono", "dual"}
+    assert final["files"] == ["mono", "dual", "terms"]
 
     seen = []
     for status in finished_task["polls"]:
@@ -115,7 +124,7 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
 
 
 def test_no_automatic_term_extraction_requests(finished_task):
-    """Only the paper dossier and paragraph translation requests reach the model.
+    """Only the paper dossier, term list and paragraph translation requests reach the model.
 
     One-paragraph requests may occur: the engine redoes a paragraph whose
     answer is more than 3x its input in tokens (see backlog, ticket 02).
@@ -123,7 +132,7 @@ def test_no_automatic_term_extraction_requests(finished_task):
     kinds = {request.kind for request in finished_task["model"].requests}
 
     assert "translate_batch" in kinds
-    assert kinds <= {"dossier", "translate_batch", "single_paragraph"}
+    assert kinds <= {"dossier", "term_list", "translate_batch", "single_paragraph"}
 
 
 def test_requests_in_flight_reach_the_concurrency_limit(finished_task):

@@ -2,7 +2,8 @@
 
 It records the time spent in each stage, the pipeline model client's
 counters (HTTP requests sent, cache hits, retries, the maximum number of
-requests in flight) and the batches whose requests failed for good.
+requests in flight), the batches whose requests failed for good and the
+term list counts with the spellings dropped because the source lacks them.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ class TaskReport:
         self.state = "succeeded"
         self.error: str | None = None
         self.failed_batches: list[dict] = []
+        self.terms: dict | None = None
 
     def enter_stage(self, stage: str) -> None:
         if self._stages and self._stages[-1][0] == stage:
@@ -54,5 +56,6 @@ class TaskReport:
                 "max_in_flight": client.max_in_flight,
             },
             "failed_batches": self.failed_batches,
+            "terms": self.terms,
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

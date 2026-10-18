@@ -8,6 +8,7 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /tasks/{task_id}`` -> state, stage, progress, queue position, error,
   kept source paragraphs and downloadable files
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
+- ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
 
 The service listens on 127.0.0.1 only and has no authentication. Tasks run
@@ -195,12 +196,15 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
 
         def _send_file(self, task_id: str, name: str):
             directory = queue.task_dir(task_id)
-            file = td.OUTPUT_FILES.get(name)
+            file = td.DOWNLOAD_FILES.get(name)
             if directory is None or file is None or not (directory / file).is_file():
                 return self._not_found()
             data = (directory / file).read_bytes()
             self.send_response(200)
-            self.send_header("Content-Type", "application/pdf")
+            self.send_header(
+                "Content-Type",
+                "application/json; charset=utf-8" if file.endswith(".json") else "application/pdf",
+            )
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
