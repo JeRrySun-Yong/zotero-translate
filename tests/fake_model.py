@@ -4,9 +4,11 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, timeout, empty content, invalid JSON) on the
-  N-th request of a kind, or on the first request of a kind and then on each
-  resend of that same request (``fail_same_request``);
+- inject errors (500, 429, timeout, slow, empty content, invalid JSON) on
+  the N-th request of a kind, or on the first request of a kind and then on
+  each resend of that same request (``fail_same_request``). "timeout" sends
+  nothing for an hour; "slow" sends the response headers at once and then the
+  normal answer a few bytes at a time over ``slow_body_seconds``;
 - inject a delay and count the maximum number of requests in flight.
 
 Request kinds are recognised from the message content:
@@ -46,7 +48,7 @@ FAKE_DOSSIER = {
     "translation_pitfalls_zh": ["假易错点：harness 不要译成线束。"],
 }
 
-_ERRORS = {"500", "429", "timeout", "empty", "invalid_json"}
+_ERRORS = {"500", "429", "timeout", "slow", "empty", "invalid_json"}
 
 # Markers of the engine's one-paragraph prompts, each followed by the text.
 SINGLE_PARAGRAPH_MARKERS = (
@@ -64,6 +66,7 @@ class RecordedRequest:
     headers: dict[str, str]
     body: dict
     fault: str | None = None  # the injected error; None if answered normally
+    received_at: float = 0.0  # time.monotonic() when the request arrived
 
     @property
     def prompt(self) -> str:
@@ -91,6 +94,7 @@ class FakeModel:
     """Start with ``with FakeModel() as model:``; ``model.base_url`` is the endpoint."""
 
     delay: float = 0.0
+    slow_body_seconds: float = 30.0  # how long a "slow" fault takes to send its body
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
 
@@ -116,7 +120,7 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "timeout", "empty", "invalid_json".
+        ``error`` is one of: "500", "429", "timeout", "slow", "empty", "invalid_json".
         """
         assert error in _ERRORS, error
         self._faults.append(_Fault(kind=kind, nth=nth, error=error))
@@ -178,6 +182,7 @@ class FakeModel:
                     headers=dict(handler.headers.items()),
                     body=body,
                     fault=fault,
+                    received_at=time.monotonic(),
                 )
             )
             self._in_flight += 1
@@ -198,7 +203,10 @@ class FakeModel:
                 content = "this is not json {"
             else:
                 content = self._responders[kind](body)
-            _send_json(handler, 200, _completion(body.get("model", ""), content))
+            payload = _completion(body.get("model", ""), content)
+            if fault == "slow":
+                return _send_json_slowly(handler, payload, self.slow_body_seconds)
+            _send_json(handler, 200, payload)
         finally:
             with self._lock:
                 self._in_flight -= 1
@@ -314,3 +322,20 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> N
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def _send_json_slowly(handler: BaseHTTPRequestHandler, payload: dict, seconds: float) -> None:
+    """Send a 200 header at once, then the body in small pieces spread over ``seconds``."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    size = -(-len(data) // max(1, int(seconds / 0.1)))  # about one piece per 0.1 s
+    pieces = [data[i : i + size] for i in range(0, len(data), size)]
+    try:
+        for piece in pieces:
+            time.sleep(seconds / len(pieces))
+            handler.wfile.write(piece)
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # the client gave up on the response

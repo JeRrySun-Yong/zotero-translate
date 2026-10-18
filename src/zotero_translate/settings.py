@@ -41,7 +41,7 @@ class ModelSettings:
     concurrency: int = DEFAULT_CONCURRENCY
     reasoning_effort: str = "high"
     temperature: float = 1.0
-    timeout_seconds: float = 240.0
+    timeout_seconds: float = 240.0  # whole request, from sending to the last byte read
     max_retries: int = 3  # per request, after the first attempt (ADR 0002)
     retry_backoff_seconds: float = 1.0  # first wait; doubles on each retry
     cache_dir: Path | None = None  # successful responses; None turns the cache off
@@ -65,7 +65,11 @@ def read_env_file(path: Path) -> dict[str, str]:
 def load_model_settings(
     env_file: Path, concurrency: int = DEFAULT_CONCURRENCY, cache_dir: Path | None = None
 ) -> ModelSettings:
-    """Read ``OPENAI_BASE_URL``, ``OPENAI_API_KEY`` and ``AI_DEFAULT_MODEL``."""
+    """Read ``OPENAI_BASE_URL``, ``OPENAI_API_KEY`` and ``AI_DEFAULT_MODEL``.
+
+    The optional ``ZT_REQUEST_TIMEOUT_SECONDS`` replaces the 240-second request
+    timeout; tests use it to make timeouts happen in a few seconds.
+    """
     env_file = Path(env_file)
     if not env_file.is_file():
         raise SettingsError(f"找不到管线模型的环境文件：{env_file}")
@@ -73,13 +77,27 @@ def load_model_settings(
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not values.get(k)]
     if missing:
         raise SettingsError(f"环境文件 {env_file} 缺少：{', '.join(missing)}")
+    timeout_seconds = ModelSettings.timeout_seconds
+    if values.get("ZT_REQUEST_TIMEOUT_SECONDS"):
+        timeout_seconds = _positive_seconds(values["ZT_REQUEST_TIMEOUT_SECONDS"])
+        if timeout_seconds is None:
+            raise SettingsError(f"环境文件 {env_file} 中的 ZT_REQUEST_TIMEOUT_SECONDS 不是正数")
     return ModelSettings(
         base_url=values["OPENAI_BASE_URL"].rstrip("/"),
         api_key=values["OPENAI_API_KEY"],
         model=values.get("AI_DEFAULT_MODEL") or DEFAULT_MODEL,
         concurrency=concurrency,
+        timeout_seconds=timeout_seconds,
         cache_dir=Path(cache_dir) if cache_dir else None,
     )
+
+
+def _positive_seconds(text: str) -> float | None:
+    try:
+        seconds = float(text)
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
 
 
 def model_cache_dir(data_dir: Path) -> Path:
