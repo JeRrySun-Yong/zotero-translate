@@ -1,6 +1,7 @@
 """Model call reliability: bounded retries, failure with a page, response cache, restarts.
 
-Spec "计划覆盖的行为" 10, 14, 15 and 16 (13 is in test_paper_task.py).
+Spec "计划覆盖的行为" 10, 14, 15 and 16 (13 is in test_paper_task.py), and
+ticket 11: a request that runs longer than the request timeout in total.
 """
 
 import collections
@@ -15,6 +16,9 @@ from tests.conftest import stop_service
 from tests.fake_model import FakeModel
 
 RESTART_ERROR = "翻译服务重启，任务中断"
+# A small request timeout (seconds) so timeouts happen fast; production uses 240.
+SMALL_TIMEOUT = 2.0
+FIRST_RETRY_WAIT = 1.0  # the client's first wait before a resend
 
 
 def _prompt(request) -> str:
@@ -72,6 +76,44 @@ def test_batch_failing_four_times_fails_the_task_and_a_resubmit_reuses_the_cache
     # Identical short paragraphs repeat within a run, so hits can exceed
     # the number of distinct prompts.
     assert second_report["model"]["cache_hits"] >= len(succeeded_prompts) > 0
+
+
+def test_a_slow_response_is_cut_off_at_the_request_timeout_and_resent(
+    fake_model, start_service
+):
+    # Headers at once, then the body slowly over 30 s: every gap between two
+    # reads is short, but the whole response takes far longer than the timeout.
+    fake_model.slow_body_seconds = 30.0
+    fake_model.fail_same_request(["slow"], kind="translate_batch")
+    service = start_service(fake_model, request_timeout=SMALL_TIMEOUT)
+
+    final = service.wait(service.submit())
+
+    assert final["state"] == "succeeded", final["error"]
+    [slow] = [r for r in fake_model.requests if r.fault == "slow"]
+    resends = [r for r in fake_model.requests if r is not slow and _prompt(r) == _prompt(slow)]
+    assert [r.fault for r in resends] == [None], "the slow request was not resent"
+    waited = resends[0].received_at - slow.received_at
+    assert SMALL_TIMEOUT <= waited < SMALL_TIMEOUT + FIRST_RETRY_WAIT + 3, waited
+    assert service.report(final["task_id"])["model"]["retries"] == 1
+
+
+def test_a_request_timing_out_four_times_fails_the_task_with_the_timeout_and_page(
+    fake_model, start_service
+):
+    # "timeout" sends nothing at all; "slow" sends headers, then trickles.
+    fake_model.slow_body_seconds = 30.0
+    fake_model.fail_same_request(["slow", "timeout", "slow", "slow"], kind="translate_batch")
+    service = start_service(fake_model, request_timeout=SMALL_TIMEOUT)
+
+    final = service.wait(service.submit())
+
+    assert final["state"] == "failed"
+    assert "管线模型请求超时（2 秒）" in final["error"], final["error"]
+    assert "第 1 页" in final["error"], final["error"]
+    report = service.report(final["task_id"])
+    assert report["failed_batches"][0]["page"] == 1
+    assert report["model"]["retries"] >= 3
 
 
 def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, start_service):

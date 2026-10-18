@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 
 import httpx
 import pytest
@@ -56,6 +57,29 @@ def test_injects_a_timeout(fake_model):
 
     with pytest.raises(httpx.ReadTimeout):
         post(fake_model, BATCH_PROMPT, timeout=0.5)
+
+
+def test_injects_a_slow_response_headers_at_once_then_the_body_slowly(fake_model):
+    fake_model.slow_body_seconds = 1.0
+    fake_model.inject_error("slow")
+    started = time.monotonic()
+
+    with httpx.stream(
+        "POST",
+        f"{fake_model.base_url}/chat/completions",
+        json={"model": "m", "messages": [{"role": "user", "content": BATCH_PROMPT}]},
+        timeout=0.5,  # longer than any gap between pieces, shorter than the body
+    ) as response:
+        headers_after = time.monotonic() - started
+        pieces = list(response.iter_raw())
+    body_after = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert headers_after < 0.5
+    assert body_after >= 1.0
+    assert len(pieces) > 2
+    content = json.loads(b"".join(pieces))["choices"][0]["message"]["content"]
+    assert json.loads(content) == [{"id": 0, "output": PSEUDO_PREFIX + "Hello {v1} 42"}]
 
 
 def test_counts_max_requests_in_flight_under_delay(fake_model):

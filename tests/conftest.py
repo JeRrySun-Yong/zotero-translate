@@ -86,11 +86,13 @@ def launch_service(
     concurrency: int = 4,
     env_file: Path | None = None,
     data_dir: Path | None = None,
+    request_timeout: float | None = None,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
     The pipeline model is ``model`` (the fake, or an endpoint URL), or the
-    endpoint in ``env_file``. Pass ``data_dir`` to restart on earlier data.
+    endpoint in ``env_file``. Pass ``data_dir`` to restart on earlier data,
+    and ``request_timeout`` (seconds) to replace the 240-second request timeout.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
     if env_file is None:
@@ -99,7 +101,8 @@ def launch_service(
         env_file.write_text(
             f"OPENAI_BASE_URL={base_url}\n"
             f"OPENAI_API_KEY={FAKE_API_KEY}\n"
-            f"AI_DEFAULT_MODEL={FAKE_MODEL_NAME}\n",
+            f"AI_DEFAULT_MODEL={FAKE_MODEL_NAME}\n"
+            + (f"ZT_REQUEST_TIMEOUT_SECONDS={request_timeout}\n" if request_timeout else ""),
             encoding="utf-8",
         )
     process = subprocess.Popen(
@@ -141,11 +144,18 @@ def fake_model():
 
 @pytest.fixture
 def start_service(tmp_path):
-    """Return ``start(fake_model, concurrency=4, data_dir=None) -> ServiceClient``."""
+    """Return ``start(fake_model, concurrency=4, data_dir=None, request_timeout=None)``."""
     started: list[ServiceClient] = []
 
-    def start(model, concurrency: int = 4, data_dir: Path | None = None) -> ServiceClient:
-        client = launch_service(model, tmp_path, concurrency, data_dir=data_dir)
+    def start(
+        model,
+        concurrency: int = 4,
+        data_dir: Path | None = None,
+        request_timeout: float | None = None,
+    ) -> ServiceClient:
+        client = launch_service(
+            model, tmp_path, concurrency, data_dir=data_dir, request_timeout=request_timeout
+        )
         started.append(client)
         return client
 

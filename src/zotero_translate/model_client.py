@@ -6,6 +6,8 @@ requests in flight with one limit shared by the whole paper task.
 
 Reliability (ADR 0002):
 
+- The request timeout bounds the whole request, from sending it to reading
+  the last byte of the response (see ``_post``).
 - Network errors, timeouts, HTTP 429 and 5xx, empty content and answers the
   caller's ``validate`` rejects are retried, at most ``max_retries`` times,
   waiting ``retry_backoff_seconds`` and then twice as long each time. Other
@@ -60,8 +62,11 @@ class ModelClient:
             base_url=settings.base_url,
             headers={"Authorization": f"Bearer {settings.api_key}"},
             timeout=settings.timeout_seconds,
+            # ``_slots`` caps the requests in flight. The pool is not capped,
+            # so a connection that an abandoned request still holds (see
+            # ``_post``) never makes a new request wait.
             limits=httpx.Limits(
-                max_connections=settings.concurrency,
+                max_connections=None,
                 max_keepalive_connections=settings.concurrency,
             ),
         )
@@ -126,31 +131,67 @@ class ModelClient:
                 self.request_count += 1
                 self.max_in_flight = max(self.max_in_flight, self._in_flight)
             try:
-                response = self._http.post("/chat/completions", json=body)
+                status_code, data = self._post(body)
             except httpx.ConnectError as e:
                 raise _RetryableError("无法连接管线模型") from e
             except httpx.TimeoutException as e:
-                raise _RetryableError(
-                    f"管线模型请求超时（{self.settings.timeout_seconds:g} 秒）"
-                ) from e
+                raise _RetryableError(self._timeout_reason()) from e
             except httpx.TransportError as e:
                 raise _RetryableError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
             finally:
                 with self._lock:
                     self._in_flight -= 1
-        if response.status_code == 429:
+        if status_code == 429:
             raise _RetryableError("管线模型限流（HTTP 429）")
-        if response.status_code >= 500:
-            raise _RetryableError(f"管线模型服务端出错（HTTP {response.status_code}）")
-        if response.status_code >= 400:
-            raise ModelCallError(f"管线模型拒绝了请求（HTTP {response.status_code}）")
+        if status_code >= 500:
+            raise _RetryableError(f"管线模型服务端出错（HTTP {status_code}）")
+        if status_code >= 400:
+            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）")
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            content = json.loads(data)["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise _RetryableError("无法解析管线模型的响应") from e
         if not content or not content.strip():
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
+
+    def _post(self, body: dict) -> tuple[int, bytes]:
+        """Send one chat completion; return its status code and whole body.
+
+        httpx's timeout bounds each network operation, e.g. each wait for
+        the next bytes, not the whole request: a response that trickles in
+        can run far longer than the timeout. So the request runs in its own
+        thread, and this method stops waiting when the request timeout has
+        passed since it started. The abandoned request closes its connection
+        at its next read, or at httpx's timeout if no more bytes arrive.
+        """
+        outcome: dict = {}
+        abandoned = threading.Event()
+
+        def run() -> None:
+            try:
+                with self._http.stream("POST", "/chat/completions", json=body) as response:
+                    chunks = []
+                    for chunk in response.iter_bytes():
+                        if abandoned.is_set():
+                            return
+                        chunks.append(chunk)
+                    outcome["response"] = (response.status_code, b"".join(chunks))
+            except Exception as e:  # noqa: BLE001 - re-raised in the caller's thread
+                outcome["error"] = e
+
+        request = threading.Thread(target=run, name="model-request", daemon=True)
+        request.start()
+        request.join(self.settings.timeout_seconds)
+        if request.is_alive():
+            abandoned.set()
+            raise _RetryableError(self._timeout_reason())
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["response"]
+
+    def _timeout_reason(self) -> str:
+        return f"管线模型请求超时（{self.settings.timeout_seconds:g} 秒）"
 
     def close(self) -> None:
         self._http.close()
