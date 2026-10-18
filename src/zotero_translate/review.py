@@ -13,9 +13,10 @@ answer has the same JSON structure as the draft. Each paragraph then gets:
 4. when the retries are used up, the paragraph keeps its source text and is
    recorded in ``KeptSource`` with its page and reason.
 
-A review request that gets no answer at all (network errors, HTTP errors)
-fails like any other request: ``ModelCallError`` reaches the engine, which
-fails the paper task.
+A review answer from the response cache is judged the same way. A review
+request that gets no answer at all (network errors, HTTP errors, timeouts)
+fails like a translation request: it is raised to the engine as
+``TranslationRequestError``, which fails the paper task with the page.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+
+from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
 
 from zotero_translate.batch_context import condense
 from zotero_translate.checks import problems
@@ -91,27 +94,28 @@ class BatchReviewer:
             source.lower() for source, target in glossary_entries if source != target
         )
         messages = [{"role": "user", "content": self._prompt(items, glossary_entries)}]
-        last: dict[int, _Verdict] = {}
+        rejected: dict[int, _Verdict] = {}  # verdicts on the last rejected answer
 
         def judge(content: str) -> None:
-            outputs = _parse(content)
-            verdicts = {
-                item["id"]: _decide(item, outputs.get(item["id"]), translated) for item in items
-            }
-            last.clear()
-            last.update(verdicts)
+            verdicts = _verdicts(items, content, translated)
             failing = [v.reason for v in verdicts.values() if v.text is None]
             if failing:
+                rejected.clear()
+                rejected.update(verdicts)
                 raise ValueError(failing[0])
 
         try:
-            self.client.complete(messages, validate=judge)
+            # A cached answer skips ``judge``: it is judged below like a fresh one.
+            content = self.client.complete(messages, validate=judge)
         except ModelCallError as e:
             if not e.answered:  # the request failed for good: the task fails
-                raise
-            if not last:  # no answer parsed: judge the drafts alone
-                last.update({item["id"]: _decide(item, None, translated) for item in items})
-        return self._apply(items, last)
+                raise TranslationRequestError(str(e)) from e
+            verdicts = rejected or {
+                item["id"]: _decide(item, None, translated) for item in items
+            }  # no answer parsed: judge the drafts alone
+        else:
+            verdicts = _verdicts(items, content, translated)
+        return self._apply(items, verdicts)
 
     def _apply(self, items: list[dict], verdicts: dict[int, _Verdict]) -> dict:
         result = {}
@@ -156,6 +160,12 @@ class BatchReviewer:
             "## Here is the input:\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
         )
         return "\n\n".join(parts)
+
+
+def _verdicts(items: list[dict], content: str, translated: frozenset[str]) -> dict[int, _Verdict]:
+    """Each item's verdict on a review answer; raise if the answer does not parse."""
+    outputs = _parse(content)
+    return {item["id"]: _decide(item, outputs.get(item["id"]), translated) for item in items}
 
 
 def _decide(item: dict, reviewed: str | None, translated: frozenset[str]) -> _Verdict:

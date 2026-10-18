@@ -132,3 +132,39 @@ def test_draft_and_review_both_changing_a_number_keep_the_source_after_the_retri
     assert kept[0]["page"] == 1
     assert NUMBER in kept[0]["reason"]
     assert re.sub(r"\s+", "", kept[0]["source"]).find(ABSTRACT_PHRASE) >= 0
+
+
+def test_a_resubmit_on_the_same_data_judges_the_cached_review(fake_model, start_service):
+    fake_model.respond("review", reviewed(change_number=True))
+    service = start_service(fake_model)
+    first = service.wait(service.submit())
+    assert first["state"] == "succeeded", first["error"]
+    sent_first = len(fake_model.requests)
+
+    task_id = service.submit()
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # Every answer is in the response cache: nothing is sent again, and no
+    # paragraph is redone one by one.
+    assert fake_model.requests[sent_first:] == []
+    report = service.report(task_id)
+    assert report["review"]["batches"] == service.report(first["task_id"])["review"]["batches"]
+    assert [d["page"] for d in report["review"]["drafts_used"]] == [1]
+    mono = pdf_text(service.download(task_id, "mono"))
+    assert PSEUDO_PREFIX + SOURCE_PHRASE.replace(" ", "") in mono
+    assert WRONG_NUMBER not in mono
+    assert REVIEW_PREFIX in mono
+
+
+def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_service):
+    fake_model.fail_same_request(["500", "500", "500", "500"], kind="review")
+    service = start_service(fake_model)
+
+    task_id = service.submit()
+    final = service.wait(task_id)
+
+    assert final["state"] == "failed"
+    assert "第 1 页" in final["error"], final["error"]
+    report = service.report(task_id)
+    assert [b["page"] for b in report["failed_batches"]][:1] == [1]
