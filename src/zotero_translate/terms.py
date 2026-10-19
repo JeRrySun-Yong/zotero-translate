@@ -49,10 +49,10 @@ with the paper and with other literature. Only two kinds of concepts are key con
   1. the systems, methods, benchmarks, mechanisms and metrics that this paper itself names or \
 defines;
   2. the concepts that this paper uses to frame its own paradigm, usually in its title and \
-abstract: the kind of problem or capability the paper is about, or the object that its method \
-builds or optimizes. For example, long-horizon, agentic or recursive self-improvement are key \
-concepts in a paper whose problem or method is framed by them; these are examples only, not a \
-list to copy: judge every candidate from this paper.
+abstract: the kind of problem or task it addresses, the capability or property it aims at, and \
+the object that its method builds or optimizes. For example, long-horizon, agentic or \
+recursive self-improvement are key concepts in a paper whose problem or method is framed by \
+them; these are examples only, not a list to copy: judge every candidate from this paper.
 - "basic_term": any other technical expression that the translation should render the same way \
 throughout. A general technical term with a mature Chinese rendering is always a basic term, \
 even when this paper uses it often or builds on it, for instance reinforcement learning, \
@@ -61,12 +61,19 @@ generation. The translation renders a basic term in Chinese.
 Whether an expression is a key concept depends on this paper: the same expression can be a \
 basic term in another paper. When an expression could be either category, choose "basic_term".
 
-List at most 20 key concepts, the most important first: the paper's own names and the concepts \
-that frame its paradigm before the parts and details of its method. Many papers need fewer; \
-leave a concept out rather than stretch the two kinds to include it. When several of the \
-paper's own names are built on one word that frames its paradigm, for instance a noun or an \
-adjective from the title, list that single word as a key concept of its own as well, so that it \
-stays in English everywhere.
+Find the key concepts in two passes:
+1. Read the title and the abstract. Take the paper's own names there and every concept that \
+frames its paradigm, also one that the paper states only once. List a paradigm concept in its \
+shortest form: when a word such as an adjective frames the paradigm and qualifies a longer \
+phrase, list that single word as a key concept of its own, so that it stays in English \
+everywhere; list the longer phrase as well only when it is one of the paper's own names. \
+Likewise, when several of the paper's own names are built on one word that frames its \
+paradigm, list that single word as well.
+2. Read the body for the further systems, methods, benchmarks, mechanisms and metrics that the \
+paper itself names or defines as part of its contribution.
+List at most 20 key concepts, the most important first: the concepts of the first pass before \
+those of the second. Many papers need fewer: leave a concept of the body out rather than \
+stretch the two kinds to include it.
 Leave out everyday words, and plain proper names that no translator would translate (people, \
 organisations, products, models, datasets, URLs) unless they name this paper's own method, \
 system or benchmark.
