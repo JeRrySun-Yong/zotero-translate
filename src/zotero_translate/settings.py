@@ -41,7 +41,7 @@ class ModelSettings:
     concurrency: int = DEFAULT_CONCURRENCY
     reasoning_effort: str = "high"
     temperature: float = 1.0
-    timeout_seconds: float = 240.0  # whole request, from sending to the last byte read
+    timeout_seconds: float = 480.0  # whole request, from sending to the last byte read
     max_retries: int = 3  # per request, after the first attempt (ADR 0002)
     retry_backoff_seconds: float = 1.0  # first wait; doubles on each retry
     cache_dir: Path | None = None  # successful responses; None turns the cache off
@@ -67,7 +67,7 @@ def load_model_settings(
 ) -> ModelSettings:
     """Read ``OPENAI_BASE_URL``, ``OPENAI_API_KEY`` and ``AI_DEFAULT_MODEL``.
 
-    The optional ``ZT_REQUEST_TIMEOUT_SECONDS`` replaces the 240-second request
+    The optional ``ZT_REQUEST_TIMEOUT_SECONDS`` replaces the 480-second request
     timeout; tests use it to make timeouts happen in a few seconds.
     """
     env_file = Path(env_file)

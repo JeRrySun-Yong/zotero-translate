@@ -92,7 +92,7 @@ def launch_service(
 
     The pipeline model is ``model`` (the fake, or an endpoint URL), or the
     endpoint in ``env_file``. Pass ``data_dir`` to restart on earlier data,
-    and ``request_timeout`` (seconds) to replace the 240-second request timeout.
+    and ``request_timeout`` (seconds) to replace the 480-second request timeout.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
     if env_file is None:
