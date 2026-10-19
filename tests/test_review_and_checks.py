@@ -12,6 +12,7 @@ literal the engine glued to a neighbouring word (``Fig.6``, ``AppendixH.1``,
 import json
 import re
 
+import pymupdf
 import pytest
 
 from tests.conftest import FIXTURES
@@ -253,6 +254,60 @@ def test_a_glued_figure_number_the_translation_changes_still_fails_the_checks(
     assert final["kept_source_paragraphs"] == 2
     reasons = " ".join(k["reason"] for k in service.report(task_id)["kept_source_paragraphs"])
     assert "Fig.6" in reasons and "Fig.9" in reasons
+
+
+FILLER = (
+    " The method is evaluated on the same benchmark under the same settings, and"
+    " the results are averaged over three independent runs for every task."
+)
+
+
+@pytest.mark.parametrize(
+    "source, glued, wrong",
+    [
+        pytest.param(
+            "As described in Sec.3.2, the planner revises the draft program before rendering.",
+            "Sec.3.2",
+            "第 13.2 节",
+            id="Sec.3.2 as 第 13.2 节",
+        ),
+        pytest.param(
+            "Fig.4 compares GPT-4 with the baseline planner on every image generation task.",
+            "Fig.4",
+            "图 5",
+            id="Fig.4 next to GPT-4 as 图 5",
+        ),
+    ],
+)
+def test_a_glued_number_the_translation_changes_fails_even_beside_a_similar_number(
+    source, glued, wrong, fake_model, start_service, tmp_path
+):
+    # No acceptance page has these spellings; the PDF text itself has no
+    # space after the abbreviation, as the engine's glued text would.
+    pdf = tmp_path / "glued-number.pdf"
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        page.insert_textbox(pymupdf.Rect(72, 72, 520, 400), source + FILLER * 3, fontsize=11)
+        doc.save(pdf)
+
+    def respond(body: dict) -> str:
+        return pseudo_translate_batch(body).replace(glued, wrong)
+
+    fake_model.respond("translate_batch", respond)
+    service = start_service(fake_model)
+
+    task_id = service.submit(pdf)
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    inputs = [
+        STYLE_TAG.sub("", item["input"])
+        for r in fake_model.requests_of("translate_batch")
+        for item in batch_items(r.prompt)
+    ]
+    assert any(glued in text for text in inputs)
+    assert final["kept_source_paragraphs"] == 1
+    assert glued in service.report(task_id)["kept_source_paragraphs"][0]["reason"]
 
 
 def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_service):

@@ -34,9 +34,11 @@ paragraph text often lacks the space between two words
   ``Fig.4``; the translation writes "Introducing GPT-5.5", "附录 H.1",
   "图 4"), a trailing lower-case word of 2 or more letters after a capital
   or digit (``GPT-5.5and``), or a trailing capitalised word after a
-  lower-case letter (``...ac.aeWork``). What is left of ``Fig.4`` is a
-  number: it must be a whole number of the translation, so "图 14" and
-  "图 5" fail as they would for ``Fig. 4``.
+  lower-case letter (``...ac.aeWork``). What is left of ``Fig.4`` or
+  ``Sec.3.2`` is a number: it must be one of the numbers the number check
+  finds in the translation (outside the source's literals, so not the 4 of
+  ``GPT-4``), so "图 14", "第 13.2 节" and "图 5" fail as they would for
+  ``Fig. 4`` and ``Sec. 3.2``.
 """
 
 from __future__ import annotations
@@ -93,15 +95,14 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
     source_text, target_text = _plain(source), _plain(translation)
     literals = [lit for lit in _literals(source_text) if lit.lower() not in translated_terms]
     target_squeezed = _WHITESPACE.sub("", target_text)
-    target_whole_numbers = {m.group(1).replace(",", "") for m in _NUMBER.finditer(target_text)}
+    source_numbers = _numbers(source_text, literals)
+    target_numbers = _numbers(target_text, literals)
     for literal in dict.fromkeys(literals):
         if not any(
-            variant in (target_whole_numbers if variant.isdigit() else target_squeezed)
+            _in_translation(variant, target_squeezed, target_numbers)
             for variant in _variants(literal)
         ):
             found.append(f"字面值 {literal} 被改动或缺失")
-    source_numbers = _numbers(source_text, literals)
-    target_numbers = _numbers(target_text, literals)
     for number, count in source_numbers.items():
         if target_numbers[number] < count:
             found.append(f"数字 {number} 被改动或缺失")
@@ -129,16 +130,24 @@ def _literals(text: str) -> list[str]:
     return found
 
 
+def _in_translation(variant: str, target_squeezed: str, target_numbers: collections.Counter) -> bool:
+    """A number variant among the translation's numbers; any other in its text without whitespace."""
+    number = _NUMBER.fullmatch(variant)
+    if number:
+        return target_numbers[_number(number)] > 0
+    return variant in target_squeezed
+
+
 def _variants(literal: str) -> list[str]:
     """The literal, and the literal without each kind of glued-on word.
 
-    A variant may be a lone digit only when an abbreviation was glued to a
-    number (``Fig.4``); it is then matched as a whole number.
+    A variant is a number only when an abbreviation was glued to a number
+    (``Fig.4``, ``Sec.3.2``); it is then matched as a whole number.
     """
     variants = [literal]
     for glued in _GLUED:
         shorter = glued.sub("", literal)
-        if shorter != literal and (len(shorter) > 1 or shorter.isdigit()):
+        if shorter != literal and (len(shorter) > 1 or _NUMBER.fullmatch(shorter)):
             variants.append(shorter)
     return variants
 
@@ -146,11 +155,12 @@ def _variants(literal: str) -> list[str]:
 def _numbers(text: str, literals: list[str]) -> collections.Counter:
     for literal in sorted(set(literals), key=len, reverse=True):
         text = text.replace(literal, " ")
-    numbers = collections.Counter()
-    for match in _NUMBER.finditer(text):
-        value = match.group(1).replace(",", "")
-        numbers[value + ("%" if match.group(2) else "")] += 1
-    return numbers
+    return collections.Counter(_number(match) for match in _NUMBER.finditer(text))
+
+
+def _number(match: re.Match) -> str:
+    """A number as the checks compare it: no thousands separators; % kept."""
+    return match.group(1).replace(",", "") + ("%" if match.group(2) else "")
 
 
 def _formula_list(counter: collections.Counter) -> str:
