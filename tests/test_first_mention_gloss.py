@@ -118,9 +118,10 @@ def test_each_key_concept_is_glossed_once_in_the_abstract_and_once_in_the_body(m
     markers = [MALIANG_ABSTRACT, MALIANG_INTRO_1, MALIANG_INTRO_2]
 
     # In the abstract and in the introduction.
-    assert where(found["多模态大语言模型"], markers) == [MALIANG_ABSTRACT, MALIANG_INTRO_2]
     assert where(found["以程序表达生成过程的"], markers) == [MALIANG_ABSTRACT, MALIANG_INTRO_2]
-    # Only in the abstract: capitals, and a word broken at a line end.
+    # Only in the abstract: the introduction has "(MLLMs)" only inside
+    # parentheses (ticket 15), capitals, and a word broken at a line end.
+    assert where(found["多模态大语言模型"], markers) == [MALIANG_ABSTRACT]
     assert where(found["本文的可编程视觉生成框架"], markers) == [MALIANG_ABSTRACT]
     assert where(found["检查渲染结果"], markers) == [MALIANG_ABSTRACT]
     # Only in the body, each on its own paragraph.
@@ -152,7 +153,7 @@ def test_batches_with_glosses_state_the_gloss_format(maliang):
 def test_the_task_report_lists_the_pages_of_the_glosses(maliang):
     _, report = maliang
     by_concept = {item["concept"]: item for item in report["first_mentions"]}
-    assert by_concept["MLLMs"] == {"concept": "MLLMs", "abstract_page": 1, "body_page": 1}
+    assert pages_of(by_concept["programmable"]) == (1, 1)
     assert by_concept["MaLiang-Harness"]["body_page"] is None
     assert by_concept["direct visual synthesis"]["abstract_page"] is None
     assert len(by_concept) == 6
@@ -222,4 +223,9 @@ def test_without_a_recognisable_abstract_only_the_body_is_glossed(tmp_path_facto
     assert where(found["本文提出的自动设计框架"], markers) == [autodesign_first]
     assert where(found["本文的海报评测基准"], markers) == [posterbench_first]
     pages = {item["concept"]: item for item in report["first_mentions"]}
-    assert pages["AutoDesign"] == {"concept": "AutoDesign", "abstract_page": None, "body_page": 1}
+    assert pages_of(pages["AutoDesign"]) == (None, 1)
+
+
+def pages_of(placement: dict) -> tuple[int | None, int | None]:
+    """The abstract and body pages of a concept's glosses in the task report."""
+    return placement["abstract_page"], placement["body_page"]

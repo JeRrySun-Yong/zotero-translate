@@ -158,6 +158,7 @@ def run_paper_task(
             disable_same_text_fallback=True,
             batch_context_builder=BatchContext(dossier),
             first_mention_planner=first_mentions,
+            first_mention_recorder=first_mentions.record_translations,
             batch_reviewer=reviewer,
             on_source_kept=kept.record,
             use_rich_pbar=False,
@@ -165,6 +166,7 @@ def run_paper_task(
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)
         result = asyncio.run(_drive_engine(high_level, config, progress))
         report.first_mentions = first_mentions.placements
+        report.first_mention_glosses = first_mentions.written
         mono = output_dir / OUTPUT_FILES["mono"]
         dual = output_dir / OUTPUT_FILES["dual"]
         if not result.mono_pdf_path or not result.dual_pdf_path:

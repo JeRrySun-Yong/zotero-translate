@@ -3,13 +3,14 @@
 After the paper dossier, the paper task sends one request with the dossier
 and the full text. The pipeline model decides from this paper's context
 which expressions are key concepts (kept in English, with a short Chinese
-gloss for their first mentions) and which are basic terms (rendered in
-Chinese). Every English spelling is then checked against the full text:
-a spelling must appear verbatim, ignoring case, whitespace and line-end
-hyphens. Spellings that do not appear are dropped; an entry left without
-spellings is dropped; both are reported. Of the key concepts that remain,
-only the first ``KEY_CONCEPT_LIMIT`` in the model's order (most important
-first) are kept; the rest are dropped and reported as over the limit.
+noun phrase as the gloss for their first mentions) and which are basic
+terms (rendered in Chinese). Every English spelling is then checked
+against the full text: a spelling must appear verbatim, ignoring case,
+whitespace and line-end hyphens. Spellings that do not appear are dropped;
+an entry left without spellings is dropped; both are reported. Of the key
+concepts that remain, only the first ``KEY_CONCEPT_LIMIT`` in the model's
+order (most important first) are kept; the rest are dropped and reported
+as over the limit.
 
 The term list is saved in the task directory and becomes the engine's
 glossary: a key concept's target is the source itself, a basic term's
@@ -87,9 +88,10 @@ actually occurs, with and without a hyphen (e.g. "multi agent" and "multi-agent"
 singular and plural: a variant that is not listed is translated into Chinese.
 - "category" (string): "key_concept" or "basic_term".
 - "chinese" (string or null): for a basic term, its Chinese rendering; null for a key concept.
-- "gloss_zh" (string or null): for a key concept, one short Chinese sentence (at most 30 \
-characters) that explains what it means in this paper, for its first mention in the abstract \
-and in the body; null for a basic term.
+- "gloss_zh" (string or null): for a key concept, a Chinese noun phrase of at most 15 Chinese \
+characters that says what the concept is in this paper, for its first mention in the abstract \
+and in the body, where it stands in parentheses after the English term; no parentheses, no \
+English or other Latin letters, and no punctuation at the end. Null for a basic term.
 - "reason" (string): one sentence in Chinese on why the term has this category in this paper.
 
 Base every gloss and every Chinese rendering on the text of the paper alone. """

@@ -23,7 +23,18 @@ the body that contains one of its spellings get ``{"term", "gloss_zh"}``
 (the gloss without a final full stop).
 Matching ignores case, whitespace and line-end hyphens, takes whole words
 (a plural "s"/"es" allowed), and skips an occurrence that lies inside a
-longer key concept's occurrence ("harness" inside "meta-harness").
+longer key concept's occurrence ("harness" inside "meta-harness") or inside
+the source's own parentheses ("… models (MLLMs)"): a gloss there would nest
+one pair of parentheses in another. The next occurrence is taken instead.
+
+After translation the engine hands back the final text of each paragraph
+that asked for glosses. A gloss counts as written when the final text,
+without style tags and whitespace and NFKC-normalised (PDF text layers
+hold CJK compatibility characters), contains the gloss normalised the same
+way. ``placements`` then records this per concept and range, and
+``written`` lists the planned glosses that were not written: the model may
+leave a gloss out where the source explains the concept right there. This
+is only recorded; nothing is translated again.
 """
 
 from __future__ import annotations
@@ -47,6 +58,8 @@ _REFERENCES_HEADING = re.compile(
 
 # Sentence punctuation at the end of a gloss, dropped: "（…。）" reads badly.
 _GLOSS_END = "。．.；;，,！!"
+_STYLE_TAG = re.compile(r"</?style[^>]*>")
+RANGES = (("abstract", "abstract_page"), ("body", "body_page"))
 
 Paragraph = tuple[int, str | None, str]  # page number (0-based), layout label, source text
 
@@ -59,7 +72,10 @@ class _Concept:
 
 
 class FirstMentionPlan:
-    """Called once by the engine; ``placements`` then holds the pages for the task report."""
+    """Called once by the engine before translation, and ``record_translations`` once after.
+
+    ``placements`` and ``written`` then hold the task report's parts.
+    """
 
     def __init__(self, terms: list[dict]):
         self._concepts = [
@@ -72,16 +88,25 @@ class FirstMentionPlan:
             if term["category"] == KEY_CONCEPT
         ]
         self.placements: list[dict] = []
+        self.written: dict | None = None
+        self._planned: list[dict] = []  # {"concept", "term", "gloss_zh", "range", "page", "index"}
 
     def __call__(self, paragraphs: list[Paragraph]) -> dict[int, list[dict]]:
         """Paragraph index -> the glosses to ask for there, in concept order."""
         abstract, body = find_ranges(paragraphs)
         glosses: dict[int, list[dict]] = {}
         pages = {
-            c.first: {"concept": c.first, "abstract_page": None, "body_page": None}
+            c.first: {
+                "concept": c.first,
+                "abstract_page": None,
+                "body_page": None,
+                "abstract_written": None,
+                "body_written": None,
+            }
             for c in self._concepts
         }
-        for key, indices in (("abstract_page", abstract), ("body_page", body)):
+        planned = []
+        for (where, key), indices in zip(RANGES, (abstract, body)):
             pending = set(range(len(self._concepts)))
             for index in indices:
                 if not pending:
@@ -98,12 +123,43 @@ class FirstMentionPlan:
                         {"term": spelling, "gloss_zh": concept.gloss_zh}
                     )
                     pages[concept.first][key] = page + 1
+                    planned.append(
+                        {
+                            "concept": concept.first,
+                            "term": spelling,
+                            "gloss_zh": concept.gloss_zh,
+                            "range": where,
+                            "page": page + 1,
+                            "index": index,
+                        }
+                    )
         self.placements = list(pages.values())
+        self._planned = planned
         return glosses
+
+    def record_translations(self, finals: dict[int, str]) -> None:
+        """Record which planned glosses ``finals`` (paragraph index -> final text) contain."""
+        by_concept = {p["concept"]: p for p in self.placements}
+        not_written = []
+        for gloss in self._planned:
+            final = finals.get(gloss["index"])
+            written = final is not None and _normalised(gloss["gloss_zh"]) in _normalised(final)
+            by_concept[gloss["concept"]][gloss["range"] + "_written"] = written
+            if not written:
+                not_written.append(
+                    {k: gloss[k] for k in ("concept", "term", "gloss_zh", "range", "page")}
+                    | {"translation": final}
+                )
+        self.written = {
+            "planned": len(self._planned),
+            "written": len(self._planned) - len(not_written),
+            "not_written": not_written,
+        }
 
     def _mentions(self, text: str) -> list[tuple[int, str]]:
         """``(concept number, spelling)`` for each concept that occurs in ``text``."""
         text = _squeeze(unicodedata.normalize("NFKC", text))
+        parenthesised = _parenthesised(text)
         matches = [
             (m.start(), m.end(), number, spelling)
             for number, concept in enumerate(self._concepts)
@@ -116,9 +172,30 @@ class FirstMentionPlan:
                 s <= start and end <= e and e - s > end - start and n != number
                 for s, e, n, _ in matches
             )
-            if not covered:
+            inside = any(s < start and end <= e for s, e in parenthesised)
+            if not covered and not inside:
                 found.setdefault(number, spelling)
         return sorted(found.items())
+
+
+def _parenthesised(text: str) -> list[tuple[int, int]]:
+    """``(open, close)`` positions of each matched pair of parentheses in ``text``.
+
+    An unmatched parenthesis ("1)" in a list, a pair split across
+    paragraphs) encloses nothing.
+    """
+    pairs, opened = [], []
+    for position, char in enumerate(text):
+        if char in "(（":
+            opened.append(position)
+        elif char in ")）" and opened:
+            pairs.append((opened.pop(), position))
+    return pairs
+
+
+def _normalised(text: str) -> str:
+    """``text`` without style tags and whitespace, NFKC-normalised."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", _STYLE_TAG.sub("", text)))
 
 
 def find_ranges(paragraphs: list[Paragraph]) -> tuple[range, range]:
