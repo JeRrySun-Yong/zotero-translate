@@ -46,7 +46,7 @@ Review the draft translation of a batch of paragraphs from an English academic p
 - Chinese that is unidiomatic or hard to read.
 - Terminology: follow the glossary. A target term identical to its source term is a key concept of this paper: keep it in English exactly as written, never translate it.
 {NO_ADDED_PARENTHESES_RULES}
-- First-mention glosses: an item with "first_mention_glosses" has, at the first occurrence of each listed "term", the term in English followed by its "gloss_zh" in full-width parentheses: term（gloss_zh）.
+- First-mention glosses: an item with "first_mention_glosses" has, at the first occurrence of each listed "term" in the item that is not inside parentheses (the source's own parentheses never hold a gloss), the term in English followed by its "gloss_zh" in full-width parentheses: term（gloss_zh）.
 {GLOSS_PLACEMENT_RULES}
 - Each gloss at most once; no gloss anywhere else. Do not add a gloss that the draft left out where the source explains the term right there.
 If a draft is already right, return it unchanged.

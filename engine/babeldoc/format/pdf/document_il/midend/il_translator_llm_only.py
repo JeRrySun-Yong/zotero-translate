@@ -106,7 +106,8 @@ GLOSS_PLACEMENT_RULES = """- Put the gloss after the whole English phrase that c
 
 FIRST_MENTION_RULES = f"""## First-Mention Glosses
 Some input items have "{FIRST_MENTION_FIELD}": key concepts of this paper that occur in that item for the first time in the abstract or in the body. In the output of such an item:
-- At the first occurrence of each listed "term" in the item, keep the term in English exactly as written there, and put its "gloss_zh" in full-width parentheses after it, with no space: term（gloss_zh）. Example: agentic（自主规划与执行能力）.
+- At the first occurrence of each listed "term" in the item that is not inside parentheses, keep the term in English exactly as written there, and put its "gloss_zh" in full-width parentheses after it, with no space: term（gloss_zh）. Example: agentic（自主规划与执行能力）.
+- Skip an occurrence inside the input's own parentheses: in "… Generation (PEG) state. The PEG state …", the gloss goes after the second PEG, never inside "(PEG)".
 {GLOSS_PLACEMENT_RULES}
 - Add each gloss at most once. Add no gloss anywhere else, and do not output the "{FIRST_MENTION_FIELD}" field.
 

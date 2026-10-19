@@ -17,6 +17,7 @@ import json
 import re
 import unicodedata
 
+import pymupdf
 import pytest
 
 from tests.conftest import FIXTURES
@@ -56,7 +57,9 @@ TERMS = [
 OMITTED = ("programmable", "以程序表达生成过程")
 
 # Phrases of the rules, as the instructions state them.
+OUTSIDE_PARENTHESES = "first occurrence of each listed \"term\" in the item that is not inside parentheses"
 GLOSS_RULES = [
+    OUTSIDE_PARENTHESES,
     "after the whole English phrase that contains the term",
     "outside style tags",
     "you may leave the gloss out",
@@ -210,3 +213,41 @@ def test_the_term_list_asks_for_short_noun_phrase_glosses(maliang):
 
 def squeeze(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).split())
+
+
+# One paragraph that names PEG inside parentheses first and outside them
+# after. The acceptance papers have no such paragraph, so the test writes
+# one on a generated page.
+SAME_PARAGRAPH = (
+    "We define the Persistent Executable Generation (PEG) state for visual programs. "
+    "The PEG state keeps every program, every rendered result and the task context, "
+    "so that later revisions can start from a known and inspectable point of the process."
+)
+
+
+def test_in_one_paragraph_the_gloss_asks_for_the_occurrence_outside_parentheses(
+    tmp_path_factory,
+):
+    pdf = tmp_path_factory.mktemp("same-paragraph") / "same-paragraph.pdf"
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        page.insert_textbox(pymupdf.Rect(72, 100, 520, 400), SAME_PARAGRAPH, fontsize=11)
+        doc.save(pdf)
+    terms = [key_concept(["PEG"], "持久可执行生成状态")]
+    with FakeModel() as model:
+        model.respond("term_list", lambda body: json.dumps({"terms": terms}, ensure_ascii=False))
+        service = launch_service(model, tmp_path_factory.mktemp("same-paragraph-svc"))
+        try:
+            task_id = service.submit(pdf)
+            final = service.wait(task_id)
+        finally:
+            stop_service(service)
+    assert final["state"] == "succeeded", final["error"]
+
+    batches = model.requests_of("translate_batch")
+    [(term, text)] = gloss_requests(batches)["持久可执行生成状态"]
+    assert term == "PEG"
+    assert "(PEG)" in plain(text) and "The PEG state" in plain(text)
+    [request] = [r for r in batches if any(GLOSS_FIELD in i for i in batch_items(r.prompt))]
+    instructions = squeeze(request.prompt.split("## Here is the input:", 1)[0])
+    assert squeeze(OUTSIDE_PARENTHESES) in instructions
