@@ -223,6 +223,38 @@ def test_a_literal_the_engine_glued_passes_when_the_translation_writes_it_normal
         assert text in mono
 
 
+GLUED_FIGURE = re.compile(r"Fig\.((?:</style><style id='\d+'>)?)(\d+)")
+
+
+@pytest.mark.parametrize(
+    "wrong_number",
+    [
+        pytest.param(lambda n: str(int(n) + 1), id="Fig.6 as 图 7"),
+        pytest.param(lambda n: "1" + n, id="Fig.6 as 图 16"),
+    ],
+)
+def test_a_glued_figure_number_the_translation_changes_still_fails_the_checks(
+    wrong_number, fake_model, start_service
+):
+    def respond(body: dict) -> str:
+        return GLUED_FIGURE.sub(
+            lambda m: "图 " + m.group(1) + wrong_number(m.group(2)), pseudo_translate_batch(body)
+        )
+
+    fake_model.respond("translate_batch", respond)
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / "maliang-p18.pdf")
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # Draft and review both have the wrong figure number: after the
+    # retries, the two paragraphs with Fig.6 and Fig.9 keep their source.
+    assert final["kept_source_paragraphs"] == 2
+    reasons = " ".join(k["reason"] for k in service.report(task_id)["kept_source_paragraphs"])
+    assert "Fig.6" in reasons and "Fig.9" in reasons
+
+
 def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_service):
     fake_model.fail_same_request(["500", "500", "500", "500"], kind="review")
     service = start_service(fake_model)

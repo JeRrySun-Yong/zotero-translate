@@ -15,9 +15,9 @@ short Chinese reasons. An empty list means the translation passes.
 - Literals: URLs, e-mail addresses, code identifiers (``snake_case``,
   ``call()``, file names), and names that mix letters and digits with a
   capital (``GPT-5.5``, ``H100``, ``Qwen2.5-VL``) occur in the translation
-  character for character, whitespace ignored: both the literal and the
-  translation lose their whitespace before the comparison. Spellings the
-  paper's glossary translates are not checked.
+  character for character, whitespace ignored: the translation loses its
+  whitespace before the comparison (a literal never contains any).
+  Spellings the paper's glossary translates are not checked.
 
 The checks are deliberately conservative: a false alarm makes a paragraph
 fall back to its draft, be resent, or keep its source text. The engine's
@@ -34,7 +34,9 @@ paragraph text often lacks the space between two words
   ``Fig.4``; the translation writes "Introducing GPT-5.5", "附录 H.1",
   "图 4"), a trailing lower-case word of 2 or more letters after a capital
   or digit (``GPT-5.5and``), or a trailing capitalised word after a
-  lower-case letter (``...ac.aeWork``).
+  lower-case letter (``...ac.aeWork``). What is left of ``Fig.4`` is a
+  number: it must be a whole number of the translation, so "图 14" and
+  "图 5" fail as they would for ``Fig. 4``.
 """
 
 from __future__ import annotations
@@ -90,9 +92,13 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
         )
     source_text, target_text = _plain(source), _plain(translation)
     literals = [lit for lit in _literals(source_text) if lit.lower() not in translated_terms]
-    target_squeezed = _squeeze(target_text)
+    target_squeezed = _WHITESPACE.sub("", target_text)
+    target_whole_numbers = {m.group(1).replace(",", "") for m in _NUMBER.finditer(target_text)}
     for literal in dict.fromkeys(literals):
-        if not any(_squeeze(variant) in target_squeezed for variant in _variants(literal)):
+        if not any(
+            variant in (target_whole_numbers if variant.isdigit() else target_squeezed)
+            for variant in _variants(literal)
+        ):
             found.append(f"字面值 {literal} 被改动或缺失")
     source_numbers = _numbers(source_text, literals)
     target_numbers = _numbers(target_text, literals)
@@ -105,11 +111,6 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
 def _plain(text: str) -> str:
     """Text without style tags; formula placeholders become spaces."""
     return _FORMULA.sub(" ", _STYLE_TAG.sub("", text))
-
-
-def _squeeze(text: str) -> str:
-    """Text without whitespace: the engine loses spaces between words."""
-    return _WHITESPACE.sub("", text)
 
 
 def _literals(text: str) -> list[str]:
@@ -129,7 +130,11 @@ def _literals(text: str) -> list[str]:
 
 
 def _variants(literal: str) -> list[str]:
-    """The literal, and the literal without each kind of glued-on word."""
+    """The literal, and the literal without each kind of glued-on word.
+
+    A variant may be a lone digit only when an abbreviation was glued to a
+    number (``Fig.4``); it is then matched as a whole number.
+    """
     variants = [literal]
     for glued in _GLUED:
         shorter = glued.sub("", literal)
