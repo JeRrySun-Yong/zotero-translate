@@ -15,8 +15,9 @@ short Chinese reasons. An empty list means the translation passes.
 - Literals: URLs, e-mail addresses, code identifiers (``snake_case``,
   ``call()``, file names), and names that mix letters and digits with a
   capital (``GPT-5.5``, ``H100``, ``Qwen2.5-VL``) occur in the translation
-  character for character. Spellings the paper's glossary translates are
-  not checked.
+  character for character, whitespace ignored: the translation loses its
+  whitespace before the comparison (a literal never contains any).
+  Spellings the paper's glossary translates are not checked.
 
 The checks are deliberately conservative: a false alarm makes a paragraph
 fall back to its draft, be resent, or keep its source text. The engine's
@@ -28,9 +29,16 @@ paragraph text often lacks the space between two words
   literal;
 - a literal also passes when the translation has it without a glued-on
   word: a leading lower-case word before a capital (``theGPT-4``), a
-  trailing lower-case word of 2 or more letters after a capital or digit
-  (``GPT-5.5and``), or a trailing capitalised word after a lower-case letter
-  (``...ac.aeWork``).
+  leading capitalised word, or abbreviation with its dot, before what
+  starts like a name of its own (``IntroducingGPT-5.5``, ``AppendixH.1``,
+  ``Fig.4``; the translation writes "Introducing GPT-5.5", "附录 H.1",
+  "图 4"), a trailing lower-case word of 2 or more letters after a capital
+  or digit (``GPT-5.5and``), or a trailing capitalised word after a
+  lower-case letter (``...ac.aeWork``). What is left of ``Fig.4`` or
+  ``Sec.3.2`` is a number: it must be one of the numbers the number check
+  finds in the translation (outside the source's literals, so not the 4 of
+  ``GPT-4``), so "图 14", "第 13.2 节" and "图 5" fail as they would for
+  ``Fig. 4`` and ``Sec. 3.2``.
 """
 
 from __future__ import annotations
@@ -58,10 +66,12 @@ _NAME = _LITERALS[-1]
 _WORD_THEN_DIGITS = re.compile(r"[A-Za-z][a-z]+\d")
 _GLUED = [
     re.compile(r"^[a-z]+(?=[A-Z])"),
+    re.compile(r"^[A-Z][a-z]+(?:\.(?=\d)|(?=[A-Z][A-Z0-9.-]))"),
     re.compile(r"(?<=[A-Z0-9])[a-z]{2,}$"),
     re.compile(r"(?<=[a-z])[A-Z][a-z]+$"),
 ]
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\""
+_WHITESPACE = re.compile(r"\s+")
 
 _NUMBER = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:,\d{3})*(?:\.\d+)?)(\s*[%％])?(?![A-Za-z0-9_])")
 
@@ -84,11 +94,15 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
         )
     source_text, target_text = _plain(source), _plain(translation)
     literals = [lit for lit in _literals(source_text) if lit.lower() not in translated_terms]
-    for literal in dict.fromkeys(literals):
-        if not any(variant in target_text for variant in _variants(literal)):
-            found.append(f"字面值 {literal} 被改动或缺失")
+    target_squeezed = _WHITESPACE.sub("", target_text)
     source_numbers = _numbers(source_text, literals)
     target_numbers = _numbers(target_text, literals)
+    for literal in dict.fromkeys(literals):
+        if not any(
+            _in_translation(variant, target_squeezed, target_numbers)
+            for variant in _variants(literal)
+        ):
+            found.append(f"字面值 {literal} 被改动或缺失")
     for number, count in source_numbers.items():
         if target_numbers[number] < count:
             found.append(f"数字 {number} 被改动或缺失")
@@ -116,12 +130,24 @@ def _literals(text: str) -> list[str]:
     return found
 
 
+def _in_translation(variant: str, target_squeezed: str, target_numbers: collections.Counter) -> bool:
+    """A number variant among the translation's numbers; any other in its text without whitespace."""
+    number = _NUMBER.fullmatch(variant)
+    if number:
+        return target_numbers[_number(number)] > 0
+    return variant in target_squeezed
+
+
 def _variants(literal: str) -> list[str]:
-    """The literal, and the literal without each kind of glued-on word."""
+    """The literal, and the literal without each kind of glued-on word.
+
+    A variant is a number only when an abbreviation was glued to a number
+    (``Fig.4``, ``Sec.3.2``); it is then matched as a whole number.
+    """
     variants = [literal]
     for glued in _GLUED:
         shorter = glued.sub("", literal)
-        if shorter != literal and len(shorter) > 1:
+        if shorter != literal and (len(shorter) > 1 or _NUMBER.fullmatch(shorter)):
             variants.append(shorter)
     return variants
 
@@ -129,11 +155,12 @@ def _variants(literal: str) -> list[str]:
 def _numbers(text: str, literals: list[str]) -> collections.Counter:
     for literal in sorted(set(literals), key=len, reverse=True):
         text = text.replace(literal, " ")
-    numbers = collections.Counter()
-    for match in _NUMBER.finditer(text):
-        value = match.group(1).replace(",", "")
-        numbers[value + ("%" if match.group(2) else "")] += 1
-    return numbers
+    return collections.Counter(_number(match) for match in _NUMBER.finditer(text))
+
+
+def _number(match: re.Match) -> str:
+    """A number as the checks compare it: no thousands separators; % kept."""
+    return match.group(1).replace(",", "") + ("%" if match.group(2) else "")
 
 
 def _formula_list(counter: collections.Counter) -> str:
