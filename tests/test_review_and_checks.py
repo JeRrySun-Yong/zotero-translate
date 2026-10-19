@@ -4,12 +4,17 @@ Spec "计划覆盖的行为" 8: every translation batch is followed by one revie
 request. 11: a review answer that changes a number gives way to the draft
 that passes the checks; when draft and review both change a number, the
 review is resent within the batch's retries and then the paragraph keeps
-its source text, counted in ``kept_source_paragraphs``.
+its source text, counted in ``kept_source_paragraphs``. Ticket 12: a
+literal the engine glued to a neighbouring word (``Fig.6``, ``AppendixH.1``,
+``IntroducingGPT-5.5``) passes when the translation writes it normally.
 """
 
 import json
 import re
 
+import pytest
+
+from tests.conftest import FIXTURES
 from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import batch_items
@@ -23,6 +28,7 @@ REVIEW_PREFIX = "审校译文"
 NUMBER = "78.32"
 WRONG_NUMBER = "87.32"
 ABSTRACT_PHRASE = "achievesthehighestscoreof78.32"
+STYLE_TAG = re.compile(r"</?style[^>]*>")
 
 
 def reviewed(change_number: bool):
@@ -155,6 +161,66 @@ def test_a_resubmit_on_the_same_data_judges_the_cached_review(fake_model, start_
     assert PSEUDO_PREFIX + SOURCE_PHRASE.replace(" ", "") in mono
     assert WRONG_NUMBER not in mono
     assert REVIEW_PREFIX in mono
+
+
+def unglue(spellings: dict[str, str]):
+    """A draft answer: the pseudo-translation with each glued spelling written normally."""
+
+    def respond(body: dict) -> str:
+        text = pseudo_translate_batch(body)
+        for glued, normal in spellings.items():
+            text = text.replace(glued, normal)
+        return text
+
+    return respond
+
+
+# Excerpts whose engine paragraph text lost the space inside a literal
+# (ticket 12): the glued spelling the check sees, how the draft writes it
+# instead, and what the mono PDF then shows (whitespace removed).
+GLUED_LITERALS = {
+    # AutoRef page 7 "Appendix H.1", page 14 "OpenAI. Introducing GPT-5.5."
+    "autoref-p7-p14.pdf": (
+        ["AppendixH.1", "IntroducingGPT-5.5"],
+        {"Appendix": "附录 ", "IntroducingGPT": "Introducing GPT"},
+        ["附录H.1", "IntroducingGPT-5.5"],
+    ),
+    # MaLiang page 18 "Fig. 6", "Fig. 9"
+    "maliang-p18.pdf": (
+        ["Fig.6", "Fig.9"],
+        {"Fig.": "图 "},
+        ["图6", "图9"],
+    ),
+}
+
+
+@pytest.mark.parametrize("excerpt", sorted(GLUED_LITERALS))
+def test_a_literal_the_engine_glued_passes_when_the_translation_writes_it_normally(
+    excerpt, fake_model, start_service
+):
+    glued_literals, spellings, shown = GLUED_LITERALS[excerpt]
+    fake_model.respond("translate_batch", unglue(spellings))
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / excerpt)
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # The engine did glue the literals: the batches carry the glued spelling.
+    inputs = [
+        STYLE_TAG.sub("", item["input"])
+        for r in fake_model.requests_of("translate_batch")
+        for item in batch_items(r.prompt)
+    ]
+    for glued in glued_literals:
+        assert any(glued in text for text in inputs), glued
+    # Draft and review pass the checks: nothing is resent or kept in English.
+    assert final["kept_source_paragraphs"] == 0
+    assert service.report(task_id)["review"]["drafts_used"] == []
+    assert len(fake_model.requests_of("review")) == len(fake_model.requests_of("translate_batch"))
+    mono = pdf_text(service.download(task_id, "mono"))
+    for text in shown:
+        assert text in mono
 
 
 def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_service):

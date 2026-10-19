@@ -15,8 +15,9 @@ short Chinese reasons. An empty list means the translation passes.
 - Literals: URLs, e-mail addresses, code identifiers (``snake_case``,
   ``call()``, file names), and names that mix letters and digits with a
   capital (``GPT-5.5``, ``H100``, ``Qwen2.5-VL``) occur in the translation
-  character for character. Spellings the paper's glossary translates are
-  not checked.
+  character for character, whitespace ignored: both the literal and the
+  translation lose their whitespace before the comparison. Spellings the
+  paper's glossary translates are not checked.
 
 The checks are deliberately conservative: a false alarm makes a paragraph
 fall back to its draft, be resent, or keep its source text. The engine's
@@ -28,9 +29,12 @@ paragraph text often lacks the space between two words
   literal;
 - a literal also passes when the translation has it without a glued-on
   word: a leading lower-case word before a capital (``theGPT-4``), a
-  trailing lower-case word of 2 or more letters after a capital or digit
-  (``GPT-5.5and``), or a trailing capitalised word after a lower-case letter
-  (``...ac.aeWork``).
+  leading capitalised word, or abbreviation with its dot, before what
+  starts like a name of its own (``IntroducingGPT-5.5``, ``AppendixH.1``,
+  ``Fig.4``; the translation writes "Introducing GPT-5.5", "附录 H.1",
+  "图 4"), a trailing lower-case word of 2 or more letters after a capital
+  or digit (``GPT-5.5and``), or a trailing capitalised word after a
+  lower-case letter (``...ac.aeWork``).
 """
 
 from __future__ import annotations
@@ -58,10 +62,12 @@ _NAME = _LITERALS[-1]
 _WORD_THEN_DIGITS = re.compile(r"[A-Za-z][a-z]+\d")
 _GLUED = [
     re.compile(r"^[a-z]+(?=[A-Z])"),
+    re.compile(r"^[A-Z][a-z]+(?:\.(?=\d)|(?=[A-Z][A-Z0-9.-]))"),
     re.compile(r"(?<=[A-Z0-9])[a-z]{2,}$"),
     re.compile(r"(?<=[a-z])[A-Z][a-z]+$"),
 ]
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\""
+_WHITESPACE = re.compile(r"\s+")
 
 _NUMBER = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:,\d{3})*(?:\.\d+)?)(\s*[%％])?(?![A-Za-z0-9_])")
 
@@ -84,8 +90,9 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
         )
     source_text, target_text = _plain(source), _plain(translation)
     literals = [lit for lit in _literals(source_text) if lit.lower() not in translated_terms]
+    target_squeezed = _squeeze(target_text)
     for literal in dict.fromkeys(literals):
-        if not any(variant in target_text for variant in _variants(literal)):
+        if not any(_squeeze(variant) in target_squeezed for variant in _variants(literal)):
             found.append(f"字面值 {literal} 被改动或缺失")
     source_numbers = _numbers(source_text, literals)
     target_numbers = _numbers(target_text, literals)
@@ -98,6 +105,11 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
 def _plain(text: str) -> str:
     """Text without style tags; formula placeholders become spaces."""
     return _FORMULA.sub(" ", _STYLE_TAG.sub("", text))
+
+
+def _squeeze(text: str) -> str:
+    """Text without whitespace: the engine loses spaces between words."""
+    return _WHITESPACE.sub("", text)
 
 
 def _literals(text: str) -> list[str]:
@@ -121,7 +133,7 @@ def _variants(literal: str) -> list[str]:
     variants = [literal]
     for glued in _GLUED:
         shorter = glued.sub("", literal)
-        if shorter != literal and len(shorter) > 1:
+        if shorter != literal and (len(shorter) > 1 or shorter.isdigit()):
             variants.append(shorter)
     return variants
 
