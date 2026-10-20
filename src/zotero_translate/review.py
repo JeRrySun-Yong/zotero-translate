@@ -26,29 +26,38 @@ import threading
 from dataclasses import dataclass
 
 from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
+from babeldoc.format.pdf.document_il.midend.il_translator_llm_only import (
+    GLOSS_PLACEMENT_RULES,
+)
+from babeldoc.format.pdf.document_il.midend.il_translator_llm_only import (
+    NO_ADDED_PARENTHESES_RULES,
+)
 
 from zotero_translate.batch_context import condense
 from zotero_translate.checks import problems
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 
-INSTRUCTIONS = """\
+INSTRUCTIONS = f"""\
 Review the draft translation of a batch of paragraphs from an English academic paper into Simplified Chinese, and return the revised translation.
 
 ## What to fix
 - Mistranslations, omissions and additions compared with the source.
 - Chinese that is unidiomatic or hard to read.
 - Terminology: follow the glossary. A target term identical to its source term is a key concept of this paper: keep it in English exactly as written, never translate it.
-- First-mention glosses: an item with "first_mention_glosses" must have, at the first occurrence of each listed "term", the term in English followed by its "gloss_zh" in full-width parentheses: term（gloss_zh）. Each gloss exactly once; no gloss anywhere else.
+{NO_ADDED_PARENTHESES_RULES}
+- First-mention glosses: an item with "first_mention_glosses" has, at the first occurrence of each listed "term" in the item that is not inside parentheses (the source's own parentheses never hold a gloss), the term in English followed by its "gloss_zh" in full-width parentheses: term（gloss_zh）.
+{GLOSS_PLACEMENT_RULES}
+- Each gloss at most once; no gloss anywhere else. Do not add a gloss that the draft left out where the source explains the term right there.
 If a draft is already right, return it unchanged.
 
 ## Keep exactly as in the source
 - Every number, with the same digits: decimals, percentages, values with units. Do not convert units or write numbers in words.
-- Placeholders such as {v1} and tags such as <style id='1'>…</style>: the same ones, each as often as in the source.
+- Placeholders such as {{v1}} and tags such as <style id='1'>…</style>: the same ones, each as often as in the source.
 - URLs, code identifiers, model names and dataset names, character for character.
 
 ## Output format
-A JSON array with one object per input item: {"id": <the item's id>, "output": "<revised translation>"}. No other fields, no text before or after, no ```json fences.
+A JSON array with one object per input item: {{"id": <the item's id>, "output": "<revised translation>"}}. No other fields, no text before or after, no ```json fences.
 """
 
 

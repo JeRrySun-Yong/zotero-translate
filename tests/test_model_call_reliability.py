@@ -16,7 +16,7 @@ from tests.conftest import stop_service
 from tests.fake_model import FakeModel
 
 RESTART_ERROR = "翻译服务重启，任务中断"
-# A small request timeout (seconds) so timeouts happen fast; production uses 240.
+# A small request timeout (seconds) so timeouts happen fast; production uses 480.
 SMALL_TIMEOUT = 2.0
 FIRST_RETRY_WAIT = 1.0  # the client's first wait before a resend
 
