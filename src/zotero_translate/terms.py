@@ -12,6 +12,17 @@ concepts that remain, only the first ``KEY_CONCEPT_LIMIT`` in the model's
 order (most important first) are kept; the rest are dropped and reported
 as over the limit.
 
+The gloss says what the concept is in this paper (its kind and role), not
+a literal rendering. Each key concept also gets a Chinese name
+(``name_zh``), the head noun of its own gloss: other glosses that mention
+the concept, and the Chinese renderings of basic terms whose spelling
+contains it, use this name. The name does not enter the engine's glossary
+and does not change that a key concept stays in English in the
+translation. After the source check and the limit, ``check_glosses``
+reports glosses over 15 characters and the places that lack a contained
+key concept's name, in the task report only: nothing is retried,
+rewritten or cut.
+
 The term list is saved in the task directory and becomes the engine's
 glossary: a key concept's target is the source itself, a basic term's
 target its Chinese rendering. The engine injects only the entries found in
@@ -280,8 +291,8 @@ def check_glosses(terms: list[dict]) -> dict:
     - ``basic_terms_without_name``: a basic term with a spelling that
       contains a spelling of a key concept, whose Chinese rendering lacks
       that concept's name, one record per such pair;
-    - ``key_concepts_without_name``: the pairs that would need this name
-      are not checked.
+    - ``key_concepts_without_name``: key concepts without a Chinese name;
+      the pairs that would need it are not checked.
 
     Containment compares spellings lower-cased, without hyphens and
     whitespace, as plain strings: unrelated words can match ("agent" in

@@ -64,6 +64,7 @@ FAKE_TERM_LIST = {
             "category": "key_concept",
             "chinese": None,
             "gloss_zh": "假释义：优化框架本身的外层框架",
+            "name_zh": "外层框架",
             "reason": "假依据：本文的核心方法。",
         },
         {
