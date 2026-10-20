@@ -34,6 +34,7 @@ KEEP_ENGLISH = "keep_english"
 CHINESE = "chinese"
 GLOSSARY_NAME = "paper-terms"
 KEY_CONCEPT_LIMIT = 20
+GLOSS_LIMIT = 15
 NOT_IN_SOURCE = "原文中没有出现"
 OVER_LIMIT = f"超过 {KEY_CONCEPT_LIMIT} 个上限"
 
@@ -91,7 +92,25 @@ singular and plural: a variant that is not listed is translated into Chinese.
 - "gloss_zh" (string or null): for a key concept, a Chinese noun phrase of at most 15 Chinese \
 characters that says what the concept is in this paper, for its first mention in the abstract \
 and in the body, where it stands in parentheses after the English term; no parentheses, no \
-English or other Latin letters, and no punctuation at the end. Null for a basic term.
+English or other Latin letters, and no punctuation at the end. Null for a basic term. The gloss \
+explains the concept as this paper uses it: what kind of thing it is (for instance a system, \
+method, benchmark, metric, task or property) and what it does or what role it plays in this \
+paper. It is not a literal, word-for-word rendering of the English term: a dictionary \
+equivalent of one or two words is not a gloss. 15 Chinese characters is a hard limit: after \
+writing a gloss, count its characters; when it has more than 15, delete modifiers and keep the \
+head noun that names the kind of thing, such as 方法, 基准 or 机制. The gloss is a noun phrase \
+and never ends with 的. For illustration only, were knowledge distillation a key concept, \
+"知识蒸馏" would not be a gloss, while "用大模型输出训练小模型的方法" (14 characters) would be.
+- "name_zh" (string or null): for a key concept, its Chinese name: the head noun of its own \
+gloss, copied from "gloss_zh", so it likewise has no parentheses, no English or other Latin \
+letters and no punctuation. It is the one Chinese name of the concept in this term list. When \
+the gloss of another key concept mentions this concept, it uses this name exactly as written; \
+the Chinese rendering of a basic term whose English spelling contains an English spelling of \
+this concept (ignoring case, hyphens and spaces) uses this name too. Null for a basic term. For \
+illustration only, were replay buffer a key concept with the gloss "存放过往经验供重复采样的缓冲区", \
+its name would be "缓冲区"; the gloss of a key concept prioritized replay buffer would then say \
+"缓冲区", for instance "按优先级抽取经验的缓冲区", and a basic term replay buffer size would be \
+rendered with "缓冲区", for instance "缓冲区容量".
 - "reason" (string): one sentence in Chinese on why the term has this category in this paper.
 
 Base every gloss and every Chinese rendering on the text of the paper alone. """
@@ -118,6 +137,7 @@ class TermList:
             "key_concepts": sum(1 for t in self.terms if t["category"] == KEY_CONCEPT),
             "basic_terms": sum(1 for t in self.terms if t["category"] == BASIC_TERM),
             "discarded": self.discarded,
+            "gloss_checks": check_glosses(self.terms),
         }
 
     def glossary_entries(self) -> list[tuple[str, str]]:
@@ -176,11 +196,14 @@ def _parse_entry(item) -> dict:
         if not isinstance(gloss, str) or not gloss.strip():
             raise ValueError(f"关键概念 {spellings[0]} 缺少首现释义 gloss_zh")
         treatment, target, gloss = KEEP_ENGLISH, spellings[0], gloss.strip()
+        name = item.get("name_zh")
+        # A missing name is reported by check_glosses, not retried.
+        name = name.strip() if isinstance(name, str) and name.strip() else None
     elif category == BASIC_TERM:
         chinese = item.get("chinese")
         if not isinstance(chinese, str) or not chinese.strip():
             raise ValueError(f"基础术语 {spellings[0]} 缺少中文译法 chinese")
-        treatment, target, gloss = CHINESE, chinese.strip(), None
+        treatment, target, gloss, name = CHINESE, chinese.strip(), None, None
     else:
         raise ValueError(f"术语条目 {spellings[0]} 的类别不是 key_concept 或 basic_term")
     return {
@@ -189,6 +212,7 @@ def _parse_entry(item) -> dict:
         "treatment": treatment,
         "target": target,
         "gloss_zh": gloss,
+        "name_zh": name,
         "reason": reason.strip(),
     }
 
@@ -241,6 +265,80 @@ def limit_key_concepts(term_list: TermList) -> TermList:
                 continue
         terms.append(entry)
     return TermList(terms=terms, discarded=term_list.discarded + over)
+
+
+def check_glosses(terms: list[dict]) -> dict:
+    """Check the glosses and Chinese names of the kept ``terms``; only report.
+
+    Returns the four lists of the task report's ``gloss_checks``:
+
+    - ``long_glosses``: glosses over ``GLOSS_LIMIT`` characters, whitespace
+      not counted;
+    - ``compound_glosses_without_name``: a key concept with a spelling that
+      contains a spelling of another key concept, whose gloss lacks that
+      concept's name, one record per such pair;
+    - ``basic_terms_without_name``: a basic term with a spelling that
+      contains a spelling of a key concept, whose Chinese rendering lacks
+      that concept's name, one record per such pair;
+    - ``key_concepts_without_name``: the pairs that would need this name
+      are not checked.
+
+    Containment compares spellings lower-cased, without hyphens and
+    whitespace, as plain strings: unrelated words can match ("agent" in
+    "agentic"); the reader of the report judges them.
+    """
+    key_concepts = [t for t in terms if t["category"] == KEY_CONCEPT]
+    checks = {
+        "long_glosses": [],
+        "compound_glosses_without_name": [],
+        "basic_terms_without_name": [],
+        "key_concepts_without_name": [],
+    }
+    for concept in key_concepts:
+        characters = len(_without_spaces(concept["gloss_zh"]))
+        if characters > GLOSS_LIMIT:
+            checks["long_glosses"].append(
+                {
+                    "english": concept["english"],
+                    "name_zh": concept.get("name_zh"),
+                    "gloss_zh": concept["gloss_zh"],
+                    "characters": characters,
+                }
+            )
+        if not concept.get("name_zh"):
+            checks["key_concepts_without_name"].append(
+                {"english": concept["english"], "gloss_zh": concept["gloss_zh"]}
+            )
+    for entry in terms:
+        compound = entry["category"] == KEY_CONCEPT
+        chinese = entry["gloss_zh"] if compound else entry["target"]
+        for concept in key_concepts:
+            if concept is entry or not concept.get("name_zh"):
+                continue
+            if not _contains_spelling(entry["english"], concept["english"]):
+                continue
+            if _without_spaces(concept["name_zh"]) in _without_spaces(chinese):
+                continue
+            record = {"english": entry["english"]}
+            record["gloss_zh" if compound else "chinese"] = chinese
+            record["contains"] = {"english": concept["english"], "name_zh": concept["name_zh"]}
+            checks["compound_glosses_without_name" if compound else "basic_terms_without_name"].append(
+                record
+            )
+    return checks
+
+
+def _contains_spelling(spellings: list[str], contained: list[str]) -> bool:
+    """Whether a spelling contains a ``contained`` spelling, ignoring case, hyphens and spaces."""
+    return any(_bare(inner) in _bare(outer) for outer in spellings for inner in contained)
+
+
+def _bare(spelling: str) -> str:
+    return re.sub(r"[-\s]", "", unicodedata.normalize("NFKC", spelling)).lower()
+
+
+def _without_spaces(text: str) -> str:
+    return re.sub(r"\s", "", text)
 
 
 def _comparable_texts(text: str) -> tuple[str, str]:
