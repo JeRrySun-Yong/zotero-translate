@@ -28,7 +28,12 @@ Rules (spec "算法识别", user decision D4 = 2 on 2026-10-21):
 
 For each line the detector records the line number, the x where the line
 text starts, the baseline and the glyph runs (font, size, bold, small caps),
-for line-by-line typesetting. Small caps show up in the text layer as
+for line-by-line typesetting. It also marks which glyphs of the line keep
+their source text when the line is translated (``keep_flags``): formulas
+(math fonts), keywords set in bold, the title's ``Algorithm N`` and the
+``Require:``/``Ensure:``/``Input:``/``Output:`` labels, and function calls
+(small caps names) with everything inside their parentheses (user decision
+D5 = 1 on 2026-10-21). Small caps show up in the text layer as
 capitals in two alternating sizes of one font (for example 10 pt and 8 pt).
 Coordinates are PDF user space: y grows upwards.
 """
@@ -42,14 +47,28 @@ from dataclasses import field
 
 MIN_LINES = 3
 KEPT_SOURCE = "kept_source"
-# Until line-by-line translation exists (M2 ticket 02), every detected
-# algorithm keeps its source text.
-NOT_TRANSLATED_YET = "算法逐行翻译尚未实现，整个算法保留原文"
+TRANSLATED = "translated"
+# An algorithm keeps its source text until its translation is typeset.
+NOT_TRANSLATED = "算法没有经过逐行翻译，整个算法保留原文"
 
 _NUMBER = re.compile(r"^(\d{1,3}):$")
 _KEYWORD = re.compile(r"\b(for|return|Require)\b|←")
 _TITLE = re.compile(r"^(Algorithm\s*\d+|Procedure\b)")
 _HEADER = re.compile(r"^(Algorithm\s*\d+|Procedure\b|Require\b|Ensure\b|Input\b|Output\b)")
+# Keywords set in bold keep their source text.
+KEYWORDS = frozenset(
+    "for forall each all while do if then else elseif elsif end return repeat until to in "
+    "function procedure and or not break continue loop downto parallel "
+    "require ensure input output".split()
+)
+_LABEL = re.compile(r"^(Algorithm\d+[:.]?|Procedure|Require:|Ensure:|Input:|Output:)")
+_MATH_FONT = re.compile(
+    r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol)"
+)
+_CODE_FONT = re.compile(r"Courier|Mono|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE)
+COMMENT_MARK = "▷"
+_RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
+
 # Rows above line 1 that are not a title or Require/Ensure row (a wrapped
 # Require row, a bold section heading) may sit between header rows; more
 # than this many in a row end the search upwards.
@@ -90,6 +109,14 @@ class AlgorithmLine:
     y: float  # baseline estimate: the median bottom of the line's glyphs
     number_x: float | None = None  # where the line number starts
     runs: list[dict] = field(default_factory=list)
+    # The line's glyphs without the line number and blanks, left to right;
+    # their indexes in the page's characters; whether each keeps its source
+    # text; and (set by ``AlgorithmDetector.engine_page``) the engine's
+    # characters for them.
+    glyphs: list[Glyph] = field(default_factory=list, repr=False)
+    indexes: list[int] = field(default_factory=list, repr=False)
+    keep: list[bool] = field(default_factory=list, repr=False)
+    chars: list = field(default_factory=list, repr=False)
 
     def report(self) -> dict:
         return {
@@ -108,6 +135,7 @@ class AlgorithmFragment:
     box: tuple[float, float, float, float]  # x0, y0, x1, y1
     lines: list[AlgorithmLine]
     glyphs: set[int] = field(default_factory=set)  # indexes into the page's characters
+    chars: list = field(default_factory=list, repr=False)  # the engine's characters (engine_page)
 
     @property
     def numbers(self) -> list[int]:
@@ -119,7 +147,9 @@ class AlgorithmUnit:
     title: str | None
     fragments: list[AlgorithmFragment]
     result: str = KEPT_SOURCE
-    reason: str = NOT_TRANSLATED_YET
+    reason: str | None = NOT_TRANSLATED
+    # Each translated row: {"line", "part", "source", "output"} (set by the translator).
+    translations: list[dict] = field(default_factory=list)
 
     @property
     def numbers(self) -> list[int]:
@@ -135,6 +165,7 @@ class AlgorithmUnit:
             "last_line": numbers[-1],
             "result": self.result,
             "reason": self.reason,
+            "translations": self.translations,
             "fragments": [
                 {
                     "page": fragment.page,
@@ -161,7 +192,16 @@ class AlgorithmDetector:
 
     def engine_page(self, page) -> set[int]:
         """The engine hook: indexes in ``page.pdf_character`` of the page's pseudocode."""
-        return self(page.page_number + 1, glyphs_of_page(page))
+        known = {id(f) for unit in self.units for f in unit.fragments}
+        taken = self(page.page_number + 1, glyphs_of_page(page))
+        for unit in self.units:
+            for fragment in unit.fragments:
+                if id(fragment) in known:
+                    continue
+                fragment.chars = [page.pdf_character[i] for i in sorted(fragment.glyphs)]
+                for line in fragment.lines:
+                    line.chars = [page.pdf_character[i] for i in line.indexes]
+        return taken
 
     def __call__(self, page_number: int, glyphs: list[Glyph]) -> set[int]:
         """Detect the algorithms on one page; return the indexes of their glyphs."""
@@ -352,6 +392,24 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
         if first.text != "▷" and first.x0 > deepest:
             continue  # a row of another column
         right = max(right, _reach(glyphs, body, first.x0, gap))
+    # A numbered line runs on past that edge while its glyphs continue without
+    # a column gap, sub- and superscripts included (AutoDesign p7 line 4 ends
+    # in H'_{t+1} beyond the other lines): join each glyph to the nearest line
+    # number by height, as ``_lines`` does, and follow each line rightwards.
+    small = statistics.median(glyphs[i].size for i in band) if band else size
+    per_number: dict[int, list[int]] = {}
+    for i in band:
+        if i in number_glyphs or glyphs[i].x0 < numbers_right - 0.5:
+            continue
+        nearest = min(chain, key=lambda n: abs(n.yc - glyphs[i].yc))
+        distance = abs(nearest.yc - glyphs[i].yc)
+        if distance <= 0.4 * pitch or (glyphs[i].size < 0.85 * small and distance <= 0.75 * pitch):
+            per_number.setdefault(nearest.value, []).append(i)
+    for line_glyphs in per_number.values():
+        line_glyphs.sort(key=lambda i: glyphs[i].x0)
+        first = glyphs[line_glyphs[0]]
+        if first.x0 <= deepest:
+            right = max(right, _reach(glyphs, line_glyphs, first.x0, gap))
 
     # Header rows above line 1: title, Require/Ensure, and what lies between.
     above = [
@@ -439,6 +497,7 @@ def _lines(glyphs: list[Glyph], members: set[int], chain: list[_Number], pitch: 
 def _line(glyphs: list[Glyph], number, number_x, body: list[int], yc: float) -> AlgorithmLine:
     body = sorted(body, key=lambda i: glyphs[i].x0)
     text_glyphs = [i for i in body if not glyphs[i].blank]
+    line_glyphs = [glyphs[i] for i in text_glyphs]
     return AlgorithmLine(
         number=number,
         text=_row_text(glyphs, body),
@@ -446,7 +505,89 @@ def _line(glyphs: list[Glyph], number, number_x, body: list[int], yc: float) -> 
         y=statistics.median(glyphs[i].y0 for i in text_glyphs) if text_glyphs else yc,
         number_x=number_x,
         runs=_runs(glyphs, body),
+        glyphs=line_glyphs,
+        indexes=text_glyphs,
+        keep=keep_flags(line_glyphs),
     )
+
+
+def keep_flags(line: list[Glyph]) -> list[bool]:
+    """For each glyph of a line (left to right, no blanks): does it keep its source text?"""
+    keep = [bool(_MATH_FONT.search(g.font or "") or _CODE_FONT.search(g.font or "")) for g in line]
+    words = _words(line)
+    # A row set all in bold with a word that is not a keyword is a heading
+    # ("Asset generation and selection"): its words are not keywords.
+    texts = ["".join(line[k].text for k in word).rstrip(":").lower() for word in words]
+    heading = all(g.bold for g, math in zip(line, keep) if not math) and any(
+        t not in KEYWORDS and any(c.isalpha() for c in t) and not keep[word[0]]
+        for t, word in zip(texts, words)
+    )
+    for word in words:
+        glyphs = [line[k] for k in word]
+        text = "".join(g.text for g in glyphs)
+        if not heading and all(g.bold for g in glyphs) and text.rstrip(":").lower() in KEYWORDS:
+            for k in word:
+                keep[k] = True
+    # "to" between two kept runs: for i = 0 to 25 do.
+    for word in words:
+        text = "".join(line[k].text for k in word)
+        if (
+            text in _RANGE_WORDS
+            and word[0] > 0
+            and word[-1] + 1 < len(line)
+            and keep[word[0] - 1]
+            and keep[word[-1] + 1]
+        ):
+            for k in word:
+                keep[k] = True
+    # Function calls: a small caps name and everything inside its parentheses.
+    k = 0
+    while k < len(line):
+        word = next(w for w in words if k in w)
+        if word[0] != k or not _small_caps([line[j] for j in word]):
+            k += 1
+            continue
+        depth = 0
+        end = word[-1] + 1
+        for j in word:
+            keep[j] = True
+            depth += line[j].text.count("(") - line[j].text.count(")")
+        if depth == 0 and end < len(line) and line[end].text == "(":
+            depth, keep[end] = 1, True
+            end += 1
+        while depth > 0 and end < len(line):
+            keep[end] = True
+            depth += line[end].text.count("(") - line[end].text.count(")")
+            end += 1
+        k = end
+    # Set literals: everything between braces set in a math font ({left,right}).
+    depth = 0
+    for k, g in enumerate(line):
+        if depth > 0:
+            keep[k] = True
+        if keep[k] and g.text == "{":
+            depth += 1
+        elif keep[k] and g.text == "}" and depth > 0:
+            depth -= 1
+    # The title's "Algorithm N" and the Require/Ensure/Input/Output labels.
+    label = _LABEL.match("".join(g.text for g in line))
+    if label:
+        for k in range(len(label.group(0))):
+            keep[k] = True
+    return keep
+
+
+def _words(line: list[Glyph]) -> list[list[int]]:
+    """Positions of the line's glyphs grouped into words: a word gap or a font change ends a word."""
+    words: list[list[int]] = []
+    for k, g in enumerate(line):
+        if words:
+            last = line[words[-1][-1]]
+            if g.x0 - last.x1 <= 0.2 * g.size and g.font == last.font:
+                words[-1].append(k)
+                continue
+        words.append([k])
+    return words
 
 
 def _row_text(glyphs: list[Glyph], row: list[int]) -> str:

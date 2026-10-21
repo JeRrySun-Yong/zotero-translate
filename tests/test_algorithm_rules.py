@@ -10,6 +10,7 @@ import pymupdf
 
 from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.algorithms import Glyph
+from zotero_translate.algorithms import keep_flags
 
 
 def glyphs_of(page: pymupdf.Page) -> list[Glyph]:
@@ -92,3 +93,45 @@ def test_a_new_title_on_the_next_page_starts_another_algorithm():
     )
     assert [u.report()["pages"] for u in detector.units] == [[1], [2]]
     assert detector.units[1].title == "Algorithm 2 Next"
+
+
+def row(*runs: tuple[str, str, bool, float]) -> list[Glyph]:
+    """Glyphs of one row from (text, font, bold, size) runs; a space is a word gap."""
+    glyphs, x = [], 100.0
+    for text, font, bold, size in runs:
+        for ch in text:
+            if ch == " ":
+                x += 3
+                continue
+            glyphs.append(Glyph(ch, x, 100, x + 0.5 * size, 100 + size, font, size, bold))
+            x += 0.5 * size
+    return glyphs
+
+
+def kept(glyphs: list[Glyph]) -> str:
+    return "".join(g.text if k else "_" for g, k in zip(glyphs, keep_flags(glyphs)))
+
+
+TEXT, BOLD, MATH = "NimbusRomNo9L-Regu", "NimbusRomNo9L-Medi", "CMMI10"
+
+
+def test_keywords_formulas_and_calls_keep_their_source_text():
+    """Ticket 02: what a translated row keeps (D5: call arguments are identifiers)."""
+    loop = row(("for", BOLD, True, 10), (" each position ", TEXT, False, 10), ("do", BOLD, True, 10))
+    assert kept(loop) == "for" + "_" * 12 + "do"
+    call = row(
+        ("F", TEXT, False, 10), ("ILL", TEXT, False, 8), ("(", TEXT, False, 10),
+        ("C,", MATH, False, 10), (" hair silhouette)", TEXT, False, 10),
+    )
+    assert kept(call) == "FILL(C,hairsilhouette)"
+    to = row(
+        ("for ", BOLD, True, 10), ("i=0 ", MATH, False, 10), ("to ", TEXT, False, 10),
+        ("25 ", MATH, False, 10), ("do", BOLD, True, 10),
+    )
+    assert "_" not in kept(to)
+    braces = row(("d∈{", MATH, False, 10), ("left", TEXT, False, 10), ("}", MATH, False, 10))
+    assert "_" not in kept(braces)
+    heading = row(("Asset generation and selection", BOLD, True, 10))
+    assert set(kept(heading)) == {"_"}
+    title = row(("Algorithm 2 ", BOLD, True, 10), ("Procedural generation", TEXT, False, 10))
+    assert kept(title).startswith("Algorithm2_")

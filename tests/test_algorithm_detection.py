@@ -49,6 +49,10 @@ def finished(tmp_path_factory):
     """Every excerpt translated by the fake model: final status, report, mono PDF."""
     results = {}
     with FakeModel() as model:
+        # The line-by-line translation (ticket 02) gets an answer without
+        # rows, so every algorithm falls back to its source text: these tests
+        # are about detection and the source fallback.
+        model.respond("algorithm", lambda body: "[]")
         service = launch_service(model, tmp_path_factory.mktemp("algorithms"))
         try:
             names = [*ALGORITHMS, NUMBERED_LIST]

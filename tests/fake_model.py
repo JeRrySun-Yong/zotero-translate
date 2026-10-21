@@ -28,6 +28,12 @@ Request kinds are recognised from the message content:
 - ``review``: the review of a batch's drafts, recognised by ``REVIEW_MARKER``;
   it ends with a JSON array of ``{"id", "source", "draft", ...}`` objects.
   The default answer returns every draft unchanged.
+- ``algorithm``: the line-by-line translation of one algorithm (pseudocode),
+  recognised by ``ALGORITHM_MARKER``; it ends with a JSON array of
+  ``{"id", "line", "part", "source", "keep"}`` rows. The default answer is
+  ``pseudo_translate_algorithm``.
+- ``algorithm_review``: the review of an algorithm's drafts, recognised by
+  ``ALGORITHM_REVIEW_MARKER``. The default answer returns every draft.
 - ``single_paragraph``: the engine's one-paragraph prompts, which it uses to
   redo a paragraph after a failed or rejected batch.
 - ``other``: anything else.
@@ -36,6 +42,7 @@ Request kinds are recognised from the message content:
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -86,6 +93,10 @@ FAKE_PROMOTED_GLOSS = "假补写释义：升级的关键概念"
 
 # A phrase of the review request's instructions.
 REVIEW_MARKER = "Review the draft translation"
+
+# Phrases of the algorithm translation and algorithm review instructions.
+ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
+ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
 _ERRORS = {"500", "429", "timeout", "slow", "empty", "invalid_json"}
 
@@ -148,6 +159,8 @@ class FakeModel:
             "promoted_glosses": gloss_promoted_terms,
             "translate_batch": pseudo_translate_batch,
             "review": keep_drafts,
+            "algorithm": pseudo_translate_algorithm,
+            "algorithm_review": keep_algorithm_drafts,
             "single_paragraph": pseudo_translate_single,
             "other": lambda body: "ok",
         }
@@ -279,6 +292,10 @@ class FakeModel:
 
 def classify(body: dict) -> str:
     content = _last_user_content(body)
+    if ALGORITHM_REVIEW_MARKER in content:
+        return "algorithm_review"
+    if ALGORITHM_MARKER in content:
+        return "algorithm"
     if any(marker in content for marker in SINGLE_PARAGRAPH_MARKERS):
         return "single_paragraph"
     if REVIEW_MARKER in content:
@@ -348,6 +365,33 @@ def keep_drafts(body: dict) -> str:
     items = review_items(_last_user_content(body)) or []
     return json.dumps(
         [{"id": i["id"], "output": i["draft"]} for i in items], ensure_ascii=False
+    )
+
+
+def algorithm_rows(body: dict) -> list[dict]:
+    """The rows (``{"id", "line", "part", "source", "keep", ...}``) of an algorithm request."""
+    return _trailing_items(_last_user_content(body), "part") or []
+
+
+def pseudo_translate_algorithm(body: dict) -> str:
+    """Rows with natural language become ``PSEUDO_PREFIX`` + their placeholders,
+    numbers and names with digits; rows without natural language stay as they are."""
+    answer = []
+    for row in algorithm_rows(body):
+        source = row["source"]
+        if re.search(r"[^\W\d_]{2,}", re.sub(r"\{v\d+\}", "", source)):
+            kept = re.findall(r"\{v\d+\}|[A-Za-z0-9.]*\d[A-Za-z0-9.]*", source)
+            output = PSEUDO_PREFIX + " ".join(kept)
+        else:
+            output = source
+        answer.append({"id": row["id"], "line": row["line"], "output": output})
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def keep_algorithm_drafts(body: dict) -> str:
+    return json.dumps(
+        [{"id": r["id"], "line": r["line"], "output": r["draft"]} for r in algorithm_rows(body)],
+        ensure_ascii=False,
     )
 
 

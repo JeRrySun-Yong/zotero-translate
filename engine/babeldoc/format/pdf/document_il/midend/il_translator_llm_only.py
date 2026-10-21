@@ -200,6 +200,7 @@ class ILTranslatorLLMOnly:
         tracker = DocumentTranslateTracker()
         self.mid = 0
         self._index_reading_order(docs)
+        self._start_algorithm_translation(docs)
 
         if not self.translation_config.shared_context_cross_split_part.first_paragraph:
             # Try to find the first title paragraph
@@ -312,6 +313,22 @@ class ILTranslatorLLMOnly:
                 paragraphs.append((page.page_number, paragraph.layout_label, text))
         planner = self.translation_config.first_mention_planner
         self._first_mention_glosses = planner(paragraphs) if planner else {}
+
+    def _start_algorithm_translation(self, docs: Document) -> None:
+        """Hand every paragraph's page, box and section title to the algorithm translator."""
+        hook = self.translation_config.algorithm_translator
+        if hook is None:
+            return
+        paragraphs = []
+        for page in docs.page:
+            for paragraph in page.pdf_paragraph:
+                position = self._reading_order.get(id(paragraph))
+                if position is None or paragraph.box is None:
+                    continue
+                paragraphs.append(
+                    (page.page_number, paragraph.box, self._section_titles[position])
+                )
+        hook(paragraphs)
 
     def _record_first_mention_translations(self, docs: Document) -> None:
         """Hand the final text of each paragraph that asked for glosses to the recorder."""
