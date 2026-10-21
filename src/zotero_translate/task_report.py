@@ -10,8 +10,9 @@ abstract and in the body and whether the translation contains them (with
 the planned glosses it does not contain), the review counts (paragraphs the review changed,
 with draft and reviewed text; paragraphs that fell back to their draft) and
 the paragraphs that kept their source text, with page and reason, and the
-algorithms (pseudocode) found: pages, numbered lines, result and reason, and
-each line's number, start x and glyphs.
+algorithms (pseudocode) found: pages, numbered lines, result ("translated" or
+"kept_source") and the reason for keeping the source, each translated row's
+source and final text, and each line's number, start x and glyphs.
 """
 
 from __future__ import annotations
