@@ -69,6 +69,7 @@ For each item:
 ## Style
 - Produce fluent, professional $lang_out.
 - Preserve punctuation unless needed for target language fluency.
+$no_added_parentheses_rules
 
 ### Example
 Input:
@@ -99,12 +100,22 @@ $json_input_str"""
 
 FIRST_MENTION_FIELD = "first_mention_glosses"
 
+GLOSS_PLACEMENT_RULES = """- Put the gloss after the whole English phrase that contains the term, never inside the phrase: self-consistency decoding（gloss_zh）, not self-consistency（gloss_zh） decoding.
+- Write the gloss outside style tags, so that it does not take the term's bold or italic: when the term or its phrase ends a <style> tag, put the gloss right after the closing tag: <style id='1'>term</style>（gloss_zh）, not <style id='1'>term（gloss_zh）</style>.
+- Where the source right there already explains the term (a definition, an apposition or a list of its parts right after it), you may leave the gloss out."""
+
 FIRST_MENTION_RULES = f"""## First-Mention Glosses
 Some input items have "{FIRST_MENTION_FIELD}": key concepts of this paper that occur in that item for the first time in the abstract or in the body. In the output of such an item:
-- At the first occurrence of each listed "term" in the item, keep the term in English exactly as written there, and put its "gloss_zh" in full-width parentheses right after it, with no space: term（gloss_zh）. Example: agentic（具备自主规划与执行能力的）.
-- Add each gloss exactly once. Add no gloss anywhere else, and do not output the "{FIRST_MENTION_FIELD}" field.
+- At the first occurrence of each listed "term" in the item that is not inside parentheses, keep the term in English exactly as written there, and put its "gloss_zh" in full-width parentheses after it, with no space: term（gloss_zh）. Example: agentic（自主规划与执行能力）.
+- Skip an occurrence inside the input's own parentheses: in "… Adaptive Query Router (AQR) module. The AQR module …", the gloss goes after the second AQR, never inside "(AQR)".
+{GLOSS_PLACEMENT_RULES}
+- Add each gloss at most once. Add no gloss anywhere else, and do not output the "{FIRST_MENTION_FIELD}" field.
 
 """
+
+# Parentheses the source does not have make the translation hard to read.
+NO_ADDED_PARENTHESES_RULES = """- Do not add the English source words after Chinese text, as in 鲁棒性（Robustness）: write the Chinese alone, or the English alone where the glossary keeps a term in English.
+- Do not turn the source's commas, dashes or appositives into parentheses: an aside or apposition set off by commas or dashes stays set off by commas or dashes."""
 
 
 class BatchParagraph:
@@ -258,6 +269,7 @@ class ILTranslatorLLMOnly:
         # A batch whose request failed for good fails the stage instead of
         # leaving its paragraphs in the source language.
         self.il_translator.raise_if_request_failed()
+        self._record_first_mention_translations(docs)
 
         path = self.translation_config.get_working_file_path("translate_tracking.json")
 
@@ -300,6 +312,19 @@ class ILTranslatorLLMOnly:
                 paragraphs.append((page.page_number, paragraph.layout_label, text))
         planner = self.translation_config.first_mention_planner
         self._first_mention_glosses = planner(paragraphs) if planner else {}
+
+    def _record_first_mention_translations(self, docs: Document) -> None:
+        """Hand the final text of each paragraph that asked for glosses to the recorder."""
+        recorder = self.translation_config.first_mention_recorder
+        if recorder is None:
+            return
+        finals: dict[int, str] = {}
+        for page in docs.page:
+            for paragraph in page.pdf_paragraph:
+                position = self._reading_order.get(id(paragraph))
+                if position in self._first_mention_glosses:
+                    finals[position] = paragraph.unicode or ""
+        recorder(finals)
 
     def _first_mention_glosses_of(self, paragraph: PdfParagraph) -> list[dict]:
         position = self._reading_order.get(id(paragraph))
@@ -1135,6 +1160,7 @@ class ILTranslatorLLMOnly:
             json_input_str=json_input_str,
             glossary_tables_block=glossary_tables_block,
             lang_out=self.translation_config.lang_out,
+            no_added_parentheses_rules=NO_ADDED_PARENTHESES_RULES,
         )
 
     def _parse_llm_output(self, llm_output: str, expected_count: int) -> dict:

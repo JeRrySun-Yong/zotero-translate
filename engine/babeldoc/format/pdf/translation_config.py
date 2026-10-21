@@ -224,6 +224,7 @@ class TranslationConfig:
             [list[tuple[int, str | None, str]]], dict[int, list[dict]]
         ]
         | None = None,
+        first_mention_recorder: Callable[[dict[int, str]], None] | None = None,
         batch_reviewer: Callable[
             [list[dict], list[tuple[str, str]]], dict[int, str | None]
         ]
@@ -397,6 +398,9 @@ class TranslationConfig:
         # label, source text), returns paragraph index -> the first-mention
         # glosses to ask for in that paragraph ({"term", "gloss_zh"}).
         self.first_mention_planner = first_mention_planner
+        # Called once after translation with paragraph index -> final text
+        # for the paragraphs that asked for first-mention glosses.
+        self.first_mention_recorder = first_mention_recorder
         # Reviews an LLM batch after its draft translation. Given the items
         # ({"id", "source", "draft", "page"} and the first-mention glosses
         # field if any) and the batch's glossary entries, returns id -> the

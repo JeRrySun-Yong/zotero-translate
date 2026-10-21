@@ -4,8 +4,10 @@ It records the time spent in each stage, the pipeline model client's
 counters (HTTP requests sent, cache hits, retries, the maximum number of
 requests in flight), the batches whose requests failed for good and the
 term list counts with the spellings dropped because the source lacks them,
+the promoted basic terms, the promoted glosses request and the gloss checks,
 for each key concept the pages of its first-mention glosses in the
-abstract and in the body, the review counts (paragraphs the review changed,
+abstract and in the body and whether the translation contains them (with
+the planned glosses it does not contain), the review counts (paragraphs the review changed,
 with draft and reviewed text; paragraphs that fell back to their draft) and
 the paragraphs that kept their source text, with page and reason.
 """
@@ -32,6 +34,7 @@ class TaskReport:
         self.failed_batches: list[dict] = []
         self.terms: dict | None = None
         self.first_mentions: list[dict] | None = None
+        self.first_mention_glosses: dict | None = None
 
     def enter_stage(self, stage: str) -> None:
         if self._stages and self._stages[-1][0] == stage:
@@ -67,6 +70,7 @@ class TaskReport:
             "failed_batches": self.failed_batches,
             "terms": self.terms,
             "first_mentions": self.first_mentions,
+            "first_mention_glosses": self.first_mention_glosses,
             "review": self.reviewer.report() if self.reviewer else None,
             "kept_source_paragraphs": list(self.kept.paragraphs),
         }

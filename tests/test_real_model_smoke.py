@@ -6,7 +6,7 @@ the endpoint accepts all request parameters and that real output parses into
 both PDFs and a term list that is not empty, and that the task report lists
 no failed batch. Run it with:
 
-    ZT_REAL_MODEL_SMOKE=1 ZT_ENV_FILE=../unpacked/zotero-pdf2zh/.env uv run pytest tests/test_real_model_smoke.py
+    ZT_REAL_MODEL_SMOKE=1 ZT_ENV_FILE=$HOME/.config/zotero-translate/model.env uv run pytest tests/test_real_model_smoke.py
 """
 
 import os

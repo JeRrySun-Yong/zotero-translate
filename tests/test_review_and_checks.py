@@ -4,12 +4,18 @@ Spec "计划覆盖的行为" 8: every translation batch is followed by one revie
 request. 11: a review answer that changes a number gives way to the draft
 that passes the checks; when draft and review both change a number, the
 review is resent within the batch's retries and then the paragraph keeps
-its source text, counted in ``kept_source_paragraphs``.
+its source text, counted in ``kept_source_paragraphs``. Ticket 12: a
+literal the engine glued to a neighbouring word (``Fig.6``, ``AppendixH.1``,
+``IntroducingGPT-5.5``) passes when the translation writes it normally.
 """
 
 import json
 import re
 
+import pymupdf
+import pytest
+
+from tests.conftest import FIXTURES
 from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import batch_items
@@ -23,6 +29,7 @@ REVIEW_PREFIX = "审校译文"
 NUMBER = "78.32"
 WRONG_NUMBER = "87.32"
 ABSTRACT_PHRASE = "achievesthehighestscoreof78.32"
+STYLE_TAG = re.compile(r"</?style[^>]*>")
 
 
 def reviewed(change_number: bool):
@@ -155,6 +162,152 @@ def test_a_resubmit_on_the_same_data_judges_the_cached_review(fake_model, start_
     assert PSEUDO_PREFIX + SOURCE_PHRASE.replace(" ", "") in mono
     assert WRONG_NUMBER not in mono
     assert REVIEW_PREFIX in mono
+
+
+def unglue(spellings: dict[str, str]):
+    """A draft answer: the pseudo-translation with each glued spelling written normally."""
+
+    def respond(body: dict) -> str:
+        text = pseudo_translate_batch(body)
+        for glued, normal in spellings.items():
+            text = text.replace(glued, normal)
+        return text
+
+    return respond
+
+
+# Excerpts whose engine paragraph text lost the space inside a literal
+# (ticket 12): the glued spelling the check sees, how the draft writes it
+# instead, and what the mono PDF then shows (whitespace removed).
+GLUED_LITERALS = {
+    # AutoRef page 7 "Appendix H.1", page 14 "OpenAI. Introducing GPT-5.5."
+    "autoref-p7-p14.pdf": (
+        ["AppendixH.1", "IntroducingGPT-5.5"],
+        {"Appendix": "附录 ", "IntroducingGPT": "Introducing GPT"},
+        ["附录H.1", "IntroducingGPT-5.5"],
+    ),
+    # MaLiang page 18 "Fig. 6", "Fig. 9"
+    "maliang-p18.pdf": (
+        ["Fig.6", "Fig.9"],
+        {"Fig.": "图 "},
+        ["图6", "图9"],
+    ),
+}
+
+
+@pytest.mark.parametrize("excerpt", sorted(GLUED_LITERALS))
+def test_a_literal_the_engine_glued_passes_when_the_translation_writes_it_normally(
+    excerpt, fake_model, start_service
+):
+    glued_literals, spellings, shown = GLUED_LITERALS[excerpt]
+    fake_model.respond("translate_batch", unglue(spellings))
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / excerpt)
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # The engine did glue the literals: the batches carry the glued spelling.
+    inputs = [
+        STYLE_TAG.sub("", item["input"])
+        for r in fake_model.requests_of("translate_batch")
+        for item in batch_items(r.prompt)
+    ]
+    for glued in glued_literals:
+        assert any(glued in text for text in inputs), glued
+    # Draft and review pass the checks: nothing is resent or kept in English.
+    assert final["kept_source_paragraphs"] == 0
+    assert service.report(task_id)["review"]["drafts_used"] == []
+    assert len(fake_model.requests_of("review")) == len(fake_model.requests_of("translate_batch"))
+    mono = pdf_text(service.download(task_id, "mono"))
+    for text in shown:
+        assert text in mono
+
+
+GLUED_FIGURE = re.compile(r"Fig\.((?:</style><style id='\d+'>)?)(\d+)")
+
+
+@pytest.mark.parametrize(
+    "wrong_number",
+    [
+        pytest.param(lambda n: str(int(n) + 1), id="Fig.6 as 图 7"),
+        pytest.param(lambda n: "1" + n, id="Fig.6 as 图 16"),
+    ],
+)
+def test_a_glued_figure_number_the_translation_changes_still_fails_the_checks(
+    wrong_number, fake_model, start_service
+):
+    def respond(body: dict) -> str:
+        return GLUED_FIGURE.sub(
+            lambda m: "图 " + m.group(1) + wrong_number(m.group(2)), pseudo_translate_batch(body)
+        )
+
+    fake_model.respond("translate_batch", respond)
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / "maliang-p18.pdf")
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # Draft and review both have the wrong figure number: after the
+    # retries, the two paragraphs with Fig.6 and Fig.9 keep their source.
+    assert final["kept_source_paragraphs"] == 2
+    reasons = " ".join(k["reason"] for k in service.report(task_id)["kept_source_paragraphs"])
+    assert "Fig.6" in reasons and "Fig.9" in reasons
+
+
+FILLER = (
+    " The method is evaluated on the same benchmark under the same settings, and"
+    " the results are averaged over three independent runs for every task."
+)
+
+
+@pytest.mark.parametrize(
+    "source, glued, wrong",
+    [
+        pytest.param(
+            "As described in Sec.3.2, the planner revises the draft program before rendering.",
+            "Sec.3.2",
+            "第 13.2 节",
+            id="Sec.3.2 as 第 13.2 节",
+        ),
+        pytest.param(
+            "Fig.4 compares GPT-4 with the baseline planner on every image generation task.",
+            "Fig.4",
+            "图 5",
+            id="Fig.4 next to GPT-4 as 图 5",
+        ),
+    ],
+)
+def test_a_glued_number_the_translation_changes_fails_even_beside_a_similar_number(
+    source, glued, wrong, fake_model, start_service, tmp_path
+):
+    # No acceptance page has these spellings; the PDF text itself has no
+    # space after the abbreviation, as the engine's glued text would.
+    pdf = tmp_path / "glued-number.pdf"
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        page.insert_textbox(pymupdf.Rect(72, 72, 520, 400), source + FILLER * 3, fontsize=11)
+        doc.save(pdf)
+
+    def respond(body: dict) -> str:
+        return pseudo_translate_batch(body).replace(glued, wrong)
+
+    fake_model.respond("translate_batch", respond)
+    service = start_service(fake_model)
+
+    task_id = service.submit(pdf)
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    inputs = [
+        STYLE_TAG.sub("", item["input"])
+        for r in fake_model.requests_of("translate_batch")
+        for item in batch_items(r.prompt)
+    ]
+    assert any(glued in text for text in inputs)
+    assert final["kept_source_paragraphs"] == 1
+    assert glued in service.report(task_id)["kept_source_paragraphs"][0]["reason"]
 
 
 def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_service):
