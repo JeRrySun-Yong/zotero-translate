@@ -392,6 +392,24 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
         if first.text != "▷" and first.x0 > deepest:
             continue  # a row of another column
         right = max(right, _reach(glyphs, body, first.x0, gap))
+    # A numbered line runs on past that edge while its glyphs continue without
+    # a column gap, sub- and superscripts included (AutoDesign p7 line 4 ends
+    # in H'_{t+1} beyond the other lines): join each glyph to the nearest line
+    # number by height, as ``_lines`` does, and follow each line rightwards.
+    small = statistics.median(glyphs[i].size for i in band) if band else size
+    per_number: dict[int, list[int]] = {}
+    for i in band:
+        if i in number_glyphs or glyphs[i].x0 < numbers_right - 0.5:
+            continue
+        nearest = min(chain, key=lambda n: abs(n.yc - glyphs[i].yc))
+        distance = abs(nearest.yc - glyphs[i].yc)
+        if distance <= 0.4 * pitch or (glyphs[i].size < 0.85 * small and distance <= 0.75 * pitch):
+            per_number.setdefault(nearest.value, []).append(i)
+    for line_glyphs in per_number.values():
+        line_glyphs.sort(key=lambda i: glyphs[i].x0)
+        first = glyphs[line_glyphs[0]]
+        if first.x0 <= deepest:
+            right = max(right, _reach(glyphs, line_glyphs, first.x0, gap))
 
     # Header rows above line 1: title, Require/Ensure, and what lies between.
     above = [

@@ -261,3 +261,162 @@ def test_a_placeholder_in_another_row_keeps_the_source(tmp_path):
     assert "占位符与原文同一行不同" in algorithm["reason"]
     source = (FIXTURES / name).read_bytes()
     assert region_words(result["mono"], rect) == region_words(source, rect)
+
+
+# -- review round 1: AutoDesign p7 (kept fragments whole, source glyphs kept) --
+
+AUTODESIGN = "autodesign-p7.pdf"
+
+
+def keep_named_rows(body):
+    """Rows holding the small caps Accept/Reject or the typewriter AutoDesign come back
+    unchanged (the model keeps those words); the other rows are pseudo-translated."""
+    answer = json.loads(pseudo_translate_algorithm(body))
+    sources = {r["id"]: r["source"] for r in algorithm_rows(body)}
+    for row in answer:
+        if any(word in sources[row["id"]] for word in ("Accept", "Reject", "AutoDesign")):
+            row["output"] = sources[row["id"]]
+    return json.dumps(answer, ensure_ascii=False)
+
+
+@pytest.fixture(scope="module")
+def autodesign(tmp_path_factory):
+    with FakeModel() as model:
+        model.respond("algorithm", keep_named_rows)
+        return run_tasks(model, tmp_path_factory.mktemp("autodesign"), [AUTODESIGN])[AUTODESIGN]
+
+
+def algorithm_rect(result) -> pymupdf.Rect:
+    x0, y0, x1, y1 = result["report"]["algorithms"][0]["fragments"][0]["box"]
+    with pymupdf.open(stream=result["mono"], filetype="pdf") as doc:
+        height = doc[0].rect.height
+    return pymupdf.Rect(x0 - 1, height - y1 - 1, x1 + 1, height - y0 + 1)
+
+
+def chars(data: bytes, rect) -> list[tuple[str, str, float]]:
+    """(character, font without subset prefix, x0) of page 1 inside ``rect``."""
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        found = []
+        for block in doc[0].get_text("rawdict", clip=rect)["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    font = span["font"].split("+")[-1]
+                    found += [(c["c"], font, c["bbox"][0]) for c in span["chars"]]
+    return found
+
+
+def word_fonts(data: bytes, rect, word: str) -> set[str]:
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        return {
+            span["font"].split("+")[-1]
+            for block in doc[0].get_text("dict", clip=rect)["blocks"]
+            for line in block.get("lines", [])
+            for span in line["spans"]
+            if word in span["text"]
+        }
+
+
+def test_a_formula_running_past_the_rule_moves_whole(autodesign):
+    """Line 4 ends in H'_{t+1} beyond the other lines; the +1 moves with the H'."""
+    assert autodesign["report"]["algorithms"][0]["result"] == "translated"
+    rect = algorithm_rect(autodesign)
+    source = chars((FIXTURES / AUTODESIGN).read_bytes(), rect)
+    mono = chars(autodesign["mono"], rect)
+    assert [c for c, _, x in source if x > 500]  # the source line 4 runs to x 537
+    assert not [c for c, _, x in mono if x > 500]  # every translated line is short
+    assert sum(c == "+" for c, _, _ in mono) == sum(c == "+" for c, _, _ in source)
+
+
+def test_kept_words_keep_their_small_caps_and_typewriter_glyphs(autodesign):
+    rect = algorithm_rect(autodesign)
+    source = (FIXTURES / AUTODESIGN).read_bytes()
+    for word in ("Accept", "Reject", "AutoDesign"):
+        expected = word_fonts(source, rect, word)
+        assert expected and word_fonts(autodesign["mono"], rect, word) == expected, word
+    assert "SFCC1000" in word_fonts(source, rect, "Accept")
+    assert "SFVT1000" in word_fonts(source, rect, "AutoDesign")
+
+
+# -- review round 1: review, mechanical checks and layout fallback ------------
+
+
+def lengthen_last_row(extra: str):
+    def respond(body):
+        answer = json.loads(pseudo_translate_algorithm(body))
+        answer[-1]["output"] += extra
+        return json.dumps(answer, ensure_ascii=False)
+
+    return respond
+
+
+def mark_reviewed(body):
+    rows = algorithm_rows(body)
+    return json.dumps(
+        [
+            {"id": r["id"], "line": r["line"], "output": r["draft"].replace(PSEUDO_PREFIX, PSEUDO_PREFIX + "审校过", 1)}
+            for r in rows
+        ],
+        ensure_ascii=False,
+    )
+
+
+def change_literal(body):
+    answer = json.loads(pseudo_translate_algorithm(body))
+    for row in answer:
+        row["output"] = row["output"].replace("T2I", "T3I")
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def change_literal_in_review(body):
+    return json.dumps(
+        [{"id": r["id"], "line": r["line"], "output": r["draft"].replace("T2I", "T3I")} for r in algorithm_rows(body)],
+        ensure_ascii=False,
+    )
+
+
+def test_a_row_too_long_even_when_shrunk_keeps_the_source(tmp_path):
+    name = "maliang-p6.pdf"
+    rect = ALGORITHMS[name][3]
+    with FakeModel() as model:
+        model.respond("algorithm", lengthen_last_row("很" * 40))
+        result = run_tasks(model, tmp_path, [name])[name]
+    algorithm = result["report"]["algorithms"][0]
+    assert result["status"]["state"] == "succeeded"
+    assert algorithm["result"] == "kept_source" and "排版失败" in algorithm["reason"]
+    assert region_words(result["mono"], rect) == region_words((FIXTURES / name).read_bytes(), rect)
+
+
+def test_the_review_is_sent_and_its_rows_are_used(tmp_path):
+    name = "maliang-p6.pdf"
+    with FakeModel() as model:
+        model.respond("algorithm_review", mark_reviewed)
+        result = run_tasks(model, tmp_path, [name])[name]
+        reviews = model.requests_of("algorithm_review")
+    assert len(reviews) == 1 and all("draft" in r for r in algorithm_rows(reviews[0].body))
+    algorithm = result["report"]["algorithms"][0]
+    assert algorithm["result"] == "translated"
+    assert any("审校过" in t["output"] for t in algorithm["translations"])
+
+
+def test_a_review_that_fails_the_checks_falls_back_to_the_draft(tmp_path):
+    name = "maliang-p6.pdf"
+    with FakeModel() as model:
+        model.respond("algorithm_review", change_literal_in_review)
+        result = run_tasks(model, tmp_path, [name])[name]
+    algorithm = result["report"]["algorithms"][0]
+    assert algorithm["result"] == "translated"
+    assert any("T2I" in t["output"] for t in algorithm["translations"] if "T2I" in t["source"])
+
+
+def test_draft_and_review_failing_the_checks_keep_the_source(tmp_path):
+    name = "maliang-p6.pdf"
+    rect = ALGORITHMS[name][3]
+    with FakeModel() as model:
+        model.respond("algorithm", change_literal)
+        model.respond("algorithm_review", change_literal_in_review)
+        result = run_tasks(model, tmp_path, [name])[name]
+    algorithm = result["report"]["algorithms"][0]
+    assert result["status"]["state"] == "succeeded"
+    assert algorithm["result"] == "kept_source" and "机械检查失败" in algorithm["reason"]
+    assert region_words(result["mono"], rect) == region_words((FIXTURES / name).read_bytes(), rect)
+    assert PSEUDO_PREFIX in page_text(result["mono"])

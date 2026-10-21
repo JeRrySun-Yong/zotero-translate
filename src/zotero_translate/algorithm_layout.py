@@ -9,6 +9,10 @@ row with natural language this replaces the row's characters:
   baseline; the line number is not touched (its source glyphs stay).
 - Placeholders are the source characters themselves, moved sideways only,
   so small caps, sub- and superscripts and math glyphs stay as they were.
+  So is every English word of the translation that the source row has as a
+  word of its own (names, small caps or typewriter words the model kept).
+  A placeholder that a glyph outside the algorithm touches (a formula cut
+  by the algorithm's edge) is not whole: the algorithm keeps its source.
 - Translated text gets the style of the row's first natural-language glyph
   (font family, size, bold, colour), not the style of the algorithm's first
   glyph: a bold keyword no longer makes the whole row bold.
@@ -47,6 +51,7 @@ _SCALE_STEP = 0.05
 _SPACE = 0.25  # width of a space, as a fraction of the font size
 _JOIN = 0.15  # gap between text and a placeholder written without a space (none at punctuation)
 _RIGHT_SLACK = 0.5  # pt a row may run past the algorithm's right edge
+_WORD = r"[A-Za-z0-9](?:[A-Za-z0-9'’_.\-]*[A-Za-z0-9])?"
 
 
 class LayoutError(Exception):
@@ -86,6 +91,12 @@ def _layout_fragment(page, unit: AlgorithmUnit, f: int, parts: list[Part], texts
     on_page = {id(c) for c in page.pdf_character}
     if any(id(c) not in on_page for c in fragment.chars):
         raise LayoutError(f"第 {fragment.page} 页上的算法原文字符已变化")
+    members = {id(c) for c in fragment.chars}
+    others = [
+        c
+        for c in page.pdf_character
+        if id(c) not in members and c.box is not None and (c.char_unicode or "").strip()
+    ]
     right_edge = fragment.box[2] + _RIGHT_SLACK
     removed: set[int] = set()
     added: list = []
@@ -94,6 +105,9 @@ def _layout_fragment(page, unit: AlgorithmUnit, f: int, parts: list[Part], texts
         if part.fragment == f:
             rows.setdefault(id(part.line), []).append(part)
     for row in rows.values():
+        for part in row:
+            if part.has_text:
+                _check_complete(part, others)
         body = next((p for p in row if p.kind != "comment"), None)
         comment = next((p for p in row if p.kind == "comment"), None)
         line = row[0].line
@@ -165,11 +179,17 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
     previous = None  # "text", "keep" or "space"
     last = ""  # the last character of translated text
     chars = []
-    for token in re.split(r"(\{v\d+\})", text):
+    words = _source_words(part)
+    for token in re.split(r"(\{v\d+\}|" + _WORD + ")", text):
         if not token:
             continue
-        if PLACEHOLDER.fullmatch(token):
-            positions = part.keeps[token]
+        reused = None
+        if re.fullmatch(_WORD, token) and words.get(token):
+            # An English word of the source row (a name, a small caps or
+            # typewriter word the model kept): its source glyphs, not new ones.
+            reused = words[token].pop(0)
+        if PLACEHOLDER.fullmatch(token) or reused is not None:
+            positions = reused if reused is not None else part.keeps[token]
             if previous == "text" and not _punctuation(last):
                 cursor += _JOIN * size
             source = [line.chars[k] for k in positions]
@@ -198,6 +218,46 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
             cursor += width
             previous, last = "text", ch
     return chars, cursor - start
+
+
+def _check_complete(part: Part, others: list) -> None:
+    """A kept fragment that moves must be whole: no glyph outside the algorithm touches it."""
+    for name, positions in part.keeps.items():
+        run = [part.line.chars[k] for k in positions]
+        x0, x1 = min(c.box.x for c in run), max(c.box.x2 for c in run)
+        y0, y1 = min(c.box.y for c in run), max(c.box.y2 for c in run)
+        size = max(c.pdf_style.font_size for c in run)
+        for c in others:
+            if c.box.y2 > y0 and c.box.y < y1 and (
+                0 <= c.box.x - x1 < 0.3 * size or 0 <= x0 - c.box.x2 < 0.3 * size
+            ):
+                raise LayoutError(
+                    f"{where(part)}的保留片段 {name} 不完整：相邻的“{c.char_unicode}”不在算法区域内"
+                )
+
+
+def _source_words(part: Part) -> dict[str, list[list[int]]]:
+    """The row's natural-language words (no punctuation at their ends) -> their glyph positions."""
+    line = part.line
+    words: dict[str, list[list[int]]] = {}
+    current: list[int] = []
+    text_positions = [k for k in part.positions if not line.keep[k]]
+    for i, k in enumerate(text_positions + [None]):
+        if k is not None and current and k == current[-1] + 1 and not _gap(line, current[-1], k):
+            current.append(k)
+            continue
+        while current and not line.glyphs[current[0]].text.isalnum():
+            current = current[1:]
+        while current and not line.glyphs[current[-1]].text.isalnum():
+            current = current[:-1]
+        if current:
+            words.setdefault("".join(line.glyphs[j].text for j in current), []).append(current)
+        current = [k] if k is not None else []
+    return words
+
+
+def _gap(line, a: int, b: int) -> bool:
+    return line.glyphs[b].x0 - line.glyphs[a].x1 > 0.2 * line.glyphs[b].size
 
 
 def _punctuation(ch: str) -> bool:
