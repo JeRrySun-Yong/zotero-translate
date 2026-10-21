@@ -17,7 +17,9 @@ exactly the placeholders of that row. An answer that breaks it is resent
 like an unparsable one, within the pipeline model client's retries (ADR
 0002). Then one review request, as in M1, and the mechanical checks
 (``checks.problems``) on each row: the reviewed row if it passes, else the
-draft if it passes.
+draft if it passes. A review answer that breaks the structure until the
+retries are used up leaves the drafts to be judged alone; a review request
+that gets no answer at all makes the algorithm keep its source text.
 
 Whatever fails (the request, the structure, the checks, and later the
 layout in ``algorithm_layout``) makes only this algorithm keep its source
@@ -311,8 +313,11 @@ class AlgorithmTranslator:
             reviewed, found = structure_problems(parts, reviewed_content)
             if found:
                 reviewed = {}
-        except ModelCallError:
-            reviewed = {}  # the drafts are judged alone below
+        except ModelCallError as e:
+            if not e.answered:  # no answer at all: like the translation request
+                self.keep_source(unit, f"算法审校请求失败：{e}")
+                return None
+            reviewed = {}  # no usable answer: the drafts are judged alone below
         final: dict[int, str] = {}
         for part in parts:
             chosen = None

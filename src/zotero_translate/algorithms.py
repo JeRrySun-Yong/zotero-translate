@@ -542,6 +542,15 @@ def keep_flags(line: list[Glyph]) -> list[bool]:
             depth += line[end].text.count("(") - line[end].text.count(")")
             end += 1
         k = end
+    # Set literals: everything between braces set in a math font ({left,right}).
+    depth = 0
+    for k, g in enumerate(line):
+        if depth > 0:
+            keep[k] = True
+        if keep[k] and g.text == "{":
+            depth += 1
+        elif keep[k] and g.text == "}" and depth > 0:
+            depth -= 1
     # The title's "Algorithm N" and the Require/Ensure/Input/Output labels.
     label = _LABEL.match("".join(g.text for g in line))
     if label:
