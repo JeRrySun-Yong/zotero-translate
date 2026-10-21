@@ -37,7 +37,7 @@ MODEL_TERMS = {
         term(["AutoDesign"], "key_concept", gloss_zh="自动设计海报的系统"),
         term(["meta-harness", "Meta-Harness"], "key_concept", gloss_zh=META_GLOSS),
         term(["DesignHarness"], "key_concept", gloss_zh="面向设计任务的外围程序"),
-        # Contained in meta-harness and DesignHarness (camel case): promoted.
+        # Contained in exactly 2 key concepts, meta-harness and DesignHarness (camel case): promoted.
         term(["harness"], "basic_term", chinese="测试支架"),
         # Contains harness: its rendering is rewritten.
         term(["harness system"], "basic_term", chinese="外围程序系统"),
@@ -46,8 +46,8 @@ MODEL_TERMS = {
         term(["PosterBench Main Track"], "key_concept", gloss_zh="海报生成的主评测集"),
         # Ends with ".": takes no part, though two key concepts contain "system".
         term(["system."], "basic_term", chinese="系统"),
-        term(["model-harness system"], "key_concept", gloss_zh="模型与外围程序组成的系统"),
         term(["closed-source commercial system"], "key_concept", gloss_zh="闭源的商用设计系统"),
+        term(["system-blind"], "key_concept", gloss_zh="不告知评审者系统身份的评测方式"),
     ]
 }
 
@@ -103,11 +103,7 @@ def test_a_basic_term_contained_in_two_key_concepts_is_promoted(rewritten):
         {
             "english": ["harness"],
             "chinese": "测试支架",
-            "contained_in": [
-                ["meta-harness", "Meta-Harness"],
-                ["DesignHarness"],
-                ["model-harness system"],
-            ],
+            "contained_in": [["meta-harness", "Meta-Harness"], ["DesignHarness"]],
         }
     ]
 
