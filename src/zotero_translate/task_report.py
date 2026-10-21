@@ -3,8 +3,8 @@
 It records the time spent in each stage, the pipeline model client's
 counters (HTTP requests sent, cache hits, retries, the maximum number of
 requests in flight), the batches whose requests failed for good and the
-term list counts with the spellings dropped because the source lacks them
-and the gloss and Chinese name checks,
+term list counts with the spellings dropped because the source lacks them,
+the promoted basic terms, the promoted glosses request and the gloss checks,
 for each key concept the pages of its first-mention glosses in the
 abstract and in the body and whether the translation contains them (with
 the planned glosses it does not contain), the review counts (paragraphs the review changed,

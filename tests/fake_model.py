@@ -18,6 +18,9 @@ Request kinds are recognised from the message content:
 - ``term_list``: the term list request, recognised by ``TERM_LIST_MARKER``
   in its instructions. The default answer is ``FAKE_TERM_LIST`` as JSON;
   every spelling in it appears on page 1 of AutoDesign.
+- ``promoted_glosses``: the promoted glosses request, recognised by
+  ``PROMOTED_GLOSSES_MARKER`` in its instructions. The default answer gives
+  every promoted term the gloss ``FAKE_PROMOTED_GLOSS`` and rewrites nothing.
 - ``translate_batch``: an engine paragraph batch, i.e. the prompt ends with a
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
@@ -64,7 +67,6 @@ FAKE_TERM_LIST = {
             "category": "key_concept",
             "chinese": None,
             "gloss_zh": "假释义：优化框架本身的外层框架",
-            "name_zh": "外层框架",
             "reason": "假依据：本文的核心方法。",
         },
         {
@@ -76,6 +78,11 @@ FAKE_TERM_LIST = {
         },
     ]
 }
+
+# A phrase of the promoted glosses request's instructions.
+PROMOTED_GLOSSES_MARKER = "Write the glosses of the promoted key concepts"
+
+FAKE_PROMOTED_GLOSS = "假补写释义：升级的关键概念"
 
 # A phrase of the review request's instructions.
 REVIEW_MARKER = "Review the draft translation"
@@ -138,6 +145,7 @@ class FakeModel:
         self._responders: dict[str, Responder] = {
             "dossier": lambda body: json.dumps(FAKE_DOSSIER, ensure_ascii=False),
             "term_list": lambda body: json.dumps(FAKE_TERM_LIST, ensure_ascii=False),
+            "promoted_glosses": gloss_promoted_terms,
             "translate_batch": pseudo_translate_batch,
             "review": keep_drafts,
             "single_paragraph": pseudo_translate_single,
@@ -280,6 +288,8 @@ def classify(body: dict) -> str:
     instructions = [m.get("content") or "" for m in body.get("messages", [])]
     if any(TERM_LIST_MARKER in text for text in instructions):
         return "term_list"
+    if any(PROMOTED_GLOSSES_MARKER in text for text in instructions):
+        return "promoted_glosses"
     if any(DOSSIER_MARKER in text for text in instructions):
         return "dossier"
     return "other"
@@ -312,6 +322,17 @@ def _trailing_items(content: str, key: str) -> list[dict] | None:
             return value
         start = content.rfind("\n[", 0, start)
     return None
+
+
+def promoted_glosses_request(body: dict) -> dict:
+    """The term list object (``{"promoted", "terms"}``) sent with a promoted glosses request."""
+    return json.loads(_last_user_content(body).split("Term list:\n", 1)[1])
+
+
+def gloss_promoted_terms(body: dict) -> str:
+    promoted = promoted_glosses_request(body)["promoted"]
+    glosses = [{"english": p["english"][0], "gloss_zh": FAKE_PROMOTED_GLOSS} for p in promoted]
+    return json.dumps({"glosses": glosses, "renderings": []}, ensure_ascii=False)
 
 
 def pseudo_translate_batch(body: dict) -> str:

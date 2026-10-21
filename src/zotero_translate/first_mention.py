@@ -20,7 +20,9 @@ tables, footnotes, page furniture and text inside figures never are.
 
 For each key concept, the first paragraph in the abstract and the first in
 the body that contains one of its spellings get ``{"term", "gloss_zh"}``
-(the gloss without a final full stop).
+(the gloss without a final full stop). A key concept without a gloss (a
+promoted basic term whose gloss request failed) is skipped: it gets no
+gloss and no placement, but its occurrences still cover shorter concepts.
 Matching ignores case, whitespace and line-end hyphens, takes whole words
 (a plural "s"/"es" allowed), and skips an occurrence that lies inside a
 longer key concept's occurrence ("harness" inside "meta-harness") or inside
@@ -67,7 +69,7 @@ Paragraph = tuple[int, str | None, str]  # page number (0-based), layout label, 
 @dataclass
 class _Concept:
     first: str
-    gloss_zh: str
+    gloss_zh: str | None  # None: no gloss is planned, but its occurrences still cover shorter ones
     patterns: list[tuple[str, re.Pattern]]  # (spelling, pattern)
 
 
@@ -81,7 +83,7 @@ class FirstMentionPlan:
         self._concepts = [
             _Concept(
                 first=term["english"][0],
-                gloss_zh=term["gloss_zh"].strip().rstrip(_GLOSS_END),
+                gloss_zh=(term.get("gloss_zh") or "").strip().rstrip(_GLOSS_END) or None,
                 patterns=[(s, _spelling_pattern(s)) for s in term["english"]],
             )
             for term in terms
@@ -104,10 +106,11 @@ class FirstMentionPlan:
                 "body_written": None,
             }
             for c in self._concepts
+            if c.gloss_zh
         }
         planned = []
         for (where, key), indices in zip(RANGES, (abstract, body)):
-            pending = set(range(len(self._concepts)))
+            pending = {n for n, c in enumerate(self._concepts) if c.gloss_zh}
             for index in indices:
                 if not pending:
                     break
