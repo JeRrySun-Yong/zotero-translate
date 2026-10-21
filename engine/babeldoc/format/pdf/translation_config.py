@@ -231,6 +231,9 @@ class TranslationConfig:
         | None = None,
         on_source_kept: Callable[[int | None, str, str], None] | None = None,
         algorithm_detector: Callable[[object], set[int]] | None = None,
+        algorithm_translator: Callable[[list[tuple[int, object, str | None]]], None]
+        | None = None,
+        algorithm_typesetter: Callable[[object, Callable], None] | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -416,6 +419,16 @@ class TranslationConfig:
         # characters that belong to pseudocode. They stay out of the
         # paragraphs and keep their source text.
         self.algorithm_detector = algorithm_detector
+        # Called by the LLM translator before it sends any batch, with every
+        # paragraph in reading order as (0-based page, box, section title);
+        # starts the line-by-line translation of the detected pseudocode.
+        self.algorithm_translator = algorithm_translator
+        # Called by the typesetter after all pages are typeset, with the
+        # document and ``new_char(page, like, char_unicode, font_size)``,
+        # which makes a character in the style of the source character
+        # ``like`` (x = 0, on its baseline), or None without a glyph.
+        # It lays translated pseudocode out line by line.
+        self.algorithm_typesetter = algorithm_typesetter
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False
