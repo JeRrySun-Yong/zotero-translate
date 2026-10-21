@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 
 from zotero_translate.algorithm_translation import PLACEHOLDER
 from zotero_translate.algorithm_translation import AlgorithmTranslator
@@ -44,7 +45,7 @@ MIN_SCALE = 0.8
 X_TOLERANCE = 1.0
 _SCALE_STEP = 0.05
 _SPACE = 0.25  # width of a space, as a fraction of the font size
-_JOIN = 0.15  # gap between Chinese text and a placeholder written without a space
+_JOIN = 0.15  # gap between text and a placeholder written without a space (none at punctuation)
 _RIGHT_SLACK = 0.5  # pt a row may run past the algorithm's right edge
 
 
@@ -159,13 +160,14 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
     size = line.glyphs[style].size
     cursor = start
     previous = None  # "text", "keep" or "space"
+    last = ""  # the last character of translated text
     chars = []
     for token in re.split(r"(\{v\d+\})", text):
         if not token:
             continue
         if PLACEHOLDER.fullmatch(token):
             positions = part.keeps[token]
-            if previous == "text":
+            if previous == "text" and not _punctuation(last):
                 cursor += _JOIN * size
             source = [line.chars[k] for k in positions]
             dx = cursor - min(c.box.x for c in source)
@@ -182,7 +184,7 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
                     cursor += _SPACE * size * scale
                 previous = "space"
                 continue
-            if previous == "keep":
+            if previous == "keep" and not _punctuation(ch):
                 cursor += _JOIN * size
             char = new_char(page, like, ch, size * scale)
             if char is None:
@@ -191,8 +193,12 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
             char.box.x, char.box.x2 = cursor, cursor + width
             chars.append(char)
             cursor += width
-            previous = "text"
+            previous, last = "text", ch
     return chars, cursor - start
+
+
+def _punctuation(ch: str) -> bool:
+    return bool(ch) and unicodedata.category(ch).startswith("P")
 
 
 def _shift(char, dx: float) -> None:

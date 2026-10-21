@@ -234,3 +234,30 @@ def test_failed_requests_keep_only_the_algorithm_as_source(tmp_path):
     source = (FIXTURES / name).read_bytes()
     assert region_words(result["mono"], rect) == region_words(source, rect)
     assert PSEUDO_PREFIX in page_text(result["mono"])
+
+
+def move_a_placeholder(body):
+    """Every placeholder count stays right for the whole block, but one moves to the row above."""
+    answer = json.loads(pseudo_translate_algorithm(body))
+    for above, row in zip(answer, answer[1:]):
+        moved = re.search(r"\{v\d+\}", row["output"])
+        if moved and re.search(r"[^\W\d_]{2,}", row["output"]):
+            row["output"] = row["output"].replace(moved.group(0), "", 1)
+            above["output"] += moved.group(0)
+            break
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def test_a_placeholder_in_another_row_keeps_the_source(tmp_path):
+    """AutoDesign p7 lines 5-6 lost text that a whole-block placeholder check let through."""
+    name = "maliang-p13.pdf"
+    rect = ALGORITHMS[name][3]
+    with FakeModel() as model:
+        model.respond("algorithm", move_a_placeholder)
+        result = run_tasks(model, tmp_path, [name])[name]
+    assert result["status"]["state"] == "succeeded"
+    algorithm = result["report"]["algorithms"][0]
+    assert algorithm["result"] == "kept_source"
+    assert "占位符与原文同一行不同" in algorithm["reason"]
+    source = (FIXTURES / name).read_bytes()
+    assert region_words(result["mono"], rect) == region_words(source, rect)
