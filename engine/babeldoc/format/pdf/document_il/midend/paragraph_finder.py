@@ -237,10 +237,14 @@ class ParagraphFinder:
         # 预处理公式布局的标签
         self._preprocess_formula_layouts(page)
 
+        # Pseudocode characters stay out of the paragraphs and keep their
+        # source text (zotero-translate M2).
+        algorithm_chars = self._algorithm_chars(page)
+
         # 第一步：根据 layout 创建 paragraphs
         # 在这一步中，page.pdf_character 中的字符会被移除
         paragraphs = self._group_characters_into_paragraphs(
-            page, layout_index, layout_map
+            page, layout_index, layout_map, algorithm_chars
         )
         page.pdf_paragraph = paragraphs
 
@@ -417,8 +421,15 @@ class ParagraphFinder:
                     continue
             i += 1
 
+    def _algorithm_chars(self, page: Page) -> set[int]:
+        """``id()`` of the page's characters that the algorithm detector claims."""
+        detector = getattr(self.translation_config, "algorithm_detector", None)
+        if detector is None:
+            return set()
+        return {id(page.pdf_character[i]) for i in detector(page)}
+
     def _group_characters_into_paragraphs(
-        self, page: Page, layout_index, layout_map
+        self, page: Page, layout_index, layout_map, algorithm_chars: set[int] = frozenset()
     ) -> list[PdfParagraph]:
         paragraphs: list[PdfParagraph] = []
         if page.pdf_paragraph:
@@ -451,7 +462,11 @@ class ParagraphFinder:
                 char, page, layout_index, layout_map
             )
 
-            if not is_text_layout(char_layout) or self.is_isolated_formula(char):
+            if (
+                id(char) in algorithm_chars
+                or not is_text_layout(char_layout)
+                or self.is_isolated_formula(char)
+            ):
                 skip_chars.append(char)
                 continue
 

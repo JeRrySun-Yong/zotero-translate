@@ -9,7 +9,9 @@ for each key concept the pages of its first-mention glosses in the
 abstract and in the body and whether the translation contains them (with
 the planned glosses it does not contain), the review counts (paragraphs the review changed,
 with draft and reviewed text; paragraphs that fell back to their draft) and
-the paragraphs that kept their source text, with page and reason.
+the paragraphs that kept their source text, with page and reason, and the
+algorithms (pseudocode) found: pages, numbered lines, result and reason, and
+each line's number, start x and glyphs.
 """
 
 from __future__ import annotations
@@ -18,14 +20,16 @@ import json
 import time
 from pathlib import Path
 
+from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.model_client import ModelClient
 from zotero_translate.review import BatchReviewer
 from zotero_translate.review import KeptSource
 
 
 class TaskReport:
-    def __init__(self, kept: KeptSource):
+    def __init__(self, kept: KeptSource, algorithms: AlgorithmDetector | None = None):
         self.kept = kept
+        self.algorithms = algorithms or AlgorithmDetector()
         self.reviewer: BatchReviewer | None = None
         self._started = time.monotonic()
         self._stages: list[list] = []  # [stage, start time, end time or None]
@@ -73,5 +77,7 @@ class TaskReport:
             "first_mention_glosses": self.first_mention_glosses,
             "review": self.reviewer.report() if self.reviewer else None,
             "kept_source_paragraphs": list(self.kept.paragraphs),
+            "kept_source_algorithms": self.algorithms.kept_source,
+            "algorithms": self.algorithms.report(),
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

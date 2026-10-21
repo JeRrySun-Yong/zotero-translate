@@ -230,6 +230,7 @@ class TranslationConfig:
         ]
         | None = None,
         on_source_kept: Callable[[int | None, str, str], None] | None = None,
+        algorithm_detector: Callable[[object], set[int]] | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -410,6 +411,11 @@ class TranslationConfig:
         # Called with (1-based page, source text, reason) for a paragraph
         # that keeps its source text because its translation failed.
         self.on_source_kept = on_source_kept
+        # Called by the paragraph finder once per page, in page order, with
+        # the page; returns the indexes in ``page.pdf_character`` of the
+        # characters that belong to pseudocode. They stay out of the
+        # paragraphs and keep their source text.
+        self.algorithm_detector = algorithm_detector
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False
