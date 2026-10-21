@@ -357,34 +357,34 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
     above = [
         i
         for i in free
-        if top < glyphs[i].yc <= top + 6 * pitch and left - 4 <= glyphs[i].xc <= deepest
+        if top < glyphs[i].yc <= top + 6 * pitch and glyphs[i].xc >= left - 4
     ]
     header_rows: list[list[int]] = []
     plain = 0
     edge = top
     title = None
     for row in reversed(_rows(glyphs, above, 0.3 * pitch)):
+        # A header row ends at the first column gap.
+        reach = _reach(glyphs, row, glyphs[row[0]].x0, gap)
+        row = [i for i in row if glyphs[i].x1 <= reach + 0.5]
         row_top = max(glyphs[i].yc for i in row)
         if row_top - edge > 2.5 * pitch:
             break
-        text = "".join(glyphs[i].text for i in row).strip()
+        text = _row_text(glyphs, row)
         if _HEADER.match(text):
             header_rows.append(row)
             plain = 0
             if _TITLE.match(text):
-                title = _row_text(glyphs, row)
+                title = text
         else:
             plain += 1
             if plain > _MAX_PLAIN_HEADER_ROWS:
                 break
             header_rows.append(row)
         edge = row_top
-    while header_rows and not _HEADER.match("".join(glyphs[i].text for i in header_rows[-1]).strip()):
+    while header_rows and not _HEADER.match(_row_text(glyphs, header_rows[-1])):
         header_rows.pop()
-    header_glyphs: set[int] = set()
-    for row in header_rows:
-        reach = _reach(glyphs, row, glyphs[row[0]].x0, gap)
-        header_glyphs |= {i for i in row if glyphs[i].x1 <= reach + 0.5}
+    header_glyphs = {i for row in header_rows for i in row}
     if header_rows:
         top = max(glyphs[i].yc for i in header_rows[-1]) + 0.3 * pitch
         left = min(left, min(glyphs[i].x0 for i in header_glyphs) - 1)
@@ -393,9 +393,10 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
         i for i in free if bottom <= glyphs[i].yc <= top and left <= glyphs[i].xc <= right + 1
     } | header_glyphs
     members |= {i for n in chain for i in n.glyphs}
-    if not _KEYWORD.search("".join(glyphs[i].text for i in sorted(members, key=lambda i: (-glyphs[i].yc, glyphs[i].x0)))):
-        return None, None
     lines = _lines(glyphs, members, chain, pitch)
+    # Match keywords on the line texts, which have spaces between words.
+    if not _KEYWORD.search("\n".join(line.text for line in lines)):
+        return None, None
     box = (
         min(glyphs[i].x0 for i in members),
         min(glyphs[i].y0 for i in members),
