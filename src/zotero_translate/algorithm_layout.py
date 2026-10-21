@@ -72,6 +72,9 @@ class AlgorithmLayout:
             except LayoutError as e:
                 self.translator.keep_source(unit, f"排版失败：{e}")
                 continue
+            except Exception as e:  # noqa: BLE001 - only this algorithm keeps its source
+                self.translator.keep_source(unit, f"排版出错：{type(e).__name__}: {e}")
+                continue
             for page, removed, added in changes:
                 page.pdf_character = [c for c in page.pdf_character if id(c) not in removed] + added
             unit.result = TRANSLATED
