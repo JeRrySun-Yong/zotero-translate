@@ -8,9 +8,9 @@ terms (rendered in Chinese). Every English spelling is then checked
 against the full text: a spelling must appear verbatim, ignoring case,
 whitespace and line-end hyphens. Spellings that do not appear are dropped;
 an entry left without spellings is dropped; both are reported. Of the key
-concepts that remain, only the first ``KEY_CONCEPT_LIMIT`` in the model's
-order (most important first) are kept; the rest are dropped and reported
-as over the limit.
+concepts that remain, promoted basic terms included (below), only the
+first ``KEY_CONCEPT_LIMIT`` in the model's order (most important first)
+are kept; the rest are dropped and reported as over the limit.
 
 The gloss says what the concept is in this paper (its kind and role), not
 a literal rendering. A gloss that mentions another key concept of the list
