@@ -4,11 +4,15 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, timeout, slow, empty content, invalid JSON) on
-  the N-th request of a kind, or on the first request of a kind and then on
-  each resend of that same request (``fail_same_request``). "timeout" sends
+- inject errors (500, 429, 400, 401, timeout, slow, empty content, invalid
+  JSON) on the N-th request of a kind, or on the first request of a kind and then on
+  each resend of that same request (``fail_same_request``; a resend may
+  name another model, as a request forwarded to argon does). "timeout" sends
   nothing for an hour; "slow" sends the response headers at once and then the
-  normal answer a few bytes at a time over ``slow_body_seconds``;
+  normal answer a few bytes at a time over ``slow_body_seconds``; "400"
+  answers with ``REJECTION_BODY``, a JSON error spread over several lines
+  and longer than 200 characters; "400_echo" answers with an error that
+  echoes the request's Authorization header, key included;
 - inject a delay and count the maximum number of requests in flight.
 
 Request kinds are recognised from the message content:
@@ -98,7 +102,12 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
-_ERRORS = {"500", "429", "timeout", "slow", "empty", "invalid_json"}
+_ERRORS = {"500", "429", "400", "400_echo", "401", "timeout", "slow", "empty", "invalid_json"}
+
+# The body of an injected HTTP 400: several lines, the message first, then
+# padding that a 200-character excerpt cuts off.
+REJECTION_MESSAGE = "injected 400: the relay rejected the request"
+REJECTION_BODY = json.dumps({"error": {"message": REJECTION_MESSAGE, "padding": "x" * 400}}, indent=1)
 
 # Markers of the engine's one-paragraph prompts, each followed by the text.
 SINGLE_PARAGRAPH_MARKERS = (
@@ -136,7 +145,7 @@ class _Fault:
 class _SameRequestFault:
     kind: str | None
     errors: list[str]
-    body: dict | None = None  # the first matching request; resends must equal it
+    body: dict | None = None  # the first matching request, without its model; resends equal it
 
 
 @dataclass
@@ -175,7 +184,8 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "timeout", "slow", "empty", "invalid_json".
+        ``error`` is one of: "500", "429", "400", "400_echo", "401", "timeout", "slow",
+        "empty", "invalid_json".
         """
         assert error in _ERRORS, error
         self._faults.append(_Fault(kind=kind, nth=nth, error=error))
@@ -249,6 +259,13 @@ class FakeModel:
                 return _send_json(handler, 500, {"error": {"message": "injected 500"}})
             if fault == "429":
                 return _send_json(handler, 429, {"error": {"message": "injected 429"}})
+            if fault == "400":
+                return _send_text(handler, 400, REJECTION_BODY)
+            if fault == "400_echo":
+                echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
+                return _send_json(handler, 400, {"error": echo})
+            if fault == "401":
+                return _send_json(handler, 401, {"error": {"message": "injected 401"}})
             if fault == "timeout":
                 time.sleep(3600)
                 return None
@@ -267,12 +284,13 @@ class FakeModel:
                 self._in_flight -= 1
 
     def _take_same_request_fault(self, kind: str, body: dict) -> str | None:
+        request = {k: v for k, v in body.items() if k != "model"}
         for fault in self._same_request_faults:
             if not fault.errors:
                 continue
             if fault.body is None and fault.kind in (None, kind):
-                fault.body = body
-            if fault.body == body:
+                fault.body = request
+            if fault.body == request:
                 return fault.errors.pop(0)
         return None
 
@@ -438,6 +456,15 @@ def _completion(model: str, content: str) -> dict:
 
 def _send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _send_text(handler: BaseHTTPRequestHandler, status: int, text: str) -> None:
+    data = text.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(data)))

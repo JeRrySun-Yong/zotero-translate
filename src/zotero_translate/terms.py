@@ -40,6 +40,14 @@ concept's spelling, basic terms whose rendering lacks a contained key
 concept's spelling, and glosses over 15 Chinese characters, in the task
 report only: nothing is retried, rewritten or cut.
 
+The gloss rules in the instructions state a target of ``GLOSS_TARGET``
+(12) Chinese characters, below the ``GLOSS_LIMIT`` (15) of the check,
+because argon, which writes the term list (ADR 0004), goes over the stated
+limit by 3 to 5 characters again and again. closure-01 probes, one term
+list per acceptance paper: target 15, 20 of 32 glosses over 15, the longest
+21; target 12, 8 of 26, the longest 17; target 10, 4 of 28, the longest 18,
+but the glosses lost what defines the concept.
+
 The term list is saved in the task directory and becomes the engine's
 glossary: a key concept's target is the source itself, a basic term's
 target its Chinese rendering. The engine injects only the entries found in
@@ -66,17 +74,18 @@ CHINESE = "chinese"
 GLOSSARY_NAME = "paper-terms"
 KEY_CONCEPT_LIMIT = 20
 GLOSS_LIMIT = 15
+GLOSS_TARGET = 12  # what the gloss rules ask for; see the module docstring
 NOT_IN_SOURCE = "原文中没有出现"
 OVER_LIMIT = f"超过 {KEY_CONCEPT_LIMIT} 个上限"
 PROMOTION_THRESHOLD = 2
 
 # The gloss rules, shared by the term list and the promoted glosses requests.
-_GLOSS_FORM = """\
-a Chinese noun phrase of at most 15 Chinese \
+_GLOSS_FORM = f"""\
+a Chinese noun phrase of at most {GLOSS_TARGET} Chinese \
 characters that says what the concept is in this paper, for its first mention in the abstract \
 and in the body, where it stands in parentheses after the English term; no parentheses and no \
 punctuation at the end."""
-_GLOSS_CONTENT = """\
+_GLOSS_CONTENT = f"""\
 The gloss explains the concept as this paper \
 uses it: what kind of thing it is (for instance a system, method, benchmark, metric, task or \
 property) and what it does or what role it plays in this paper. It is not a literal, \
@@ -85,12 +94,12 @@ not a gloss. When the gloss mentions another key concept of this term list, it w
 concept's English spelling exactly as listed in its "english" field, never a Chinese name for \
 it; a gloss contains at most one such English spelling. Apart from that, the gloss contains no \
 English or other Latin letters, and it never repeats the English spelling of its own concept. \
-15 Chinese characters is a hard limit; an embedded English spelling does not count towards \
-it. After writing a gloss, count its Chinese characters; when it has more than 15, delete \
-modifiers and keep the head noun that names the kind of thing, such as 方法, 基准 or 机制. The \
-gloss is a noun phrase and never ends with 的. For illustration only, were knowledge \
-distillation a key concept, "知识蒸馏" would not be a gloss, while "用大模型输出训练小模型的方法" \
-(14 characters) would be; were replay buffer and prioritized replay buffer both key concepts, \
+{GLOSS_TARGET} Chinese characters is a hard limit; an embedded English spelling does not count \
+towards it. After writing a gloss, count its Chinese characters; when it has more than \
+{GLOSS_TARGET}, delete modifiers and keep the head noun that names the kind of thing, such as \
+方法, 基准 or 机制. The gloss is a noun phrase and never ends with 的. For illustration only, were knowledge \
+distillation a key concept, "知识蒸馏" would not be a gloss, while "用大模型训练小模型的方法" \
+(12 characters) would be; were replay buffer and prioritized replay buffer both key concepts, \
 the gloss of prioritized replay buffer could be "按优先级抽取经验的 replay buffer"."""
 _RENDERING_RULE = """\
 When the English spelling of a basic term contains an English spelling of a key concept of \

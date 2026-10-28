@@ -287,6 +287,7 @@ class AlgorithmTranslator:
         translated_terms = frozenset(s.lower() for s, t in entries if s != t)
         items = [part.item() for part in parts]
         prompt = self._prompt(INSTRUCTIONS, unit, section, entries, items)
+        page = unit.fragments[0].page
 
         def validate(content: str) -> None:
             _, found = structure_problems(parts, content)
@@ -294,7 +295,9 @@ class AlgorithmTranslator:
                 raise ValueError("结构校验失败：" + "；".join(found[:3]))
 
         try:
-            content = self.client.complete([{"role": "user", "content": prompt}], validate=validate)
+            content = self.client.complete(
+                [{"role": "user", "content": prompt}], validate=validate, page=page
+            )
         except ModelCallError as e:
             reason = str(e) if e.answered else f"请求失败：{e}"
             self.keep_source(unit, f"算法翻译{reason}")
@@ -308,7 +311,7 @@ class AlgorithmTranslator:
         review_prompt = self._prompt(REVIEW_INSTRUCTIONS, unit, section, entries, review_items)
         try:
             reviewed_content = self.client.complete(
-                [{"role": "user", "content": review_prompt}], validate=validate
+                [{"role": "user", "content": review_prompt}], validate=validate, page=page
             )
             reviewed, found = structure_problems(parts, reviewed_content)
             if found:

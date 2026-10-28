@@ -9,6 +9,7 @@ import re
 import pymupdf
 import pytest
 
+from tests.conftest import ARGON_MODEL_NAME
 from tests.conftest import EXCERPT
 from tests.conftest import FAKE_MODEL_NAME
 from tests.conftest import launch_service
@@ -118,7 +119,9 @@ def test_requests_use_configured_model_high_reasoning_and_temperature_1(finished
 
     for request in requests:
         assert request.path == "/v1/chat/completions"
-        assert request.body["model"] == FAKE_MODEL_NAME
+        # The fake stands for both endpoints; argon takes the dossier and term list.
+        argon = request.kind in ("dossier", "term_list")
+        assert request.body["model"] == (ARGON_MODEL_NAME if argon else FAKE_MODEL_NAME)
         assert request.body["reasoning_effort"] == "high"
         assert request.body["temperature"] == 1.0
 
@@ -137,7 +140,7 @@ def test_no_automatic_term_extraction_requests(finished_task):
 
 def test_requests_in_flight_reach_the_concurrency_limit(finished_task):
     assert finished_task["model"].max_in_flight == CONCURRENCY
-    assert finished_task["report"]["model"]["max_in_flight"] == CONCURRENCY
+    assert finished_task["report"]["model"]["endpoints"]["flash"]["max_in_flight"] == CONCURRENCY
 
 
 def test_task_report_records_stages_and_model_calls(finished_task):

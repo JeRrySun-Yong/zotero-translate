@@ -1,7 +1,8 @@
 """Short glosses and their placement (ticket 15, spec 5 "释义格式").
 
 - A key concept's gloss is a Chinese noun phrase of at most 15 characters,
-  without parentheses, English or final punctuation.
+  without parentheses, English or final punctuation. The instructions ask
+  for at most 12 (closure-01: argon goes over the stated limit).
 - An occurrence inside the source's parentheses ("… models (MLLMs)") is not
   a first mention: the plan takes the next occurrence.
 - The translation instructions say where the gloss goes (after the whole
@@ -69,7 +70,7 @@ GENERAL_RULES = [
     "Do not turn the source's commas, dashes or appositives into parentheses",
 ]
 TERM_LIST_GLOSS_RULES = [
-    "a Chinese noun phrase of at most 15 Chinese characters",
+    "a Chinese noun phrase of at most 12 Chinese characters",
     "no parentheses",
     "no English",
     "no punctuation at the end",
