@@ -47,6 +47,7 @@ from babeldoc.format.pdf.document_il.midend.table_parser import TableParser
 from babeldoc.format.pdf.document_il.midend.typesetting import Typesetting
 from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper
 from babeldoc.format.pdf.document_il.xml_converter import XMLConverter
+from babeldoc.format.pdf.link_annotations import restore_links
 from babeldoc.format.pdf.result_merger import ResultMerger
 from babeldoc.format.pdf.split_manager import SplitManager
 from babeldoc.format.pdf.translation_config import TranslateResult
@@ -710,6 +711,12 @@ def do_translate(
 
         fix_cmap(result, translation_config)
         add_metadata(result, translation_config)
+        try:
+            restore_links(translation_config, result)
+        except Exception:
+            logger.exception(
+                f"Failed to restore links from {translation_config.input_file}"
+            )
         try:
             migrate_toc(translation_config, result)
         except Exception as e:
