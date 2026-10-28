@@ -37,11 +37,13 @@ def main(argv: list[str] | None = None) -> int:
         from zotero_translate.service import serve as serve_forever
 
         try:  # fail at startup, not on the first task
-            s.load_model_settings(args.env_file, args.concurrency)
+            s.load_pipeline_settings(args.env_file, args.argon_env_file, args.concurrency)
         except s.SettingsError as e:
             print(e, file=sys.stderr)
             return 2
-        serve_forever(args.data_dir, args.env_file, args.port, args.concurrency)
+        serve_forever(
+            args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
+        )
         return 0
     return _run(args)
 
@@ -51,7 +53,14 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
         "--env-file",
         type=Path,
         default=s.DEFAULT_ENV_FILE,
-        help="file with OPENAI_BASE_URL, OPENAI_API_KEY and AI_DEFAULT_MODEL",
+        help="flash: file with OPENAI_BASE_URL, OPENAI_API_KEY and AI_DEFAULT_MODEL",
+    )
+    parser.add_argument(
+        "--argon-env-file",
+        type=Path,
+        default=s.DEFAULT_ARGON_ENV_FILE,
+        help="argon (paper dossier, term list, timed-out requests): the same keys, "
+        "and ZT_CONCURRENCY",
     )
     parser.add_argument("--concurrency", type=int, default=s.DEFAULT_CONCURRENCY)
     parser.add_argument(
@@ -68,8 +77,11 @@ def _run(args) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        model_settings = s.load_model_settings(
-            args.env_file, args.concurrency, s.model_cache_dir(args.data_dir)
+        model_settings = s.load_pipeline_settings(
+            args.env_file,
+            args.argon_env_file,
+            args.concurrency,
+            s.model_cache_dir(args.data_dir),
         )
     except s.SettingsError as e:
         print(e, file=sys.stderr)
@@ -91,7 +103,8 @@ def _run(args) -> int:
         return 1
     print(
         f"完成，用时 {time.monotonic() - started:.1f} 秒；"
-        f"模型请求 {result.model_requests} 次，最大在途 {result.max_in_flight}；"
+        f"模型请求 {result.model_requests} 次，最大在途 flash {result.max_in_flight}、"
+        f"argon {result.argon_max_in_flight}；转发 argon {result.forwarded_requests} 次；"
         f"保留原文 {result.kept_source_paragraphs} 段、{result.kept_source_algorithms} 个算法；"
         f"单语译文 {result.mono_pdf}；双语对照 {result.dual_pdf}；"
         f"任务报告 {args.output_dir / 'report.json'}",

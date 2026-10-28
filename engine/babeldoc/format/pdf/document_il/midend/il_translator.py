@@ -1284,7 +1284,8 @@ class ILTranslator:
                     translated_text = self.translate_engine.llm_translate(
                         llm_prompt,
                         rate_limit_params={
-                            "paragraph_token_count": paragraph_token_count
+                            "paragraph_token_count": paragraph_token_count,
+                            "page_number": _one_based_page(page),
                         },
                     )
                     llm_translate_tracker.set_output(translated_text)
@@ -1292,7 +1293,8 @@ class ILTranslator:
                     translated_text = self.translate_engine.translate(
                         text,
                         rate_limit_params={
-                            "paragraph_token_count": paragraph_token_count
+                            "paragraph_token_count": paragraph_token_count,
+                            "page_number": _one_based_page(page),
                         },
                     )
                 translated_text = re.sub(r"[. 。…，]{20,}", ".", translated_text)
@@ -1328,3 +1330,9 @@ class ILTranslator:
                 get_paragraph_unicode(paragraph),
                 reason,
             )
+
+
+def _one_based_page(page: Page | None) -> int | None:
+    """The 1-based page number the translator gets with a request, if known."""
+    page_number = getattr(page, "page_number", None)
+    return None if page_number is None else page_number + 1

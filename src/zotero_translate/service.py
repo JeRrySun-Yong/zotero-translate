@@ -51,11 +51,12 @@ _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 class TaskQueue:
     """Task directories under ``<data_dir>/tasks`` plus a FIFO run queue."""
 
-    def __init__(self, data_dir: Path, env_file: Path, concurrency: int):
+    def __init__(self, data_dir: Path, env_file: Path, argon_env_file: Path, concurrency: int):
         self.tasks_dir = Path(data_dir) / "tasks"
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir = model_cache_dir(data_dir)
         self.env_file = Path(env_file)
+        self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
         self._queue: collections.deque[str] = collections.deque()  # waiting tasks
         self._cond = threading.Condition()
@@ -150,6 +151,8 @@ class TaskQueue:
             str(directory),
             "--env-file",
             str(self.env_file),
+            "--argon-env-file",
+            str(self.argon_env_file),
             "--concurrency",
             str(self.concurrency),
             "--cache-dir",
@@ -240,9 +243,11 @@ def _parse_multipart(content_type: str, body: bytes) -> dict[str, tuple[bytes, s
     return fields
 
 
-def serve(data_dir: Path, env_file: Path, port: int, concurrency: int) -> None:
+def serve(
+    data_dir: Path, env_file: Path, argon_env_file: Path, port: int, concurrency: int
+) -> None:
     """Run the service until interrupted; print ``{"url": ...}`` once listening."""
-    queue = TaskQueue(data_dir, env_file, concurrency)
+    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency)
     server = ThreadingHTTPServer((HOST, port), make_handler(queue))
     server.daemon_threads = True
     print(json.dumps({"url": f"http://{HOST}:{server.server_address[1]}"}), flush=True)

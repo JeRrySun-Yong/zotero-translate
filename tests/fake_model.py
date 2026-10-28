@@ -6,7 +6,8 @@ Test fixture only. It can:
 - answer by request kind with pre-written responders;
 - inject errors (500, 429, timeout, slow, empty content, invalid JSON) on
   the N-th request of a kind, or on the first request of a kind and then on
-  each resend of that same request (``fail_same_request``). "timeout" sends
+  each resend of that same request (``fail_same_request``; a resend may
+  name another model, as a request forwarded to argon does). "timeout" sends
   nothing for an hour; "slow" sends the response headers at once and then the
   normal answer a few bytes at a time over ``slow_body_seconds``;
 - inject a delay and count the maximum number of requests in flight.
@@ -136,7 +137,7 @@ class _Fault:
 class _SameRequestFault:
     kind: str | None
     errors: list[str]
-    body: dict | None = None  # the first matching request; resends must equal it
+    body: dict | None = None  # the first matching request, without its model; resends equal it
 
 
 @dataclass
@@ -267,12 +268,13 @@ class FakeModel:
                 self._in_flight -= 1
 
     def _take_same_request_fault(self, kind: str, body: dict) -> str | None:
+        request = {k: v for k, v in body.items() if k != "model"}
         for fault in self._same_request_faults:
             if not fault.errors:
                 continue
             if fault.body is None and fault.kind in (None, kind):
-                fault.body = body
-            if fault.body == body:
+                fault.body = request
+            if fault.body == request:
                 return fault.errors.pop(0)
         return None
 

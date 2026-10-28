@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from zotero_translate.settings import ModelSettings
+from zotero_translate.settings import PipelineSettings
 from zotero_translate.task_dir import DOSSIER_FILE
 from zotero_translate.task_dir import OUTPUT_FILES
 from zotero_translate.task_dir import REPORT_FILE
@@ -60,8 +60,10 @@ class PaperTaskError(Exception):
 class PaperTaskResult:
     mono_pdf: Path
     dual_pdf: Path
-    model_requests: int
-    max_in_flight: int
+    model_requests: int  # both endpoints
+    max_in_flight: int  # flash
+    argon_max_in_flight: int
+    forwarded_requests: int  # from flash to argon
     kept_source_paragraphs: int
     kept_source_algorithms: int
 
@@ -69,10 +71,13 @@ class PaperTaskResult:
 def run_paper_task(
     source_pdf: Path,
     output_dir: Path,
-    settings: ModelSettings,
+    settings: PipelineSettings,
     on_progress: ProgressCallback = lambda stage, progress: None,
 ) -> PaperTaskResult:
     """Translate ``source_pdf``; write ``mono.pdf`` and ``dual.pdf`` into ``output_dir``.
+
+    The paper dossier and the term list requests go to argon, every other
+    request to flash (ADR 0004).
 
     ``on_progress(stage, progress)`` receives our stage name and an overall
     percentage (0-99) that never decreases. The paper dossier and the
@@ -95,7 +100,7 @@ def run_paper_task(
     from zotero_translate.dossier import request_dossier
     from zotero_translate.first_mention import FirstMentionPlan
     from zotero_translate.model_client import ModelCallError
-    from zotero_translate.model_client import ModelClient
+    from zotero_translate.model_client import PipelineModels
     from zotero_translate.review import BatchReviewer
     from zotero_translate.review import KeptSource
     from zotero_translate.task_report import TaskReport
@@ -105,10 +110,11 @@ def run_paper_task(
 
     output_dir = Path(output_dir)
     engine_output = output_dir / "engine-output"
-    client = ModelClient(settings)
+    models = PipelineModels(settings)
+    client = models.flash
     kept = KeptSource()
     algorithms = AlgorithmDetector()
-    report = TaskReport(kept, algorithms)
+    report = TaskReport(models, kept, algorithms)
 
     def progress(stage: str, percent: int) -> None:
         report.enter_stage(stage)
@@ -119,7 +125,7 @@ def run_paper_task(
         full_text = read_full_text(source_pdf)
         progress(DOSSIER_STAGE, _DOSSIER_PROGRESS)
         try:
-            dossier = request_dossier(client, full_text)
+            dossier = request_dossier(models.argon, full_text)
         except ModelCallError as e:
             raise PaperTaskError(f"生成论文档案失败：{e}") from e
         (output_dir / DOSSIER_FILE).write_text(
@@ -127,7 +133,7 @@ def run_paper_task(
         )
         progress(TERMS_STAGE, _TERMS_PROGRESS)
         try:
-            term_list = request_term_list(client, full_text, dossier)
+            term_list = request_term_list(models.argon, full_text, dossier)
         except ModelCallError as e:
             raise PaperTaskError(f"生成本篇术语清单失败：{e}") from e
         report.terms = term_list.report()
@@ -149,7 +155,7 @@ def run_paper_task(
         high_level.init()
         # The engine's thread pools and rate limiter must not hold requests
         # back below the pipeline model client's own concurrency limit.
-        set_translate_rate_limiter(settings.concurrency)
+        set_translate_rate_limiter(client.settings.concurrency)
         doc_layout_model = DocLayoutModel.load_onnx()
         config = TranslationConfig(
             translator=PipelineTranslator(client),
@@ -158,8 +164,8 @@ def run_paper_task(
             lang_out="zh",
             doc_layout_model=doc_layout_model,
             output_dir=str(engine_output),
-            qps=settings.concurrency,
-            pool_max_workers=settings.concurrency,
+            qps=client.settings.concurrency,
+            pool_max_workers=client.settings.concurrency,
             watermark_output_mode=WatermarkOutputMode.NoWatermark,
             auto_extract_glossary=False,
             glossaries=[glossary],
@@ -188,8 +194,10 @@ def run_paper_task(
         return PaperTaskResult(
             mono_pdf=mono,
             dual_pdf=dual,
-            model_requests=client.request_count,
+            model_requests=client.request_count + models.argon.request_count,
             max_in_flight=client.max_in_flight,
+            argon_max_in_flight=models.argon.max_in_flight,
+            forwarded_requests=len(client.forwarded_pages),
             kept_source_paragraphs=len(kept.paragraphs),
             kept_source_algorithms=algorithms.kept_source,
         )
@@ -200,8 +208,8 @@ def run_paper_task(
         report.fail(f"论文任务出错：{type(e).__name__}: {e}")
         raise
     finally:
-        report.write(output_dir / REPORT_FILE, client)
-        client.close()
+        report.write(output_dir / REPORT_FILE)
+        models.close()
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):

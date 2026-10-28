@@ -44,14 +44,19 @@ class PipelineTranslator(OpenAITranslator):
     def do_llm_translate(self, text, rate_limit_params: dict | None = None):
         if text is None:  # the engine probes LLM support with None
             return None
-        validate = (rate_limit_params or {}).get("validate_output")
-        return self._complete([{"role": "user", "content": text}], validate)
+        params = rate_limit_params or {}
+        return self._complete(
+            [{"role": "user", "content": text}],
+            params.get("validate_output"),
+            params.get("page_number"),
+        )
 
     def do_translate(self, text, rate_limit_params: dict | None = None) -> str:
-        return self._complete(self.prompt(text))
+        page = (rate_limit_params or {}).get("page_number")
+        return self._complete(self.prompt(text), page=page)
 
-    def _complete(self, messages: list[dict], validate=None) -> str:
+    def _complete(self, messages: list[dict], validate=None, page: int | None = None) -> str:
         try:
-            return self.model_client.complete(messages, validate=validate)
+            return self.model_client.complete(messages, validate=validate, page=page)
         except ModelCallError as e:
             raise TranslationRequestError(str(e)) from e

@@ -1,12 +1,15 @@
 """Real pipeline model smoke test: skipped unless ZT_REAL_MODEL_SMOKE=1.
 
-Runs the excerpt through the service against the real endpoint in the
-environment file (ZT_ENV_FILE, else the service's default). It checks that
+Runs the excerpt through the service against the real endpoints in the
+environment files (ZT_ENV_FILE and ZT_ARGON_ENV_FILE, else the service's
+defaults). It checks that
 the endpoint accepts all request parameters and that real output parses into
 both PDFs and a term list that is not empty, and that the task report lists
 no failed batch. Run it with:
 
-    ZT_REAL_MODEL_SMOKE=1 ZT_ENV_FILE=$HOME/.config/zotero-translate/model.env uv run pytest tests/test_real_model_smoke.py
+    ZT_REAL_MODEL_SMOKE=1 ZT_ENV_FILE=$HOME/.config/zotero-translate/model.env \
+        ZT_ARGON_ENV_FILE=$HOME/.config/zotero-translate/argon.env \
+        .venv/bin/pytest tests/test_real_model_smoke.py
 """
 
 import os
@@ -30,11 +33,19 @@ pytestmark = [
 
 
 def test_real_model_translates_the_excerpt_into_both_pdfs(tmp_path):
-    from zotero_translate.settings import DEFAULT_ENV_FILE
+    from zotero_translate.settings import DEFAULT_ARGON_ENV_FILE
     from zotero_translate.settings import DEFAULT_CONCURRENCY
+    from zotero_translate.settings import DEFAULT_ENV_FILE
 
     env_file = Path(os.environ.get("ZT_ENV_FILE", DEFAULT_ENV_FILE))
-    service = launch_service(None, tmp_path, DEFAULT_CONCURRENCY, env_file=env_file.resolve())
+    argon_env_file = Path(os.environ.get("ZT_ARGON_ENV_FILE", DEFAULT_ARGON_ENV_FILE))
+    service = launch_service(
+        None,
+        tmp_path,
+        DEFAULT_CONCURRENCY,
+        env_file=env_file.resolve(),
+        argon_env_file=argon_env_file.resolve(),
+    )
     try:
         task_id = service.submit(EXCERPT)
         final = service.wait(task_id, timeout=900)

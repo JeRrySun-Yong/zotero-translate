@@ -834,11 +834,16 @@ class ILTranslatorLLMOnly:
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_input(final_input)
             # The translator retries an answer that does not parse like a
-            # failed request (validate_output raises on it).
+            # failed request (validate_output raises on it). page_number
+            # (1-based) tells it where the batch starts.
+            first_page = batch_paragraph.pages[should_translate_paragraph[0]]
             llm_output = self.translate_engine.llm_translate(
                 final_input,
                 rate_limit_params={
                     "paragraph_token_count": paragraph_token_count,
+                    "page_number": None
+                    if first_page.page_number is None
+                    else first_page.page_number + 1,
                     "request_json_mode": True,
                     "validate_output": lambda output: self._parse_llm_output(
                         output, len(inputs)
