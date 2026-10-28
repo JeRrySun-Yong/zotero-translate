@@ -11,7 +11,8 @@ Test fixture only. It can:
   nothing for an hour; "slow" sends the response headers at once and then the
   normal answer a few bytes at a time over ``slow_body_seconds``; "400"
   answers with ``REJECTION_BODY``, a JSON error spread over several lines
-  and longer than 200 characters;
+  and longer than 200 characters; "400_echo" answers with an error that
+  echoes the request's Authorization header, key included;
 - inject a delay and count the maximum number of requests in flight.
 
 Request kinds are recognised from the message content:
@@ -101,7 +102,7 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
-_ERRORS = {"500", "429", "400", "401", "timeout", "slow", "empty", "invalid_json"}
+_ERRORS = {"500", "429", "400", "400_echo", "401", "timeout", "slow", "empty", "invalid_json"}
 
 # The body of an injected HTTP 400: several lines, the message first, then
 # padding that a 200-character excerpt cuts off.
@@ -183,8 +184,8 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "401", "timeout", "slow", "empty",
-        "invalid_json".
+        ``error`` is one of: "500", "429", "400", "400_echo", "401", "timeout", "slow",
+        "empty", "invalid_json".
         """
         assert error in _ERRORS, error
         self._faults.append(_Fault(kind=kind, nth=nth, error=error))
@@ -260,6 +261,9 @@ class FakeModel:
                 return _send_json(handler, 429, {"error": {"message": "injected 429"}})
             if fault == "400":
                 return _send_text(handler, 400, REJECTION_BODY)
+            if fault == "400_echo":
+                echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
+                return _send_json(handler, 400, {"error": echo})
             if fault == "401":
                 return _send_json(handler, 401, {"error": {"message": "injected 401"}})
             if fault == "timeout":

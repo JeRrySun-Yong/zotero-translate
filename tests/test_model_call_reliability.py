@@ -7,7 +7,8 @@ Closure ticket 01 (orchestrator 2026-10-28 09:45, after the relay endpoint
 answered one valid request with HTTP 400 in a real run): HTTP 400 is retried
 like a 5xx; 401 still fails at once. An HTTP error's reason, in the task log
 and in the failure reason, carries the first 200 characters of the response
-body, on one line.
+body, on one line, with the API keys replaced by "[redacted]"; a 401 or 403
+carries no body.
 """
 
 import collections
@@ -176,12 +177,30 @@ def test_a_batch_rejected_with_http_401_fails_the_task_at_once(fake_model, start
     final = service.wait(service.submit())
 
     assert final["state"] == "failed"
-    assert "HTTP 401" in final["error"], final["error"]
-    assert "injected 401" in final["error"], final["error"]
+    assert final["error"].endswith("管线模型拒绝了请求（HTTP 401）"), final["error"]
+    assert "injected 401" not in final["error"], final["error"]
     [rejected] = [r for r in fake_model.requests if r.fault]
     sends = [r for r in fake_model.requests if _prompt(r) == _prompt(rejected)]
     assert len(sends) == 1, "a 401 was resent"
     assert service.report(final["task_id"])["model"]["retries"] == 0
+
+
+def test_an_api_key_echoed_in_a_400_response_is_redacted_everywhere(fake_model, start_service):
+    fake_model.fail_same_request(["400_echo"] * 4, kind="translate_batch")
+    service = start_service(fake_model)
+
+    task_id = service.submit()
+    final = service.wait(task_id)
+
+    assert final["state"] == "failed"
+    assert any(FAKE_API_KEY in r.headers.get("Authorization", "") for r in fake_model.requests)
+    assert "Bearer [redacted]" in final["error"], final["error"]
+    assert FAKE_API_KEY not in final["error"]
+    for path in service.data_dir.rglob("*"):
+        if path.is_file():
+            assert FAKE_API_KEY.encode() not in path.read_bytes(), path.name
+    for path in ("/health", f"/tasks/{task_id}"):
+        assert FAKE_API_KEY.encode() not in service.http.get(path).content, path
 
 
 def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, start_service):

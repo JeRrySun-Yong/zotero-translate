@@ -109,6 +109,24 @@ def test_task_report_records_the_model_of_each_stage_and_each_endpoint(clean_run
     assert report["model"]["forwarded"] == {"requests": 0, "pages": []}
 
 
+def test_an_argon_key_echoed_in_a_400_response_is_redacted(start_service):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.fail_same_request(["timeout", "timeout"], kind="translate_batch")
+        argon.fail_same_request(["400_echo", "400_echo"], kind="translate_batch")
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+
+        task_id = service.submit()
+        final = service.wait(task_id)
+
+    assert final["state"] == "failed"
+    assert "Bearer [redacted]" in final["error"], final["error"]
+    for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
+        assert key not in final["error"]
+        for path in service.data_dir.rglob("*"):
+            if path.is_file():
+                assert key.encode() not in path.read_bytes(), path.name
+
+
 def test_neither_api_key_appears_in_the_task_directory_or_http_responses(clean_run):
     for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
         for name, data in clean_run["files"].items():

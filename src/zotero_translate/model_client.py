@@ -20,8 +20,10 @@ Reliability (ADR 0002):
 - The reason of an HTTP error, in the retry warning and in the final
   ``ModelCallError``, carries the first ``ERROR_BODY_CHARACTERS``
   characters of the response body on one line, so that the task log shows
-  why the endpoint refused. The body is the endpoint's answer; the request
-  headers, with the key, are never logged.
+  why the endpoint refused. A body can echo the request, so before it is
+  cut, the API key of this client and of its fallback is replaced with
+  ``[redacted]``; HTTP 401 and 403, which are about the key, carry no body
+  at all. The request headers are never logged.
 - Successful answers (those ``validate`` accepts) are cached on disk, keyed by
   a hash of the whole request body, which includes the model name. The cache
   directory is shared by all paper tasks, so a resubmitted paper reuses every
@@ -76,6 +78,7 @@ class ModelCallError(Exception):
 # Consecutive timeouts after which a flash request goes to argon (ADR 0004).
 FORWARD_AFTER_TIMEOUTS = 2
 ERROR_BODY_CHARACTERS = 200  # of an HTTP error's response body, in its reason
+REDACTED = "[redacted]"  # replaces an API key echoed in an error response
 
 
 class _RetryableError(Exception):
@@ -225,13 +228,19 @@ class ModelClient:
                 with self._lock:
                     self._in_flight -= 1
         if status_code == 429:
-            raise _RetryableError("管线模型限流（HTTP 429）" + _body_excerpt(data))
+            raise _RetryableError("管线模型限流（HTTP 429）" + self._body_excerpt(data))
         if status_code >= 500:
-            raise _RetryableError(f"管线模型服务端出错（HTTP {status_code}）" + _body_excerpt(data))
+            raise _RetryableError(
+                f"管线模型服务端出错（HTTP {status_code}）" + self._body_excerpt(data)
+            )
         if status_code == 400:
-            raise _RetryableError("管线模型拒绝了请求（HTTP 400）" + _body_excerpt(data))
+            raise _RetryableError("管线模型拒绝了请求（HTTP 400）" + self._body_excerpt(data))
+        if status_code in (401, 403):
+            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）")
         if status_code >= 400:
-            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）" + _body_excerpt(data))
+            raise ModelCallError(
+                f"管线模型拒绝了请求（HTTP {status_code}）" + self._body_excerpt(data)
+            )
         try:
             content = json.loads(data)["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
@@ -275,6 +284,15 @@ class ModelClient:
             raise outcome["error"]
         return outcome["response"]
 
+    def _body_excerpt(self, data: bytes) -> str:
+        """``：`` and the start of an error response ``data`` on one line, keys redacted; "" if empty."""
+        text = data.decode("utf-8", errors="replace")
+        clients = [self] if self.fallback is None else [self, self.fallback]
+        for key in {client.settings.api_key for client in clients} - {""}:
+            text = text.replace(key, REDACTED)
+        text = " ".join(text.split())[:ERROR_BODY_CHARACTERS]
+        return f"：{text}" if text else ""
+
     def _count_timeout(self) -> None:
         with self._lock:
             self.timeout_count += 1
@@ -289,12 +307,6 @@ class ModelClient:
 
     def close(self) -> None:
         self._http.close()
-
-
-def _body_excerpt(data: bytes) -> str:
-    """``：`` and the first ``ERROR_BODY_CHARACTERS`` characters of ``data`` on one line; "" if empty."""
-    text = " ".join(data[: 4 * ERROR_BODY_CHARACTERS].decode("utf-8", errors="replace").split())
-    return f"：{text[:ERROR_BODY_CHARACTERS]}" if text else ""
 
 
 class PipelineModels:
