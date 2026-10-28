@@ -1133,6 +1133,54 @@ class Typesetting:
             for page in document.page:
                 self.translation_config.raise_if_cancelled()
                 self.render_page(page)
+        # Pseudocode is laid out line by line by our own code (zotero-translate M2).
+        hook = getattr(self.translation_config, "algorithm_typesetter", None)
+        if hook is not None:
+            hook(document, self.algorithm_char)
+
+    def algorithm_char(
+        self,
+        page: il_version_1.Page,
+        like: PdfCharacter,
+        char_unicode: str,
+        font_size: float,
+    ) -> PdfCharacter | None:
+        """A character in the style of ``like`` (font family, bold, colour), at x = 0 on its baseline.
+
+        None when no font has a glyph for it.
+        """
+        fonts = {f.font_id: f for f in page.pdf_font if f.font_id}
+        font_id = like.pdf_style.font_id
+        font = None
+        for xobj in page.pdf_xobject:
+            if xobj.xobj_id == like.xobj_id:
+                font = next((f for f in xobj.pdf_font if f.font_id == font_id), None)
+        font = font or fonts.get(font_id) or self.font_mapper.fontid2font.get(font_id)
+        if font is None:
+            return None
+        try:
+            mapped = self.font_mapper.map(font, char_unicode)
+        except Exception:
+            return None
+        if mapped is None:
+            return None
+        width = mapped.char_lengths(char_unicode, font_size)[0]
+        return PdfCharacter(
+            pdf_character_id=mapped.has_glyph(ord(char_unicode)),
+            char_unicode=char_unicode,
+            box=Box(x=0, y=like.box.y, x2=width, y2=like.box.y + font_size),
+            pdf_style=PdfStyle(
+                font_id=getattr(mapped, "font_id", "base"),
+                font_size=font_size,
+                graphic_state=like.pdf_style.graphic_state,
+            ),
+            scale=1.0,
+            vertical=False,
+            advance=width,
+            xobj_id=like.xobj_id,
+            render_order=like.render_order,
+            sub_render_order=like.sub_render_order,
+        )
 
     def render_page(self, page: il_version_1.Page):
         fonts: dict[

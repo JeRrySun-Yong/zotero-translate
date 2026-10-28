@@ -47,6 +47,16 @@ test("a task window row shows title, stage, percentage and status", () => {
   assert.equal(core.taskRow({ title: "A", state: "done", stage: "完成", progress: 100 }).status, "已挂回");
 });
 
+test("a finished row says how many paragraphs and algorithms kept their source text", () => {
+  const done = { title: "A", state: "done", stage: "完成", progress: 100 };
+  assert.equal(core.taskRow({ ...done, keptSourceParagraphs: 0, keptSourceAlgorithms: 0 }).status, "已挂回");
+  assert.equal(core.taskRow({ ...done, keptSourceAlgorithms: 3 }).status, "已挂回（3 个算法保留原文）");
+  assert.equal(
+    core.taskRow({ ...done, keptSourceParagraphs: 2, keptSourceAlgorithms: 1 }).status,
+    "已挂回（2 段保留原文，1 个算法保留原文）",
+  );
+});
+
 test("a failed row shows the reason", () => {
   const row = core.taskRow({ title: "A", state: "failed", stage: "翻译与审校", progress: 30, error: "管线模型请求连续失败（第 2 页附近）" });
   assert.equal(row.status, "失败：管线模型请求连续失败（第 2 页附近）");

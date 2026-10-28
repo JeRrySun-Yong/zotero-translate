@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         stage=td.DONE_STAGE,
         progress=100,
         kept_source_paragraphs=result.kept_source_paragraphs,
+        kept_source_algorithms=result.kept_source_algorithms,
     )
     return 0
 

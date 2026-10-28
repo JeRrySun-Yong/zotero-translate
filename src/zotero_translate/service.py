@@ -91,6 +91,7 @@ class TaskQueue:
             progress=0,
             error=None,
             kept_source_paragraphs=0,
+            kept_source_algorithms=0,
         )
         with self._cond:
             self._queue.append(task_id)
@@ -120,6 +121,7 @@ class TaskQueue:
             "queue_position": position,
             "error": status.get("error"),
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
+            "kept_source_algorithms": status.get("kept_source_algorithms", 0),
             "files": td.available_files(directory),
         }
 

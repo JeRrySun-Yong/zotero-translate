@@ -246,6 +246,7 @@ var ZoteroTranslate = {
         queuePosition: status.queue_position,
         error: status.error,
         keptSourceParagraphs: status.kept_source_paragraphs,
+        keptSourceAlgorithms: status.kept_source_algorithms,
       });
       task.state = status.state === "succeeded" ? "attaching" : status.state;
       this._changed();

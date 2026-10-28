@@ -63,6 +63,7 @@ class PaperTaskResult:
     model_requests: int
     max_in_flight: int
     kept_source_paragraphs: int
+    kept_source_algorithms: int
 
 
 def run_paper_task(
@@ -86,6 +87,9 @@ def run_paper_task(
     from babeldoc.glossary import GlossaryEntry
     from babeldoc.translator.translator import set_translate_rate_limiter
 
+    from zotero_translate.algorithm_layout import AlgorithmLayout
+    from zotero_translate.algorithm_translation import AlgorithmTranslator
+    from zotero_translate.algorithms import AlgorithmDetector
     from zotero_translate.batch_context import BatchContext
     from zotero_translate.dossier import read_full_text
     from zotero_translate.dossier import request_dossier
@@ -103,7 +107,8 @@ def run_paper_task(
     engine_output = output_dir / "engine-output"
     client = ModelClient(settings)
     kept = KeptSource()
-    report = TaskReport(kept)
+    algorithms = AlgorithmDetector()
+    report = TaskReport(kept, algorithms)
 
     def progress(stage: str, percent: int) -> None:
         report.enter_stage(stage)
@@ -136,6 +141,9 @@ def run_paper_task(
         first_mentions = FirstMentionPlan(term_list.terms)
         report.first_mentions = first_mentions.placements
         reviewer = BatchReviewer(client, dossier, kept)
+        algorithm_translator = AlgorithmTranslator(
+            client, dossier, algorithms, term_list.glossary_entries()
+        )
         report.reviewer = reviewer
 
         high_level.init()
@@ -161,6 +169,9 @@ def run_paper_task(
             first_mention_recorder=first_mentions.record_translations,
             batch_reviewer=reviewer,
             on_source_kept=kept.record,
+            algorithm_detector=algorithms.engine_page,
+            algorithm_translator=algorithm_translator.start,
+            algorithm_typesetter=AlgorithmLayout(algorithms, algorithm_translator),
             use_rich_pbar=False,
         )
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)
@@ -180,6 +191,7 @@ def run_paper_task(
             model_requests=client.request_count,
             max_in_flight=client.max_in_flight,
             kept_source_paragraphs=len(kept.paragraphs),
+            kept_source_algorithms=algorithms.kept_source,
         )
     except PaperTaskError as e:
         report.fail(str(e), e.failed_batches)
