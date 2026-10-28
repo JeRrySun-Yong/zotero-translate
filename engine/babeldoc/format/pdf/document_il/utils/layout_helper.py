@@ -222,6 +222,26 @@ def get_paragraph_unicode(paragraph: PdfParagraph) -> str:
 
 SPACE_REGEX = regex.compile(r"\s+", regex.UNICODE)
 
+# A gap between two characters of a line is a word space when it is at least
+# this fraction of the left character's font size, and at least 1 pt.
+WORD_SPACE_EM = 0.15
+WORD_SPACE_MIN_PT = 1.0
+
+
+def word_space_threshold(char: PdfCharacter) -> float:
+    """The smallest gap after ``char`` that is a word space (closure ticket 02).
+
+    The source PDFs often have no space glyphs: the space is inferred from the
+    gap to the next character. Upstream took the second smallest distinct gap
+    of the line as the threshold, so word gaps that differ only by rounding
+    (1.84988 and 1.8499) lost their spaces, and a line with one wider sentence
+    gap lost every ordinary word space (``XiaofuChen``, ``AppendixH.1``).
+    Letter gaps inside a word stay well below 0.15 em.
+    """
+    style = char.pdf_style
+    font_size = style.font_size if style and style.font_size else 10
+    return max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * font_size)
+
 
 def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
     """
@@ -234,29 +254,7 @@ def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
     Returns:
         str: 处理后的 Unicode 字符串
     """
-    # 计算字符间距的中位数
-    distances = []
-    for i in range(len(chars) - 1):
-        if not (
-            isinstance(chars[i], PdfCharacter)
-            and isinstance(chars[i + 1], PdfCharacter)
-        ):
-            continue
-        distance = chars[i + 1].box.x - chars[i].box.x2
-        if distance > 1:  # 只考虑正向距离
-            distances.append(distance)
-
-    # 去重后的距离
-    distinct_distances = sorted(set(distances))
-
-    if not distinct_distances:
-        median_distance = 1
-    elif len(distinct_distances) == 1:
-        median_distance = distinct_distances[0]
-    else:
-        median_distance = distinct_distances[1]
-
-    # 构建 unicode 字符串，根据间距插入空格
+    # 构建 unicode 字符串，根据间距插入空格（阈值见 word_space_threshold）
     unicode_chars = []
     for i in range(len(chars)):
         # 如果不是字符对象，直接添加，一般来说这个时候 chars[i] 是字符串
@@ -280,10 +278,10 @@ def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
         # 如果两个字符都是 PdfCharacter，检查间距
         if i < len(chars) - 1 and isinstance(chars[i + 1], PdfCharacter):
             distance = chars[i + 1].box.x - chars[i].box.x2
-            if distance >= median_distance or Layout.is_newline(  # 间距大于中位数
+            if distance >= word_space_threshold(chars[i]) or Layout.is_newline(
                 chars[i],
                 chars[i + 1],
-            ):  # 换行
+            ):  # 词间距或换行
                 unicode_chars.append(" ")  # 添加空格
 
     result = "".join(unicode_chars)
@@ -499,38 +497,22 @@ def _add_space_dummy_chars_to_list(chars: list[PdfCharacter]) -> None:
     if not chars:
         return
 
-    # 计算字符间距的中位数
-    distances = []
-    for i in range(len(chars) - 1):
-        distance = chars[i + 1].box.x - chars[i].box.x2
-        if distance > 1:  # 只考虑正向距离
-            distances.append(distance)
-
-    # 去重后的距离
-    distinct_distances = sorted(set(distances))
-
-    if not distinct_distances:
-        median_distance = 1
-    elif len(distinct_distances) == 1:
-        median_distance = distinct_distances[0]
-    else:
-        median_distance = distinct_distances[1]
-
-    # 在需要的地方插入空格字符
+    # 在需要的地方插入空格字符（阈值见 word_space_threshold）
     i = 0
     while i < len(chars) - 1:
         curr_char = chars[i]
         next_char = chars[i + 1]
 
         distance = next_char.box.x - curr_char.box.x2
-        if distance >= median_distance or Layout.is_newline(curr_char, next_char):
+        threshold = word_space_threshold(curr_char)
+        if distance >= threshold or Layout.is_newline(curr_char, next_char):
             if distance < 0:
                 distance = -distance
             # 创建一个 dummy 字符作为空格
             space_box = Box(
                 x=curr_char.box.x2,
                 y=curr_char.box.y,
-                x2=curr_char.box.x2 + min(distance, median_distance),
+                x2=curr_char.box.x2 + min(distance, threshold),
                 y2=curr_char.box.y2,
             )
 
