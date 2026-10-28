@@ -2,6 +2,12 @@
 
 Spec "计划覆盖的行为" 10, 14, 15 and 16 (13 is in test_paper_task.py), and
 ticket 11: a request that runs longer than the request timeout in total.
+
+Closure ticket 01 (orchestrator 2026-10-28 09:45, after the relay endpoint
+answered one valid request with HTTP 400 in a real run): HTTP 400 is retried
+like a 5xx; 401 still fails at once. An HTTP error's reason, in the task log
+and in the failure reason, carries the first 200 characters of the response
+body, on one line.
 """
 
 import collections
@@ -13,6 +19,8 @@ import time
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import launch_service
 from tests.conftest import stop_service
+from tests.fake_model import REJECTION_BODY
+from tests.fake_model import REJECTION_MESSAGE
 from tests.fake_model import FakeModel
 
 RESTART_ERROR = "翻译服务重启，任务中断"
@@ -114,6 +122,66 @@ def test_a_request_timing_out_four_times_fails_the_task_with_the_timeout_and_pag
     report = service.report(final["task_id"])
     assert report["failed_batches"][0]["page"] == 1
     assert report["model"]["retries"] >= 3
+
+
+def _excerpt(body: str) -> str:
+    """The first 200 characters of ``body`` on one line, as the client writes them."""
+    return " ".join(body.split())[:200]
+
+
+def test_a_batch_rejected_once_with_http_400_is_resent_and_the_task_succeeds(
+    fake_model, start_service
+):
+    fake_model.fail_same_request(["400"], kind="translate_batch")
+    service = start_service(fake_model)
+
+    task_id = service.submit()
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    [rejected] = [r for r in fake_model.requests if r.fault]
+    sends = [r for r in fake_model.requests if _prompt(r) == _prompt(rejected)]
+    assert [r.fault for r in sends] == ["400", None]
+    assert service.report(task_id)["model"]["retries"] == 1
+    log = (service.data_dir / "tasks" / task_id / "task.log").read_text("utf-8")
+    [warning] = [line for line in log.splitlines() if "HTTP 400" in line]
+    assert "attempt 1/4" in warning, warning
+    assert _excerpt(REJECTION_BODY) in warning, warning
+    assert "x" * 200 not in warning, "the response body is not cut at 200 characters"
+
+
+def test_a_batch_rejected_four_times_with_http_400_fails_the_task_with_its_page_and_the_response(
+    fake_model, start_service
+):
+    fake_model.fail_same_request(["400", "400", "400", "400"], kind="translate_batch")
+    service = start_service(fake_model)
+
+    final = service.wait(service.submit())
+
+    assert final["state"] == "failed"
+    assert "HTTP 400" in final["error"], final["error"]
+    assert "第 1 页" in final["error"], final["error"]
+    assert REJECTION_MESSAGE in final["error"], final["error"]
+    assert "\n" not in final["error"]
+    [rejected, *_] = [r for r in fake_model.requests if r.fault]
+    sends = [r for r in fake_model.requests if _prompt(r) == _prompt(rejected)]
+    assert [r.fault for r in sends] == ["400"] * 4
+    assert service.report(final["task_id"])["model"]["retries"] == 3
+
+
+def test_a_batch_rejected_with_http_401_fails_the_task_at_once(fake_model, start_service):
+    fake_model.fail_same_request(["401"], kind="translate_batch")
+    service = start_service(fake_model)
+
+    final = service.wait(service.submit())
+
+    assert final["state"] == "failed"
+    assert "HTTP 401" in final["error"], final["error"]
+    assert "injected 401" in final["error"], final["error"]
+    [rejected] = [r for r in fake_model.requests if r.fault]
+    sends = [r for r in fake_model.requests if _prompt(r) == _prompt(rejected)]
+    assert len(sends) == 1, "a 401 was resent"
+    assert service.report(final["task_id"])["model"]["retries"] == 0
 
 
 def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, start_service):

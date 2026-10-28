@@ -8,11 +8,20 @@ Reliability (ADR 0002):
 
 - The request timeout bounds the whole request, from sending it to reading
   the last byte of the response (see ``_post``).
-- Network errors, timeouts, HTTP 429 and 5xx, empty content and answers the
-  caller's ``validate`` rejects are retried, at most ``max_retries`` times,
-  waiting ``retry_backoff_seconds`` and then twice as long each time. Other
-  HTTP errors (e.g. 401) fail at once. When the attempts are used up,
-  ``complete`` raises ``ModelCallError`` with a readable Chinese reason.
+- Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
+  answers the caller's ``validate`` rejects are retried, at most
+  ``max_retries`` times, waiting ``retry_backoff_seconds`` and then twice as
+  long each time. Other HTTP errors (e.g. 401, 403) fail at once. When the
+  attempts are used up, ``complete`` raises ``ModelCallError`` with a
+  readable Chinese reason.
+- HTTP 400 is retried because the relay endpoint answered a valid request
+  with 400 once and the same request succeeded when the paper was submitted
+  again (closure-01 run2, MaLiang page 7).
+- The reason of an HTTP error, in the retry warning and in the final
+  ``ModelCallError``, carries the first ``ERROR_BODY_CHARACTERS``
+  characters of the response body on one line, so that the task log shows
+  why the endpoint refused. The body is the endpoint's answer; the request
+  headers, with the key, are never logged.
 - Successful answers (those ``validate`` accepts) are cached on disk, keyed by
   a hash of the whole request body, which includes the model name. The cache
   directory is shared by all paper tasks, so a resubmitted paper reuses every
@@ -22,8 +31,8 @@ Two endpoints (ADR 0004): ``PipelineModels`` holds a client for flash and
 one for argon. A flash request whose attempts time out twice in a row sends
 its remaining attempts to argon (its ``fallback``):
 
-- Only timeouts count; any other failed attempt (HTTP 429 or 5xx, a network
-  error, empty content, a rejected answer) sets the count back to 0.
+- Only timeouts count; any other failed attempt (HTTP 400, 429 or 5xx, a
+  network error, empty content, a rejected answer) sets the count back to 0.
 - A forwarded request stays on argon, and its attempts stay ``1 +
   max_retries`` in total. Argon's attempts take a slot of argon's own
   concurrency limit, which all argon requests share.
@@ -66,6 +75,7 @@ class ModelCallError(Exception):
 
 # Consecutive timeouts after which a flash request goes to argon (ADR 0004).
 FORWARD_AFTER_TIMEOUTS = 2
+ERROR_BODY_CHARACTERS = 200  # of an HTTP error's response body, in its reason
 
 
 class _RetryableError(Exception):
@@ -215,11 +225,13 @@ class ModelClient:
                 with self._lock:
                     self._in_flight -= 1
         if status_code == 429:
-            raise _RetryableError("管线模型限流（HTTP 429）")
+            raise _RetryableError("管线模型限流（HTTP 429）" + _body_excerpt(data))
         if status_code >= 500:
-            raise _RetryableError(f"管线模型服务端出错（HTTP {status_code}）")
+            raise _RetryableError(f"管线模型服务端出错（HTTP {status_code}）" + _body_excerpt(data))
+        if status_code == 400:
+            raise _RetryableError("管线模型拒绝了请求（HTTP 400）" + _body_excerpt(data))
         if status_code >= 400:
-            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）")
+            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）" + _body_excerpt(data))
         try:
             content = json.loads(data)["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
@@ -277,6 +289,12 @@ class ModelClient:
 
     def close(self) -> None:
         self._http.close()
+
+
+def _body_excerpt(data: bytes) -> str:
+    """``：`` and the first ``ERROR_BODY_CHARACTERS`` characters of ``data`` on one line; "" if empty."""
+    text = " ".join(data[: 4 * ERROR_BODY_CHARACTERS].decode("utf-8", errors="replace").split())
+    return f"：{text[:ERROR_BODY_CHARACTERS]}" if text else ""
 
 
 class PipelineModels:
