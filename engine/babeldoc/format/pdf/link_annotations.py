@@ -38,23 +38,39 @@ def restore_links(translation_config, translate_result) -> None:
     """Add the input file's links to the mono PDFs and to the dual PDFs' source halves."""
     from babeldoc.format.pdf.high_level import safe_save
 
-    outputs: dict[Path, object] = {}
-    for attrs, add in ((_MONO_ATTRS, _add_to_mono), (_DUAL_ATTRS, _add_to_dual)):
+    outputs: dict[Path, bool] = {}  # path -> is a dual PDF
+    for attrs, dual in ((_MONO_ATTRS, False), (_DUAL_ATTRS, True)):
         for attr in attrs:
             path = getattr(translate_result, attr, None)
             if path:
-                outputs.setdefault(Path(path), add)
+                outputs.setdefault(Path(path), dual)
     if translation_config.use_alternating_pages_dual:
         logger.info("links are not restored in alternating-pages dual PDFs")
-        outputs = {path: add for path, add in outputs.items() if add is _add_to_mono}
+        outputs = {path: dual for path, dual in outputs.items() if not dual}
     with pymupdf.open(translation_config.input_file) as source:
         links = [_page_links(source, page) for page in source]
         if not any(links):
             return
-        for path, add in outputs.items():
-            temp_path = translation_config.get_working_file_path(f"{path.stem}.links.pdf")
+        for path, dual in outputs.items():
+            temp_path = translation_config.get_working_file_path(
+                f"{path.stem}.links.pdf"
+            )
             with pymupdf.open(path) as doc:
-                add(doc, source, links, translation_config)
+                if doc.page_count != source.page_count:
+                    logger.warning(
+                        "%s has %d pages, the input %d; links are not restored",
+                        path.name,
+                        doc.page_count,
+                        source.page_count,
+                    )
+                    continue
+                if dual:
+                    placements = _dual_placements(
+                        doc, source, translation_config.dual_translate_first
+                    )
+                else:
+                    placements = dict.fromkeys(range(doc.page_count), pymupdf.Identity)
+                _insert(doc, links, placements)
                 safe_save(doc, temp_path)
             shutil.move(temp_path, path)
 
@@ -64,7 +80,9 @@ def _page_links(doc: pymupdf.Document, page: pymupdf.Page) -> list[dict]:
     links = []
     for link in page.get_links():
         if link["kind"] == pymupdf.LINK_URI and link.get("uri"):
-            links.append({"kind": pymupdf.LINK_URI, "from": link["from"], "uri": link["uri"]})
+            links.append(
+                {"kind": pymupdf.LINK_URI, "from": link["from"], "uri": link["uri"]}
+            )
             continue
         if link["kind"] not in (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED):
             continue
@@ -88,27 +106,8 @@ def _page_links(doc: pymupdf.Document, page: pymupdf.Page) -> list[dict]:
     return links
 
 
-def _add_to_mono(doc, source, links, translation_config) -> None:
-    if doc.page_count != source.page_count:
-        logger.warning(
-            "mono PDF has %d pages, the input %d; links are not restored",
-            doc.page_count,
-            source.page_count,
-        )
-        return
-    placements = {page_no: pymupdf.Identity for page_no in range(doc.page_count)}
-    _insert(doc, links, placements)
-
-
-def _add_to_dual(doc, source, links, translation_config) -> None:
-    """Links on the source half: the left half, or the right one with ``dual_translate_first``."""
-    if doc.page_count != source.page_count:
-        logger.warning(
-            "dual PDF has %d pages, the input %d; links are not restored",
-            doc.page_count,
-            source.page_count,
-        )
-        return
+def _dual_placements(doc, source, translate_first: bool) -> dict[int, pymupdf.Matrix]:
+    """Where each source page sits on its dual page: the left half, or the right one."""
     placements = {}
     for page_no in range(doc.page_count):
         page, src = doc[page_no].rect, source[page_no]
@@ -121,9 +120,9 @@ def _add_to_dual(doc, source, links, translation_config) -> None:
         ):
             logger.warning("dual page %d: links are not restored", page_no + 1)
             continue
-        offset = src.rect.width if translation_config.dual_translate_first else 0
+        offset = src.rect.width if translate_first else 0
         placements[page_no] = pymupdf.Matrix(1, 0, 0, 1, offset, 0)
-    _insert(doc, links, placements)
+    return placements
 
 
 def _insert(doc, links, placements: dict[int, pymupdf.Matrix]) -> None:
