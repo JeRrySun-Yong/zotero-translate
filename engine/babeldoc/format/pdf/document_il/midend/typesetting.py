@@ -43,6 +43,11 @@ SCALE_EPSILON = 1e-9
 TABLE_CELL_GAP_EM = 0.5
 # A paragraph box at most this many ems high is one source line.
 ONE_LINE_EM = 1.5
+# Two cells of a column share their left edge or their centre within these
+# distances (pt): left edges of left-aligned text are set at one x; centres of
+# centred text vary with the glyph widths.
+CELL_LEFT_TOLERANCE = 0.5
+CELL_CENTRE_TOLERANCE = 1.0
 
 LINE_BREAK_REGEX = regex.compile(
     r"^["
@@ -998,11 +1003,12 @@ class Typesetting:
 
         # closure 06 (T4): a one-line table cell ("Calls" in a 12 pt cell) that
         # does not fit at the initial scale first widens into the free space
-        # of its table row, centred on the cell, and the search starts there.
-        # Only table cells: figure labels have the same layout label
-        # (fallback_line) and must not grow (ticket 03).
+        # of its table row (centred cells to both sides, left-aligned cells to
+        # the right), and the search starts there. Only table cells: figure
+        # labels have the same layout label (fallback_line) and must not grow
+        # (ticket 03).
         source_box = box
-        cell_box = self._widened_table_cell(paragraph, page, box)
+        cell_box, centred = self._widened_table_cell(paragraph, page, box)
         if (
             cell_box is not None
             and not self._try_layout(
@@ -1031,7 +1037,7 @@ class Typesetting:
 
             # 如果所有单元都放得下
             if all_units_fit:
-                if cell_box is not None and box is cell_box:
+                if centred and cell_box is not None and box is cell_box:
                     typeset_units = self._centre_cell_line(
                         typesetting_units,
                         typeset_units,
@@ -1206,20 +1212,34 @@ class Typesetting:
         paragraph: il_version_1.PdfParagraph,
         page: il_version_1.Page,
         box: Box,
-    ) -> Box | None:
-        """The box a one-line table cell may use (closure ticket 06): its
-        source box widened to both sides, centred on the cell, as far as the
-        nearest text, form or figure on its row (less TABLE_CELL_GAP_EM) and
-        the table's edges allow. None when the paragraph is not a one-line
+    ) -> tuple[Box | None, bool]:
+        """The box a one-line table cell may use (closure ticket 06), and
+        whether the cell is centred.
+
+        The source box widens as far as the nearest text, form, curve (a
+        table rule, a shaded cell) or figure on its row, less
+        TABLE_CELL_GAP_EM, and the table's edges allow:
+
+        - a centred cell to both sides, centred on the cell (the header
+          "Calls" over its column of numbers);
+        - a left-aligned cell to the right only, so that its left edge, and
+          the indent of a continuation line, stay where they are (the text
+          columns of AutoDesign pages 21, 22 and 25).
+
+        A cell is centred when more cells of its column (the other paragraphs
+        of the table that overlap it horizontally on other rows) share its
+        centre (within CELL_CENTRE_TOLERANCE) than its left edge (within
+        CELL_LEFT_TOLERANCE); otherwise, with no evidence either way too, it
+        is left-aligned. (None, False) when the paragraph is not a one-line
         cell in a "table" layout region or has no room to grow."""
         # getattr: the synthetic layout tests pass bare paragraph and page
         # stand-ins without these fields.
         style = getattr(paragraph, "pdf_style", None)
         if getattr(paragraph, "vertical", False) or not style or not style.font_size:
-            return None
+            return None, False
         size = style.font_size
         if box.y2 - box.y > ONE_LINE_EM * size:
-            return None
+            return None, False
         centre_x, centre_y = (box.x + box.x2) / 2, (box.y + box.y2) / 2
         table = next(
             (
@@ -1232,11 +1252,25 @@ class Typesetting:
             None,
         )
         if table is None:
-            return None
+            return None, False
+        paragraphs = [p.box for p in page.pdf_paragraph if p is not paragraph and p.box]
+        column = [
+            other
+            for other in paragraphs
+            if (other.y >= box.y2 or other.y2 <= box.y)
+            and other.x < box.x2
+            and box.x < other.x2
+            and table.y <= (other.y + other.y2) / 2 <= table.y2
+        ]
+        same_left = sum(abs(o.x - box.x) <= CELL_LEFT_TOLERANCE for o in column)
+        same_centre = sum(
+            abs((o.x + o.x2) / 2 - centre_x) <= CELL_CENTRE_TOLERANCE for o in column
+        )
+        centred = same_centre > same_left
         left, right = table.x, table.x2
-        others = [p.box for p in page.pdf_paragraph if p is not paragraph and p.box]
-        others += [char.box for char in page.pdf_character]
-        others += [figure.box for figure in page.pdf_figure]
+        others = paragraphs + [char.box for char in page.pdf_character]
+        for shapes in (page.pdf_figure, page.pdf_form, page.pdf_curve):
+            others += [shape.box for shape in shapes if shape.box]
         for other in others:
             if other.y >= box.y2 or other.y2 <= box.y:
                 continue  # not on the cell's row
@@ -1244,10 +1278,15 @@ class Typesetting:
                 left = max(left, other.x2)
             elif other.x >= box.x2:
                 right = min(right, other.x)
-        half = min(centre_x - left, right - centre_x) - TABLE_CELL_GAP_EM * size
+        gap = TABLE_CELL_GAP_EM * size
+        if not centred:
+            if right - gap <= box.x2:
+                return None, False
+            return Box(x=box.x, y=box.y, x2=right - gap, y2=box.y2), False
+        half = min(centre_x - left, right - centre_x) - gap
         if half <= (box.x2 - box.x) / 2:
-            return None
-        return Box(x=centre_x - half, y=box.y, x2=centre_x + half, y2=box.y2)
+            return None, False
+        return Box(x=centre_x - half, y=box.y, x2=centre_x + half, y2=box.y2), True
 
     def _centre_cell_line(
         self,
