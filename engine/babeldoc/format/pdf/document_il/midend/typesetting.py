@@ -28,6 +28,13 @@ from babeldoc.format.pdf.translation_config import WatermarkOutputMode
 
 logger = logging.getLogger(__name__)
 
+# Line advance of a CJK paragraph, as a multiple of its font size (upstream 1.5;
+# closure ticket 03).
+CJK_LINE_SKIP = 1.20
+# Smallest font scale the layout search tries before it sets the paragraph at
+# this scale past its box (upstream 0.1; closure ticket 03).
+MIN_SCALE = 0.5
+
 LINE_BREAK_REGEX = regex.compile(
     r"^["
     r"a-z"
@@ -965,12 +972,20 @@ class Typesetting:
 
         box = paragraph.box
         scale = initial_scale
-        line_skip = 1.50 if self.is_cjk else 1.3
-        min_scale = 0.1
+        # closure 03 (F1): a CJK line skip of 1.5 set the AutoRef abstract
+        # (source 10.1 pt on an 11.0 pt pitch) at 9.0 pt on a 13.5 pt pitch; the
+        # font shrank because the lines were far apart. 1.2 keeps the
+        # translation near the source size.
+        line_skip = CJK_LINE_SKIP if self.is_cjk else 1.3
+        # closure 03 (T1, T4): table header cells shrank to 0.1 of their size
+        # (3.0 pt). Below MIN_SCALE the paragraph is set at MIN_SCALE and may
+        # run past its box (see the end of this method).
+        min_scale = MIN_SCALE
         expand_space_flag = 0
         final_typeset_units = None
 
-        while scale >= min_scale:
+        # The float steps below (0.05, 0.1) must not skip min_scale itself.
+        while scale >= min_scale - 1e-9:
             try:
                 # 尝试布局排版单元
                 typeset_units, all_units_fit = self._layout_typesetting_units(
@@ -986,18 +1001,7 @@ class Typesetting:
                 if all_units_fit:
                     if apply_layout:
                         # 实际应用排版结果
-                        paragraph.scale = scale
-                        paragraph.pdf_paragraph_composition = []
-                        for unit in typeset_units:
-                            chars, curves, forms = unit.render()
-                            for char in chars:
-                                paragraph.pdf_paragraph_composition.append(
-                                    PdfParagraphComposition(pdf_character=char),
-                                )
-                            for curve in curves:
-                                page.pdf_curve.append(curve)
-                            for form in forms:
-                                page.pdf_form.append(form)
+                        self._apply_typeset_units(paragraph, page, typeset_units, scale)
                         final_typeset_units = typeset_units
                     return scale, final_typeset_units
             except Exception:
@@ -1072,8 +1076,57 @@ class Typesetting:
                 apply_layout=apply_layout,
             )
 
+        # Nothing fits at or above min_scale (closure 03): set the paragraph at
+        # min_scale and let it run past its box rather than shrink it further.
+        # Only when no unit can be placed at all (a unit wider than the box)
+        # does the scale go below min_scale, down to the old floor of 0.1, so
+        # the paragraph never comes out empty.
+        if apply_layout:
+            fallback_scale = min_scale
+            while fallback_scale >= 0.1 - 1e-9:
+                try:
+                    typeset_units, _ = self._layout_typesetting_units(
+                        typesetting_units,
+                        box,
+                        fallback_scale,
+                        line_skip,
+                        paragraph,
+                        use_english_line_break,
+                    )
+                except Exception:
+                    # Same as the loop above: a layout error means "does not fit".
+                    typeset_units = []
+                if typeset_units:
+                    self._apply_typeset_units(
+                        paragraph, page, typeset_units, fallback_scale
+                    )
+                    return fallback_scale, typeset_units
+                fallback_scale -= 0.1
+
         # 最后返回最小缩放因子
         return min_scale, final_typeset_units
+
+    @staticmethod
+    def _apply_typeset_units(
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        typeset_units: list[TypesettingUnit],
+        scale: float,
+    ) -> None:
+        """Write laid-out units into the paragraph (characters) and the page
+        (curves, forms)."""
+        paragraph.scale = scale
+        paragraph.pdf_paragraph_composition = []
+        for unit in typeset_units:
+            chars, curves, forms = unit.render()
+            for char in chars:
+                paragraph.pdf_paragraph_composition.append(
+                    PdfParagraphComposition(pdf_character=char),
+                )
+            for curve in curves:
+                page.pdf_curve.append(curve)
+            for form in forms:
+                page.pdf_form.append(form)
 
     def _get_optimal_scale(
         self,
