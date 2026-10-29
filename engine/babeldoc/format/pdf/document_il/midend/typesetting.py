@@ -37,6 +37,17 @@ MIN_SCALE = 0.5
 # Tolerance of the scale comparisons: the search steps by 0.05 and 0.1 in
 # floats and must not skip MIN_SCALE (or 0.1) itself.
 SCALE_EPSILON = 1e-9
+# A one-line table cell whose translation does not fit its source cell widens
+# into the free space of its table row (closure ticket 06, T4); it keeps this
+# gap, in ems of its font size, to the nearest text on either side.
+TABLE_CELL_GAP_EM = 0.5
+# A paragraph box at most this many ems high is one source line.
+ONE_LINE_EM = 1.5
+# Two cells of a column share their left edge or their centre within these
+# distances (pt): left edges of left-aligned text are set at one x; centres of
+# centred text vary with the glyph widths.
+CELL_LEFT_TOLERANCE = 0.5
+CELL_CENTRE_TOLERANCE = 1.0
 
 LINE_BREAK_REGEX = regex.compile(
     r"^["
@@ -990,6 +1001,29 @@ class Typesetting:
         expand_space_flag = 0
         final_typeset_units = None
 
+        # closure 06 (T4): a one-line table cell ("Calls" in a 12 pt cell) that
+        # does not fit at the initial scale first widens into the free space
+        # of its table row (centred cells to both sides, left-aligned cells to
+        # the right), and the search starts there. Only table cells: figure
+        # labels have the same layout label (fallback_line) and must not grow
+        # (ticket 03).
+        source_box = box
+        cell_box, centred = self._widened_table_cell(paragraph, page, box)
+        if (
+            cell_box is not None
+            and not self._try_layout(
+                typesetting_units,
+                box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+            )[1]
+        ):
+            box = cell_box
+        else:
+            cell_box = None
+
         while scale >= min_scale - SCALE_EPSILON:
             # 尝试布局排版单元（布局出错按放不下处理）
             typeset_units, all_units_fit = self._try_layout(
@@ -1003,11 +1037,24 @@ class Typesetting:
 
             # 如果所有单元都放得下
             if all_units_fit:
+                if centred and cell_box is not None and box is cell_box:
+                    typeset_units = self._centre_cell_line(
+                        typesetting_units,
+                        typeset_units,
+                        cell_box,
+                        source_box,
+                        scale,
+                        line_skip,
+                        paragraph,
+                        use_english_line_break,
+                    )
                 try:
                     if apply_layout:
                         # 实际应用排版结果
                         self._apply_typeset_units(paragraph, page, typeset_units, scale)
                         final_typeset_units = typeset_units
+                        if cell_box is not None and box is cell_box:
+                            paragraph.box = self._text_extent(typeset_units, source_box)
                     return scale, final_typeset_units
                 except Exception:
                     # 如果写入排版结果出错，继续尝试下一个缩放因子
@@ -1159,6 +1206,141 @@ class Typesetting:
                 page.pdf_curve.append(curve)
             for form in forms:
                 page.pdf_form.append(form)
+
+    @staticmethod
+    def _widened_table_cell(
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        box: Box,
+    ) -> tuple[Box | None, bool]:
+        """The box a one-line table cell may use (closure ticket 06), and
+        whether the cell is centred.
+
+        The source box widens as far as the nearest text, form, curve (a
+        table rule, a shaded cell) or figure on its row, less
+        TABLE_CELL_GAP_EM, and the table's edges allow:
+
+        - a centred cell to both sides, centred on the cell (the header
+          "Calls" over its column of numbers);
+        - a left-aligned cell to the right only, so that its left edge, and
+          the indent of a continuation line, stay where they are (the text
+          columns of AutoDesign pages 21, 22 and 25).
+
+        A cell is centred when at least as many cells of its column (the
+        other paragraphs of the table that overlap it horizontally on other
+        rows) share its centre (within CELL_CENTRE_TOLERANCE) as share its left
+        edge (within CELL_LEFT_TOLERANCE), and at least one does: a header as
+        wide as the numbers below it ("Inst." on AutoRef page 25) shares both
+        and is centred over them. Otherwise, with no evidence either way too,
+        it is left-aligned: the cells of a text column share their left edge
+        and differ in width. (None, False) when the paragraph is not a
+        one-line cell in a "table" layout region or has no room to grow."""
+        # getattr: the synthetic layout tests pass bare paragraph and page
+        # stand-ins without these fields.
+        style = getattr(paragraph, "pdf_style", None)
+        if getattr(paragraph, "vertical", False) or not style or not style.font_size:
+            return None, False
+        size = style.font_size
+        if box.y2 - box.y > ONE_LINE_EM * size:
+            return None, False
+        centre_x, centre_y = (box.x + box.x2) / 2, (box.y + box.y2) / 2
+        table = next(
+            (
+                layout.box
+                for layout in getattr(page, "page_layout", ())
+                if layout.class_name == "table"
+                and layout.box.x <= centre_x <= layout.box.x2
+                and layout.box.y <= centre_y <= layout.box.y2
+            ),
+            None,
+        )
+        if table is None:
+            return None, False
+        paragraphs = [p.box for p in page.pdf_paragraph if p is not paragraph and p.box]
+        column = [
+            other
+            for other in paragraphs
+            if (other.y >= box.y2 or other.y2 <= box.y)
+            and other.x < box.x2
+            and box.x < other.x2
+            and table.y <= (other.y + other.y2) / 2 <= table.y2
+        ]
+        same_left = sum(abs(o.x - box.x) <= CELL_LEFT_TOLERANCE for o in column)
+        same_centre = sum(
+            abs((o.x + o.x2) / 2 - centre_x) <= CELL_CENTRE_TOLERANCE for o in column
+        )
+        centred = same_centre >= same_left and same_centre > 0
+        left, right = table.x, table.x2
+        others = paragraphs + [char.box for char in page.pdf_character]
+        for shapes in (page.pdf_figure, page.pdf_form, page.pdf_curve):
+            others += [shape.box for shape in shapes if shape.box]
+        for other in others:
+            if other.y >= box.y2 or other.y2 <= box.y:
+                continue  # not on the cell's row
+            if other.x2 <= box.x:
+                left = max(left, other.x2)
+            elif other.x >= box.x2:
+                right = min(right, other.x)
+        gap = TABLE_CELL_GAP_EM * size
+        if not centred:
+            if right - gap <= box.x2:
+                return None, False
+            return Box(x=box.x, y=box.y, x2=right - gap, y2=box.y2), False
+        half = min(centre_x - left, right - centre_x) - gap
+        if half <= (box.x2 - box.x) / 2:
+            return None, False
+        return Box(x=centre_x - half, y=box.y, x2=centre_x + half, y2=box.y2), True
+
+    def _centre_cell_line(
+        self,
+        typesetting_units: list[TypesettingUnit],
+        typeset_units: list[TypesettingUnit],
+        cell_box: Box,
+        source_box: Box,
+        scale: float,
+        line_skip: float,
+        paragraph: il_version_1.PdfParagraph,
+        use_english_line_break: bool,
+    ) -> list[TypesettingUnit]:
+        """Lay a widened cell's text out again so that its one line is centred
+        on the source cell; the layout starts at the box's left edge, so the
+        line would otherwise sit left of the column. Text of several lines
+        keeps its layout."""
+        boxes = [unit.box for unit in typeset_units]
+        if not boxes:
+            return typeset_units
+        tallest = max(b.y2 - b.y for b in boxes)
+        if max(b.y for b in boxes) - min(b.y for b in boxes) > 0.5 * tallest:
+            return typeset_units
+        shift = (source_box.x + source_box.x2) / 2 - (
+            min(b.x for b in boxes) + max(b.x2 for b in boxes)
+        ) / 2
+        centred, fit = self._try_layout(
+            typesetting_units,
+            Box(
+                x=cell_box.x + shift,
+                y=cell_box.y,
+                x2=cell_box.x2 + shift,
+                y2=cell_box.y2,
+            ),
+            scale,
+            line_skip,
+            paragraph,
+            use_english_line_break,
+        )
+        return centred if fit else typeset_units
+
+    @staticmethod
+    def _text_extent(typeset_units: list[TypesettingUnit], source_box: Box) -> Box:
+        """The source box widened to the laid-out text, so that the cells laid
+        out after this one keep clear of it."""
+        boxes = [unit.box for unit in typeset_units]
+        return Box(
+            x=min([source_box.x] + [b.x for b in boxes]),
+            y=source_box.y,
+            x2=max([source_box.x2] + [b.x2 for b in boxes]),
+            y2=source_box.y2,
+        )
 
     def _get_optimal_scale(
         self,
