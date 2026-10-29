@@ -34,6 +34,9 @@ CJK_LINE_SKIP = 1.25
 # Smallest font scale the layout search tries before it sets the paragraph at
 # this scale past its box (upstream 0.1; closure ticket 03).
 MIN_SCALE = 0.5
+# Tolerance of the scale comparisons: the search steps by 0.05 and 0.1 in
+# floats and must not skip MIN_SCALE (or 0.1) itself.
+SCALE_EPSILON = 1e-9
 
 LINE_BREAK_REGEX = regex.compile(
     r"^["
@@ -987,29 +990,28 @@ class Typesetting:
         expand_space_flag = 0
         final_typeset_units = None
 
-        # The float steps below (0.05, 0.1) must not skip min_scale itself.
-        while scale >= min_scale - 1e-9:
-            try:
-                # 尝试布局排版单元
-                typeset_units, all_units_fit = self._layout_typesetting_units(
-                    typesetting_units,
-                    box,
-                    scale,
-                    line_skip,
-                    paragraph,
-                    use_english_line_break,
-                )
+        while scale >= min_scale - SCALE_EPSILON:
+            # 尝试布局排版单元（布局出错按放不下处理）
+            typeset_units, all_units_fit = self._try_layout(
+                typesetting_units,
+                box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+            )
 
-                # 如果所有单元都放得下
-                if all_units_fit:
+            # 如果所有单元都放得下
+            if all_units_fit:
+                try:
                     if apply_layout:
                         # 实际应用排版结果
                         self._apply_typeset_units(paragraph, page, typeset_units, scale)
                         final_typeset_units = typeset_units
                     return scale, final_typeset_units
-            except Exception:
-                # 如果布局检查出错，继续尝试下一个缩放因子
-                pass
+                except Exception:
+                    # 如果写入排版结果出错，继续尝试下一个缩放因子
+                    pass
 
             # 添加与原 retypeset 一致的逻辑检查
             if not hasattr(paragraph, "debug_id") or not paragraph.debug_id:
@@ -1086,28 +1088,55 @@ class Typesetting:
         # the paragraph never comes out empty.
         if apply_layout:
             fallback_scale = min_scale
-            while fallback_scale >= 0.1 - 1e-9:
-                try:
-                    typeset_units, _ = self._layout_typesetting_units(
-                        typesetting_units,
-                        box,
-                        fallback_scale,
-                        line_skip,
-                        paragraph,
-                        use_english_line_break,
-                    )
-                except Exception:
-                    # Same as the loop above: a layout error means "does not fit".
-                    typeset_units = []
+            while fallback_scale >= 0.1 - SCALE_EPSILON:
+                typeset_units, _ = self._try_layout(
+                    typesetting_units,
+                    box,
+                    fallback_scale,
+                    line_skip,
+                    paragraph,
+                    use_english_line_break,
+                )
                 if typeset_units:
                     self._apply_typeset_units(
                         paragraph, page, typeset_units, fallback_scale
+                    )
+                    overflow = box.y - min(unit.box.y for unit in typeset_units)
+                    logger.warning(
+                        "paragraph %s does not fit its box at the scale floor: "
+                        "set at scale %.2f, %.1f pt past its box",
+                        getattr(paragraph, "debug_id", None),
+                        fallback_scale,
+                        max(overflow, 0.0),
                     )
                     return fallback_scale, typeset_units
                 fallback_scale -= 0.1
 
         # 最后返回最小缩放因子
         return min_scale, final_typeset_units
+
+    def _try_layout(
+        self,
+        typesetting_units: list[TypesettingUnit],
+        box: Box,
+        scale: float,
+        line_skip: float,
+        paragraph: il_version_1.PdfParagraph,
+        use_english_line_break: bool,
+    ) -> tuple[list[TypesettingUnit], bool]:
+        """`_layout_typesetting_units`, with a layout error read as "nothing
+        placed, does not fit" (the scale search then tries the next scale)."""
+        try:
+            return self._layout_typesetting_units(
+                typesetting_units,
+                box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+            )
+        except Exception:
+            return [], False
 
     @staticmethod
     def _apply_typeset_units(
