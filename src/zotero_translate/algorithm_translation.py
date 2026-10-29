@@ -50,6 +50,9 @@ from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 
 PLACEHOLDER = re.compile(r"\{v\d+\}")
+# A reason in the task report names a row without a line number by this many
+# characters of its text (enough to find the row, short enough to read).
+_ROW_NAME_LENGTH = 20
 
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
@@ -216,8 +219,8 @@ def where(part: Part) -> str:
     if part.kind == "title":
         return "标题"
     text = part.line.text
-    row = f"无行号的行「{text if len(text) <= 20 else text[:20] + '…'}」"
-    return row + ("的注释" if part.kind == "comment" else "")
+    shown = text if len(text) <= _ROW_NAME_LENGTH else text[:_ROW_NAME_LENGTH] + "…"
+    return f"无行号的行「{shown}」" + ("的注释" if part.kind == "comment" else "")
 
 
 def _parse(content: str) -> list[dict]:

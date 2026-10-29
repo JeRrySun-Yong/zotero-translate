@@ -149,7 +149,11 @@ _MAX_PLAIN_HEADER_ROWS = 2
 # between two numbered rows):
 _WORD_GAP = 0.2  # a gap wider than this x the glyph's size is a word gap
 _ROW = 0.3  # glyphs whose centres are this x the pitch (or median size) apart or less share a row
-_COLUMN_GAP = 2.5  # a gap wider than this x the numbers' size ends a row: another column
+# A gap wider than this x the numbers' size ends a row: another column.
+# Without line numbers, the same x the median size splits off the part of a
+# text row right of such a gap that holds none of its anchor glyphs
+# (``_strays``).
+_COLUMN_GAP = 2.5
 # An x range at least this x the numbers' size wide that no glyph of the
 # numbered rows crosses, with text right of it at the same height, is the
 # gap to another column (``_other_column``).
@@ -157,8 +161,12 @@ _MIN_COLUMN_GAP = 1.0
 # A glyph belongs to the numbered line whose number is nearest by height
 # when it is at most _NEAR x the pitch from it; a sub- or superscript
 # (smaller than _SCRIPT x the median size) when at most _NEAR_SCRIPT x.
+# Without line numbers the anchor rows play the numbers' part, and a big
+# delimiter or radical joins a text row at most _NEAR_SCRIPT x the pitch
+# away whose formula glyphs it touches (within _TOUCH pt sideways).
 _NEAR = 0.4
 _NEAR_SCRIPT = 0.75
+_TOUCH = 1.0
 _SCRIPT = 0.85
 # "N." steps may be indented with a loop: two numbers of a chain may start
 # this x their size apart (2602.03211 p4: 10 pt at 10 pt).
@@ -546,7 +554,7 @@ def _unnumbered_lines(glyphs: list[Glyph], members: list[int]) -> list[Algorithm
             for value in range(len(anchors))
             if abs(g.yc - centres[value]) <= _NEAR_SCRIPT * pitch
             and any(
-                j not in text and glyphs[j].x0 - 1 <= g.x1 and g.x0 <= glyphs[j].x1 + 1
+                j not in text and glyphs[j].x0 - _TOUCH <= g.x1 and g.x0 <= glyphs[j].x1 + _TOUCH
                 for j in joined.get(value, [])
             )
         ]
