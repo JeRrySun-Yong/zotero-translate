@@ -8,6 +8,10 @@ a ``Procedure`` title, and an algorithm that continues on the next page
 
 import pymupdf
 
+from zotero_translate.algorithm_translation import INSTRUCTIONS
+from zotero_translate.algorithm_translation import REVIEW_INSTRUCTIONS
+from zotero_translate.algorithms import KEYWORDS
+from zotero_translate.algorithms import PROMPT_KEYWORDS
 from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.algorithms import Glyph
 from zotero_translate.algorithms import keep_flags
@@ -113,6 +117,19 @@ def kept(glyphs: list[Glyph]) -> str:
 
 
 TEXT, BOLD, MATH = "NimbusRomNo9L-Regu", "NimbusRomNo9L-Medi", "CMMI10"
+
+
+def test_the_prompt_names_the_m2_keywords_only():
+    """Closure ticket 08 review: the words that are keywords only in bold ("and",
+    "or", "not") are natural language in plain text and stay out of the prompt."""
+    names = (
+        "for, for each, for all, while, do, if, then, else, else if, end, end for, end if, "
+        "end while, repeat, until, return, to, in, Require, Ensure, Input, Output, function, procedure"
+    )
+    assert ", ".join(PROMPT_KEYWORDS) == names
+    for instructions in (INSTRUCTIONS, REVIEW_INSTRUCTIONS):
+        assert f"- Keywords stay in English, never translated: {names}. Most of them" in instructions
+    assert {"and", "or", "not", "forall", "downto"} <= KEYWORDS
 
 
 def test_keywords_formulas_and_calls_keep_their_source_text():

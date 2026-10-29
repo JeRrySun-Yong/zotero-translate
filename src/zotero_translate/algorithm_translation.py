@@ -38,24 +38,29 @@ from dataclasses import dataclass
 from dataclasses import field
 
 from zotero_translate.algorithms import COMMENT_MARK
-from zotero_translate.algorithms import KEPT_SOURCE
+from zotero_translate.algorithms import PROMPT_KEYWORDS
 from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.algorithms import AlgorithmLine
 from zotero_translate.algorithms import AlgorithmUnit
+from zotero_translate.algorithms import is_title
+from zotero_translate.algorithms import word_gap
 from zotero_translate.batch_context import condense
 from zotero_translate.checks import problems
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 
 PLACEHOLDER = re.compile(r"\{v\d+\}")
+# A reason in the task report names a row without a line number by this many
+# characters of its text (enough to find the row, short enough to read).
+_ROW_NAME_LENGTH = 20
 
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
-_KEEP_RULES = """\
+_KEEP_RULES = f"""\
 ## Keep exactly as in the source
-- Placeholders {v1}, {v2}, ...: each item's output has exactly the placeholders of its own source, each once, never one from another item. "keep" shows what each stands for: keywords, identifiers, function calls with their arguments, formulas, the algorithm number. Write the placeholder, never its content.
-- Keywords stay in English, never translated: for, for each, for all, while, do, if, then, else, else if, end, end for, end if, end while, repeat, until, return, to, in, Require, Ensure, Input, Output, function, procedure. Most of them are inside placeholders; one written as plain text stays as it is.
+- Placeholders {{v1}}, {{v2}}, ...: each item's output has exactly the placeholders of its own source, each once, never one from another item. "keep" shows what each stands for: keywords, identifiers, function calls with their arguments, formulas, the algorithm number. Write the placeholder, never its content.
+- Keywords stay in English, never translated: {", ".join(PROMPT_KEYWORDS)}. Most of them are inside placeholders; one written as plain text stays as it is.
 - Function calls: a function name and everything inside its parentheses are identifiers and stay in English, even words such as FILLBEZIERSHAPE(C, hair silhouette, brown gradient).
 - Numbers, variable names, code identifiers, model names: character for character.
 - Terminology: follow the glossary. A target term identical to its source term is a key concept of this paper: keep it in English exactly as written. No explanations or glosses in parentheses.
@@ -129,7 +134,7 @@ def parts_of(unit: AlgorithmUnit) -> list[Part]:
                 continue
             marks = [k for k, g in enumerate(line.glyphs) if g.text == COMMENT_MARK]
             body = list(range(marks[0] if marks else len(line.glyphs)))
-            kind = "title" if line.number is None and _is_title(line) else "line"
+            kind = "title" if line.number is None and is_title(line.text) else "line"
             if body:
                 parts.append(_part(len(parts), f, line, kind, body, counter))
             if marks:
@@ -139,10 +144,6 @@ def parts_of(unit: AlgorithmUnit) -> list[Part]:
                     part.mark = marks[0]
                     parts.append(part)
     return parts
-
-
-def _is_title(line: AlgorithmLine) -> bool:
-    return bool(re.match(r"^(Algorithm\s*\d+|Procedure\b)", line.text))
 
 
 def _part(id: int, fragment: int, line: AlgorithmLine, kind: str, positions: list[int], counter) -> Part:
@@ -169,8 +170,7 @@ def _part(id: int, fragment: int, line: AlgorithmLine, kind: str, positions: lis
 
 def _gap(line: AlgorithmLine, a: int, b: int) -> bool:
     """Is there a word gap between the glyphs at positions ``a`` and ``b``?"""
-    left, right = line.glyphs[a], line.glyphs[b]
-    return right.x0 - left.x1 > 0.2 * right.size
+    return word_gap(line.glyphs[a], line.glyphs[b])
 
 
 def _spaced(line: AlgorithmLine, positions: list[int]) -> list[str]:
@@ -209,10 +209,18 @@ def structure_problems(parts: list[Part], content: str) -> tuple[dict[int, str],
 
 
 def where(part: Part) -> str:
-    """The row in readable Chinese, for reasons in the task report."""
+    """The row in readable Chinese, for reasons in the task report.
+
+    A row without a line number is named by the start of its text: in an
+    algorithm without line numbers (ticket 12) every row has none.
+    """
     if part.number is not None:
         return f"第 {part.number} 行" + ("的注释" if part.kind == "comment" else "")
-    return {"title": "标题", "comment": "注释行"}.get(part.kind, "无行号的行")
+    if part.kind == "title":
+        return "标题"
+    text = part.line.text
+    shown = text if len(text) <= _ROW_NAME_LENGTH else text[:_ROW_NAME_LENGTH] + "…"
+    return f"无行号的行「{shown}」" + ("的注释" if part.kind == "comment" else "")
 
 
 def _parse(content: str) -> list[dict]:
@@ -277,8 +285,7 @@ class AlgorithmTranslator:
 
     def keep_source(self, unit: AlgorithmUnit, reason: str) -> None:
         with self._lock:
-            unit.result = KEPT_SOURCE
-            unit.reason = reason
+            unit.keep_source(reason)
 
     def _translate(self, unit: AlgorithmUnit, parts: list[Part], section: str | None) -> dict[int, str] | None:
         if not any(part.has_text for part in parts):
