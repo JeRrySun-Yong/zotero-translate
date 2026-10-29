@@ -6,11 +6,18 @@ temporary data directory and two environment files: one points flash (the
 translation endpoint) at the fake model, the other points argon (the paper
 dossier and term list endpoint, ADR 0004) at a second fake model or, when
 the test gives none, at the same one.
+
+No process outlives the tests (closure ticket 09): the service runs in its
+own process group, which its task subprocesses inherit, and ``stop_service``
+ends the whole group. pytest tears the fixtures down when it is interrupted
+with SIGINT, and SIGTERM is made to interrupt it the same way.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -154,6 +161,10 @@ def launch_service(
         ],
         stdout=subprocess.PIPE,
         text=True,
+        # Its own process group, inherited by its task subprocesses: one
+        # signal ends them all, and a Ctrl-C reaches only pytest, which then
+        # tears the fixtures down.
+        start_new_session=True,
     )
     line = process.stdout.readline()
     assert line, "service exited before announcing its address"
@@ -161,11 +172,54 @@ def launch_service(
 
 
 def stop_service(client: ServiceClient) -> None:
-    client.process.terminate()
+    """End the service and every task subprocess it started; return when all have exited.
+
+    A task subprocess ends itself when its service is gone, but that check
+    has failed to run at least once (a worker left running for 31 minutes
+    after a test), so the subprocesses get the signal too.
+    """
+    group = client.process.pid  # the leader of its own session and process group
+    for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 10.0)):
+        _signal_group(group, sig)
+        try:
+            client.process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            continue
+        if _group_ended(group, timeout=grace):
+            return
+    raise AssertionError(f"processes of the service group {group} survived SIGKILL")
+
+
+def _signal_group(group: int, sig: signal.Signals) -> None:
     try:
-        client.process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        client.process.kill()
+        os.killpg(group, sig)
+    except (ProcessLookupError, PermissionError):  # see _group_ended
+        pass
+
+
+def _group_ended(group: int, timeout: float) -> bool:
+    """Wait until no process of ``group`` runs; False if one still does after ``timeout``.
+
+    macOS answers a group whose processes have all exited but are not yet
+    reaped (zombies, e.g. a task subprocess whose service is gone) with
+    EPERM rather than ESRCH.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(group, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+def pytest_configure(config) -> None:
+    # SIGTERM (a killed test run) interrupts pytest like Ctrl-C, so the
+    # fixtures are torn down and stop their services; by default Python
+    # would exit at once and leave the services running.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
 
 
 @pytest.fixture
