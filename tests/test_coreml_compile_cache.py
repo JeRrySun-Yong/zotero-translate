@@ -11,6 +11,11 @@ from there.
 Two processes, one after the other, each load the layout model and detect
 the layout of one page. The second one must create no compile files of its
 own in ``$TMPDIR`` and must leave the cache directory as it was.
+
+onnxruntime does not check a cache entry against the model, so the static
+model carries a ``COREML_CACHE_KEY`` that changes with the weights and the
+input size and stays the same for the same model (checked on a small model,
+without creating a session).
 """
 
 from __future__ import annotations
@@ -23,8 +28,15 @@ from pathlib import Path
 import pytest
 
 onnxruntime = pytest.importorskip("onnxruntime")
+onnx = pytest.importorskip("onnx")
 
-pytestmark = pytest.mark.skipif(
+from babeldoc.docvision.doclayout import (
+    COREML_CACHE_DIR,
+    OnnxModel,
+    _set_coreml_cache_key,
+)
+
+coreml_only = pytest.mark.skipif(
     sys.platform != "darwin"
     or "CoreMLExecutionProvider" not in onnxruntime.get_available_providers(),
     reason="the CoreML execution provider exists only on macOS",
@@ -82,10 +94,9 @@ def _run_child() -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+@coreml_only
 def test_a_second_process_reuses_the_compiled_layout_model():
-    from babeldoc.const import CACHE_FOLDER
-
-    cache = CACHE_FOLDER / "coreml"
+    cache = COREML_CACHE_DIR
 
     first = _run_child()
     after_first = _snapshot(cache)
@@ -101,3 +112,42 @@ def test_a_second_process_reuses_the_compiled_layout_model():
         f"no compiled model in the cache directory {cache}"
     )
     assert after_second == after_first, "the second process changed the cache directory"
+
+
+def _small_layout_model():
+    """A one-convolution model with the layout model's dynamic input ``images``."""
+    import numpy as np
+    from onnx import TensorProto, helper, numpy_helper
+
+    weights = np.arange(4 * 3 * 3 * 3, dtype=np.float32).reshape(4, 3, 3, 3) / 100
+    images = helper.make_tensor_value_info(
+        "images", TensorProto.FLOAT, ["batch", 3, "height", "width"]
+    )
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, None)
+    conv = helper.make_node("Conv", ["images", "weight"], ["output"], pads=[1, 1, 1, 1])
+    graph = helper.make_graph(
+        [conv], "layout", [images], [output], [numpy_helper.from_array(weights, "weight")]
+    )
+    return helper.make_model(graph)
+
+
+def _key(model, imgsz: int) -> str:
+    """The cache key a fresh process would give the model at this input size."""
+    fresh = onnx.load_from_string(model.SerializeToString())
+    return _set_coreml_cache_key(OnnxModel._make_static_model(fresh, imgsz))
+
+
+def test_the_cache_key_changes_with_the_weights_and_the_input_size():
+    model = _small_layout_model()
+    one_byte_changed = _small_layout_model()
+    raw = bytearray(one_byte_changed.graph.initializer[0].raw_data)
+    raw[0] ^= 1
+    one_byte_changed.graph.initializer[0].raw_data = bytes(raw)
+
+    key = _key(model, 1024)
+
+    assert key == _key(model, 1024)
+    assert key != _key(model, 800)
+    assert key != _key(one_byte_changed, 1024)
+    assert key.isalnum() and len(key) <= 64  # onnxruntime ignores any other key
+    assert key.endswith("ort" + onnxruntime.__version__.replace(".", ""))
