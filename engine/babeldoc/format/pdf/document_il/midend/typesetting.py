@@ -1226,12 +1226,15 @@ class Typesetting:
           the indent of a continuation line, stay where they are (the text
           columns of AutoDesign pages 21, 22 and 25).
 
-        A cell is centred when more cells of its column (the other paragraphs
-        of the table that overlap it horizontally on other rows) share its
-        centre (within CELL_CENTRE_TOLERANCE) than its left edge (within
-        CELL_LEFT_TOLERANCE); otherwise, with no evidence either way too, it
-        is left-aligned. (None, False) when the paragraph is not a one-line
-        cell in a "table" layout region or has no room to grow."""
+        A cell is centred when at least as many cells of its column (the
+        other paragraphs of the table that overlap it horizontally on other
+        rows) share its centre (within CELL_CENTRE_TOLERANCE) as share its left
+        edge (within CELL_LEFT_TOLERANCE), and at least one does: a header as
+        wide as the numbers below it ("Inst." on AutoRef page 25) shares both
+        and is centred over them. Otherwise, with no evidence either way too,
+        it is left-aligned: the cells of a text column share their left edge
+        and differ in width. (None, False) when the paragraph is not a
+        one-line cell in a "table" layout region or has no room to grow."""
         # getattr: the synthetic layout tests pass bare paragraph and page
         # stand-ins without these fields.
         style = getattr(paragraph, "pdf_style", None)
@@ -1266,7 +1269,7 @@ class Typesetting:
         same_centre = sum(
             abs((o.x + o.x2) / 2 - centre_x) <= CELL_CENTRE_TOLERANCE for o in column
         )
-        centred = same_centre > same_left
+        centred = same_centre >= same_left and same_centre > 0
         left, right = table.x, table.x2
         others = paragraphs + [char.box for char in page.pdf_character]
         for shapes in (page.pdf_figure, page.pdf_form, page.pdf_curve):
