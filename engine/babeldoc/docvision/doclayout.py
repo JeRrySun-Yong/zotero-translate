@@ -22,9 +22,11 @@ option is set: ``MLComputeUnits``, ``ModelFormat`` and the other options
 that change inference stay at their defaults.
 
 How onnxruntime 1.31.0 names a cache entry (``coreml_execution_provider.cc``
-``gen_metadef_name`` and ``model_builder.cc`` ``GetModelOutputPath``): the
-entry is ``<cache dir>/<key>/<partition id>_static_nn/``, holding the
-converted ``model`` and ``compiled_model.mlmodelc``. The key is
+``gen_metadef_name`` and ``model_builder.cc`` ``GetModelOutputPath``): each
+CoreML partition of the graph gets ``<cache dir>/<key>/<partition id>_dynamic_nn/``
+(``dynamic`` and ``nn`` name the provider options ``RequireStaticInputShapes``
+and ``ModelFormat``, both left at their defaults), holding the converted
+``model`` and ``compiled_model.mlmodelc``. The key is
 
 1. the model metadata value ``COREML_CACHE_KEY`` when it is alphanumeric and
    at most 64 characters; otherwise
