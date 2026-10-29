@@ -1534,10 +1534,13 @@ class Typesetting:
             ):
                 current_x += space_width * 0.5
             # A run without a break point moves to the next line only from its
-            # first character, and only if it fits a whole line. A longer run
-            # (a URL: "/" and "." do not break a line) is set where it is and
-            # breaks at the right edge; checking it again at each character
-            # set it one character per line (closure ticket 04, R3).
+            # first character, and only if it fits a whole line; checking it
+            # again at each character set a longer run one character per line
+            # (closure ticket 04, R3). A run longer than a whole line (a URL:
+            # "/" and "." do not break a line; a label like "Idea2Img" in a
+            # narrow box) does not fit above the scale floor, so the search
+            # tries a smaller scale; at the floor it is set where it is and
+            # breaks at the right edge.
             width_before_next_break_point = 0
             if use_english_line_break and (
                 i == 0 or typesetting_units[i - 1].can_break_line
@@ -1547,6 +1550,8 @@ class Typesetting:
                 )
                 if run_width <= box.x2 - next_line_x:
                     width_before_next_break_point = run_width
+                elif scale > MIN_SCALE + SCALE_EPSILON:
+                    return [], False
 
             # 如果当前行放不下这个元素，换行
             if not unit.is_hung_punctuation and (
