@@ -1,14 +1,15 @@
-"""Algorithm detection: find pseudocode by its consecutive line numbers.
+"""Algorithm detection: find pseudocode by its consecutive line numbers, or
+without line numbers by the rules drawn around it.
 
 The engine's layout model has no algorithm class, so it groups a whole
 algorithm into one ordinary paragraph and reflows it. The engine's
 paragraph-finding stage calls ``AlgorithmDetector`` once per page, in page
-order, with the page's characters; the characters of every detected
-algorithm stay out of the ordinary paragraphs, so the engine keeps them as
-they are in the source.
+order, with the page's characters and horizontal rules; the characters of
+every detected algorithm stay out of the ordinary paragraphs, so the engine
+keeps them as they are in the source.
 
-Rules (M2 spec "算法识别", user decision D4 = 2 on 2026-10-21; closure spec
-"行号规则" and "算法的栏界", ticket 08):
+Rules for numbered algorithms (M2 spec "算法识别", user decision D4 = 2 on
+2026-10-21; closure spec "行号规则" and "算法的栏界", ticket 08):
 
 - Consecutive line numbers are the only necessary condition: at least
   ``MIN_LINES`` numbers written the same way that count up by one, aligned
@@ -50,6 +51,32 @@ numbers) give a band, the rows of the numbered lines (``_band``); the band
 gives the column bounds, the header rows above line 1 and the lines
 (``_fragment``).
 
+Rules for algorithms without line numbers (closure spec "无行号算法规则",
+ticket 12; 11 of the held-out set's 13 are ``algorithmic`` without line
+numbers or algorithm2e ruled floats):
+
+- The anchors are three horizontal rules with the same ends (within
+  ``_RULE_ALIGN``): one above the title row, one below it, one at the end
+  of the algorithm (``_ruled_boxes``). The first row between the first two
+  is a title (``Algorithm N``, ``Procedure``), at most ``_TITLE_BAND`` x its
+  size high. Below the title there are at least ``MIN_LINES`` rows with an
+  algorithm keyword, not a code listing (2605.03984 p4: Python in NimbusMonL
+  under "Algorithm 1"). The rules give the column bounds: only glyphs
+  between them, centred at most ``_RULE_SLACK`` beyond their ends, belong
+  to the algorithm (``_ruled_fragment``).
+- Not algorithms: a paragraph that starts with "Algorithm 1" (no rules), a
+  table between rules (no title row between the first two), and an area a
+  numbered algorithm has taken. An algorithm written as a paragraph
+  (2608.03223 p12: title and "(1)" steps run in a paragraph, no rules), an
+  algorithm without rules, and one without its end rule on the page (it
+  runs on to the next page) are not found.
+- Rows (``_unnumbered_lines``): the glyphs of text fonts (letters and
+  digits, not math fonts, not smaller than ``_SCRIPT`` x the median size)
+  form the anchor rows; formulas, sub- and superscripts join the anchor row
+  nearest by height, by the distances of the numbered case (``_by_number``,
+  the pitch being the median distance between anchor rows); what is near no
+  anchor row forms rows of its own. Every row has no line number.
+
 For each line the detector records the line number, the x where the line
 text starts, the baseline and the glyph runs (font, size, bold, small caps),
 for line-by-line typesetting. It also marks which glyphs of the line keep
@@ -68,6 +95,7 @@ import re
 import statistics
 from dataclasses import dataclass
 from dataclasses import field
+from typing import NamedTuple
 
 MIN_LINES = 3
 KEPT_SOURCE = "kept_source"
@@ -141,6 +169,26 @@ _MONO_TOLERANCE = 0.03
 # (2412.16318: display formulas put 73 pt between lines 7 and 8 of 10 pt
 # text on p27, 68.7 pt between lines 12 and 13 on p41).
 _MAX_DROP = 8
+# Horizontal rules (algorithms without line numbers): a stroke or filled box
+# less than _RULE_HEIGHT pt high and at least _MIN_RULE pt long is a rule;
+# the three rules of one algorithm end within _RULE_ALIGN pt of each other;
+# its glyphs are centred at most _RULE_SLACK pt beyond the rules' ends
+# (2603.19222 p4: a "▷" comment ends 0.7 pt right of the rules); the first
+# two rules are at most _TITLE_BAND x the title's size apart (13.4-15.2 pt
+# at 10 pt in the held-out set).
+_RULE_HEIGHT = 2.0
+_MIN_RULE = 20.0
+_RULE_ALIGN = 2.0
+_RULE_SLACK = 2.0
+_TITLE_BAND = 3.0
+
+
+class Rule(NamedTuple):
+    """A horizontal rule drawn on the page, from x0 to x1 at height y (PDF user space)."""
+
+    x0: float
+    x1: float
+    y: float
 
 
 @dataclass
@@ -271,7 +319,7 @@ class AlgorithmDetector:
     def engine_page(self, page) -> set[int]:
         """The engine hook: indexes in ``page.pdf_character`` of the page's pseudocode."""
         known = {id(f) for unit in self.units for f in unit.fragments}
-        taken = self(page.page_number + 1, glyphs_of_page(page))
+        taken = self(page.page_number + 1, glyphs_of_page(page), rules_of_page(page))
         for unit in self.units:
             for fragment in unit.fragments:
                 if id(fragment) in known:
@@ -281,9 +329,10 @@ class AlgorithmDetector:
                     line.chars = [page.pdf_character[i] for i in line.indexes]
         return taken
 
-    def __call__(self, page_number: int, glyphs: list[Glyph]) -> set[int]:
-        """Detect the algorithms on one page; return the indexes of their glyphs."""
-        found = detect_page(page_number, glyphs)
+    def __call__(self, page_number: int, glyphs: list[Glyph], rules=()) -> set[int]:
+        """Detect the algorithms on one page (``rules``: its horizontal rules, ``Rule`` or
+        ``(x0, x1, y)``); return the indexes of their glyphs."""
+        found = detect_page(page_number, glyphs, rules)
         taken: set[int] = set()
         for index, (title, fragment) in enumerate(found):
             previous = self.units[-1] if self.units else None
@@ -332,8 +381,24 @@ def glyphs_of_page(page) -> list[Glyph]:
     return glyphs
 
 
-def detect_page(page_number: int, glyphs: list[Glyph]) -> list[tuple[str | None, AlgorithmFragment]]:
-    """The algorithm fragments on one page, top to bottom, with their titles."""
+def rules_of_page(page) -> list[Rule]:
+    """The horizontal rules of an engine page: thin strokes and filled boxes (``Rule``)."""
+    rules = []
+    for shape in [*(page.pdf_curve or []), *(page.pdf_rectangle or [])]:
+        box = shape.box
+        if box is not None and box.y2 - box.y < _RULE_HEIGHT and box.x2 - box.x >= _MIN_RULE:
+            rules.append(Rule(box.x, box.x2, (box.y + box.y2) / 2))
+    return rules
+
+
+def detect_page(
+    page_number: int, glyphs: list[Glyph], rules=()
+) -> list[tuple[str | None, AlgorithmFragment]]:
+    """The algorithm fragments on one page, top to bottom, with their titles.
+
+    Numbered algorithms first; then algorithms without line numbers between
+    rules, where no numbered algorithm is.
+    """
     found = []
     used: set[int] = set()
     for chain in _number_chains(glyphs):
@@ -342,8 +407,144 @@ def detect_page(page_number: int, glyphs: list[Glyph]) -> list[tuple[str | None,
             continue
         used |= detected[1].glyphs
         found.append(detected)
+    for box in _ruled_boxes([Rule(*rule) for rule in rules]):
+        detected = _ruled_fragment(page_number, glyphs, box, used)
+        if detected is None:
+            continue
+        used |= detected[1].glyphs
+        found.append(detected)
     found.sort(key=lambda item: -item[1].box[3])
     return found
+
+
+def _ruled_boxes(rules: list[Rule]) -> list[tuple[Rule, Rule, Rule]]:
+    """Rules with the same ends three in a row, top to bottom: above the title, below it, the end."""
+    rules = sorted(rules, key=lambda r: -r.y)
+    distinct: list[Rule] = []
+    for rule in rules:  # a rule drawn twice (stroke and fill) is one
+        if not any(_same_ends(rule, r) and abs(rule.y - r.y) < _RULE_HEIGHT for r in distinct):
+            distinct.append(rule)
+    boxes = []
+    for k, top in enumerate(distinct):
+        lower = [r for r in distinct[k + 1 :] if _same_ends(r, top)]
+        if len(lower) >= 2:
+            boxes.append((top, lower[0], lower[1]))
+    return boxes
+
+
+def _same_ends(a: Rule, b: Rule) -> bool:
+    return abs(a.x0 - b.x0) <= _RULE_ALIGN and abs(a.x1 - b.x1) <= _RULE_ALIGN
+
+
+def _ruled_fragment(
+    page_number: int, glyphs: list[Glyph], box: tuple[Rule, Rule, Rule], used: set[int]
+) -> tuple[str, AlgorithmFragment] | None:
+    """An algorithm without line numbers between three rules, or None (see the module rules)."""
+    top, below, end = box
+    left, right = min(r.x0 for r in box) - _RULE_SLACK, max(r.x1 for r in box) + _RULE_SLACK
+    inside = [
+        i
+        for i, g in enumerate(glyphs)
+        if not g.blank and left <= g.xc <= right and end.y < g.yc < top.y
+    ]
+    if not inside or any(i in used for i in inside):
+        return None  # nothing there, or a numbered algorithm's area
+    title_glyphs = [i for i in inside if glyphs[i].yc > below.y]
+    if not title_glyphs:
+        return None
+    size = statistics.median(glyphs[i].size for i in title_glyphs)
+    title_row = _rows(glyphs, title_glyphs, _ROW * size)[0]
+    title = _row_text(glyphs, title_row)
+    if not is_title(title) or top.y - below.y > _TITLE_BAND * size:
+        return None
+    lines = _unnumbered_lines(glyphs, inside)
+    body = [line for line in lines if line.y < below.y]
+    if len(body) < MIN_LINES:
+        return None
+    if not _KEYWORD.search("\n".join(line.text for line in body)) or _code_listing(body):
+        return None
+    members = set(inside)
+    bounds = (
+        min(glyphs[i].x0 for i in members),
+        min(glyphs[i].y0 for i in members),
+        max(glyphs[i].x1 for i in members),
+        max(glyphs[i].y1 for i in members),
+    )
+    members |= {
+        i
+        for i, g in enumerate(glyphs)
+        if g.blank
+        and i not in used
+        and bounds[0] <= g.xc <= bounds[2]
+        and bounds[1] <= g.yc <= bounds[3]
+    }
+    return title, AlgorithmFragment(page_number, bounds, lines, members)
+
+
+def _unnumbered_lines(glyphs: list[Glyph], members: list[int]) -> list[AlgorithmLine]:
+    """The rows of an algorithm without line numbers, top to bottom (see the module rules)."""
+    small = statistics.median(glyphs[i].size for i in members)
+    text = [
+        i
+        for i in members
+        if glyphs[i].size >= _SCRIPT * small
+        and glyphs[i].text.isalnum()
+        and not _MATH_FONT.search(glyphs[i].font or "")
+    ]
+    anchors = _rows(glyphs, text, _ROW * small)
+    centres = [statistics.mean(glyphs[i].yc for i in row) for row in anchors]
+    distances = [a - b for a, b in zip(centres, centres[1:])]
+    pitch = statistics.median(distances) if distances else small
+    # Rows of formulas only (2408.07199 p11: "π_ref ← π_θi"): their glyphs of
+    # full size far from every text row are anchors too, so that their sub-
+    # and superscripts do not join the text row below.
+    formula = [
+        i
+        for i in members
+        if glyphs[i].size >= _SCRIPT * small
+        and all(abs(glyphs[i].yc - yc) > _NEAR * pitch for yc in centres)
+    ]
+    centres += [statistics.mean(glyphs[i].yc for i in row) for row in _rows(glyphs, formula, _ROW * small)]
+    band = _Band(
+        numbers=[_Number(k, [], 0.0, 0.0, yc, small) for k, yc in enumerate(centres)],
+        pitch=pitch,
+        size=small,
+        left=0.0,
+        top=0.0,
+        bottom=0.0,
+    )
+    joined, rest = _by_number(glyphs, members, band, small) if centres else ({}, list(members))
+    # A piece of a formula of the next row that reaches up beside a text row,
+    # right of it after a column gap (2409.08861 p11: the radical of row 5
+    # beside the "for" row), is not part of the row: it would move with the
+    # row's translated text.
+    for value, row in joined.items():
+        if value >= len(anchors):
+            continue  # a row of formulas only: nothing in it moves
+        strays = _strays(glyphs, row, set(anchors[value]), _COLUMN_GAP * small)
+        joined[value] = [i for i in row if i not in strays]
+        rest += sorted(strays)
+    placed = [
+        (n.yc, _line(glyphs, None, None, joined[n.value], n.yc)) for n in band.numbers if n.value in joined
+    ]
+    for row in _rows(glyphs, rest, _ROW * band.pitch):
+        yc = statistics.mean(glyphs[i].yc for i in row)
+        placed.append((yc, _line(glyphs, None, None, row, yc)))
+    placed.sort(key=lambda item: -item[0])
+    return [line for _, line in placed if line.glyphs]
+
+
+def _strays(glyphs: list[Glyph], row: list[int], anchored: set[int], gap: float) -> set[int]:
+    """The row's glyphs right of its last piece with an anchor glyph, pieces split at gaps wider than ``gap``."""
+    pieces: list[list[int]] = []
+    right = None
+    for i in sorted(row, key=lambda i: glyphs[i].x0):
+        if right is None or glyphs[i].x0 - right > gap:
+            pieces.append([])
+        pieces[-1].append(i)
+        right = glyphs[i].x1 if right is None else max(right, glyphs[i].x1)
+    last = max((k for k, piece in enumerate(pieces) if any(i in anchored for i in piece)), default=len(pieces))
+    return {i for piece in pieces[last + 1 :] for i in piece}
 
 
 @dataclass
@@ -539,7 +740,8 @@ def _fragment(
     members |= {i for n in band.numbers for i in n.glyphs}
     lines = _lines(glyphs, members, band)
     # Match keywords on the line texts, which have spaces between words.
-    if not _KEYWORD.search("\n".join(line.text for line in lines)) or _code_listing(lines):
+    numbered_lines = [line for line in lines if line.number is not None]
+    if not _KEYWORD.search("\n".join(line.text for line in lines)) or _code_listing(numbered_lines):
         return None
     box = (
         min(glyphs[i].x0 for i in members),
@@ -557,13 +759,13 @@ def _fragment(
 
 
 def _code_listing(lines: list[AlgorithmLine]) -> bool:
-    """Is the block a code listing, not an algorithm?
+    """Are these lines (the numbered lines; without line numbers, the rows below the title) a code listing?
 
-    Most glyphs of its numbered lines are set in a code font; or most are
-    in a font without a name (SWE-agent's listings drawn in figures) and
-    their letters are monospaced: 90% of them as wide as the median letter.
+    Most of their glyphs are set in a code font; or most are in a font
+    without a name (SWE-agent's listings drawn in figures) and their letters
+    are monospaced: 90% of them as wide as the median letter.
     """
-    body = [g for line in lines if line.number is not None for g in line.glyphs]
+    body = [g for line in lines for g in line.glyphs]
     if 2 * sum(1 for g in body if _CODE_FONT.search(g.font or "")) > len(body):
         return True
     unnamed = [g for g in body if (g.font or "unknown").lower() == "unknown"]
