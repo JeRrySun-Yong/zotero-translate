@@ -25,6 +25,7 @@ from babeldoc.format.pdf.document_il.utils.layout_helper import (
 from babeldoc.format.pdf.document_il.utils.layout_helper import SPACE_REGEX
 from babeldoc.format.pdf.document_il.utils.layout_helper import Layout
 from babeldoc.format.pdf.document_il.utils.layout_helper import add_space_dummy_chars
+from babeldoc.format.pdf.document_il.utils.layout_helper import box_to_tuple
 from babeldoc.format.pdf.document_il.utils.layout_helper import build_layout_index
 from babeldoc.format.pdf.document_il.utils.layout_helper import calculate_iou_for_boxes
 from babeldoc.format.pdf.document_il.utils.layout_helper import get_char_unicode_string
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 # hanging indent is about 1 em (closure ticket 04).
 ENTRY_START_EM = 0.3
 HANGING_INDENT_EM = 0.5
+
+# Two layout boxes hold the same text when their overlap is more than this
+# share of the smaller box (AutoRef page 17: a table caption box inside
+# another; closure ticket 07).
+BOX_OVERLAP_SHARE = 0.5
 
 # Base58 alphabet (Bitcoin style, without numbers 0, O, I, l)
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -715,8 +721,10 @@ class ParagraphFinder:
         current_layout: Layout | None = None
         skip_chars = []
 
-        for char in page.pdf_character:
-            char_layout = get_character_layout(char, layout_index, layout_map)
+        char_layouts = self._line_layouts(
+            page, layout_index, layout_map, algorithm_chars
+        )
+        for char, char_layout in zip(page.pdf_character, char_layouts, strict=True):
             # Check if character is in any formula layout and set formula_layout_id
             char.formula_layout_id = is_character_in_formula_layout(
                 char, page, layout_index, layout_map
@@ -785,6 +793,120 @@ class ParagraphFinder:
         for para in paragraphs:
             self.update_paragraph_data(para)
         return paragraphs
+
+    def _line_layouts(
+        self,
+        page: Page,
+        layout_index,
+        layout_map,
+        algorithm_chars: set[int] = frozenset(),
+    ) -> list[Layout | None]:
+        """The layout box of each character of ``page``: the box its text
+        line goes to (closure ticket 07, G2).
+
+        ``get_character_layout`` takes the box each character lies in. A box
+        narrower than its text, or two boxes that overlap, cut a source line
+        into pieces, and a piece shorter than ``min_text_length`` was not
+        translated: it stayed as source glyphs beside the translation ("Figu"
+        / "e" / "back" on AutoRef page 30). The layout parser adds a
+        ``fallback_line`` box around each text line of the page. A line with
+        characters in a text box goes to the text box that holds most of
+        them, if that box holds more than lie outside every text box, or if
+        the box holds the line from top to bottom (a caption line
+        that starts far left of its box); otherwise it goes to its own box (a
+        box edge that clips a line above or below). A character of the line
+        moves to the line's box from the line's own box (it lay outside every
+        text box), or from another text box that it shares with the line's
+        box (a title box that reaches into the line below), or that mostly
+        overlaps it (a caption box inside another). Characters left out of
+        the paragraphs (pseudocode, isolated formulas, non-text boxes)
+        neither vote nor move.
+        """
+        boxes = {layout.id: layout for layout in page.page_layout}
+        # (character, its own layout, its line's id; None for a character
+        # left out of the paragraphs)
+        rows = []
+        for char in page.pdf_character:
+            layout = get_character_layout(char, layout_index, layout_map)
+            kept = (
+                id(char) not in algorithm_chars
+                and is_text_layout(layout)
+                and not self.is_isolated_formula(char)
+            )
+            line = self._text_line(char, layout_index, layout_map) if kept else None
+            rows.append((char, layout, line))
+        votes: dict[int, dict[int, int]] = {}
+        for char, layout, line in rows:
+            if line is not None and (char.char_unicode or "").strip():
+                count = votes.setdefault(line, {})
+                count[layout.id] = count.get(layout.id, 0) + 1
+        owners = {}
+        for line, count in votes.items():
+            inside = {
+                k: n for k, n in count.items() if boxes[k].class_name != "fallback_line"
+            }
+            if not inside:
+                continue
+            owner = boxes[max(inside, key=inside.get)]
+            outside = sum(count.values()) - sum(inside.values())
+            if inside[owner.id] > outside or self._holds_line(owner, boxes[line]):
+                owners[line] = owner
+            else:
+                owners[line] = boxes[line]
+        result = []
+        for char, layout, line in rows:
+            owner = owners.get(line)
+            if (
+                owner is not None
+                and layout.id != owner.id
+                and self._joins_line_box(char, boxes[layout.id], owner)
+            ):
+                layout = Layout(owner.id, owner.class_name)
+            result.append(layout)
+        return result
+
+    @staticmethod
+    def _text_line(char: PdfCharacter, layout_index, layout_map) -> int | None:
+        """The id of the ``fallback_line`` box of ``char``'s text line: the one
+        that holds most of the character, then the one whose middle is
+        nearest the character's."""
+        box = char.visual_bbox.box
+        middle = (box.y + box.y2) / 2
+        best, best_key = None, None
+        for i in layout_index.intersection(box_to_tuple(box)):
+            line = layout_map[i]
+            if line.class_name != "fallback_line":
+                continue
+            key = (
+                -calculate_iou_for_boxes(box, line.box),
+                abs((line.box.y + line.box.y2) / 2 - middle),
+            )
+            if best_key is None or key < best_key:
+                best, best_key = line.id, key
+        return best
+
+    @staticmethod
+    def _holds_line(box, line) -> bool:
+        """Whether the layout ``box`` holds the text line ``line`` from top to
+        bottom: more than half of the line's height lies in it."""
+        height = line.box.y2 - line.box.y
+        shared = min(box.box.y2, line.box.y2) - max(box.box.y, line.box.y)
+        return height > 0 and shared > height / 2
+
+    @staticmethod
+    def _joins_line_box(char: PdfCharacter, current, owner) -> bool:
+        """Whether ``char``, in the box ``current``, moves to ``owner``, the
+        box of its text line."""
+        if current.class_name == "fallback_line":
+            return True
+        if calculate_iou_for_boxes(char.visual_bbox.box, owner.box) > 0:
+            return True
+        a, b = current.box, owner.box
+        overlap = max(0, min(a.x2, b.x2) - max(a.x, b.x)) * max(
+            0, min(a.y2, b.y2) - max(a.y, b.y)
+        )
+        smaller = min((a.x2 - a.x) * (a.y2 - a.y), (b.x2 - b.x) * (b.y2 - b.y))
+        return smaller > 0 and overlap > BOX_OVERLAP_SHARE * smaller
 
     def _merge_overlapping_clusters(
         self, lines: dict[int, list[PdfCharacter]], char_height_average: float

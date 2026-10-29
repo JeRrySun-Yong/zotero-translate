@@ -114,14 +114,16 @@ def test_the_entries_and_urls_of_autoref_page_12(fake_model, start_service):
     check_entries(source, mono, name)
 
 
-def set_paragraph(units, width: float) -> tuple[float, list[str]]:
+def set_paragraph(
+    units, width: float, hanging_indent: float | None = None
+) -> tuple[float, list[str]]:
     """The scale and the lines of a paragraph set in a box ``width`` wide and
     1000 pt high (the typesetter's scale search, as for a real paragraph)."""
     paragraph = SimpleNamespace(
         box=Box(x=0, y=0, x2=width, y2=1000),
         debug_id="p",
         first_line_indent=False,
-        hanging_indent=None,
+        hanging_indent=hanging_indent,
         scale=None,
         pdf_paragraph_composition=[],
     )
@@ -161,6 +163,19 @@ def test_a_word_longer_than_a_narrow_box_is_shrunk_whole():
 
     assert scale < 1
     assert lines == ["Idea2Img"]
+
+
+def test_a_run_that_fits_the_first_line_of_a_hanging_entry_is_not_shrunk():
+    # A one-row entry gets the list's hanging indent (1 em), for the lines
+    # its translation may add. Its first line starts at the entry x: a run
+    # that fits there is set at full size, though it is wider than a
+    # continuation line. It was checked against the continuation line and
+    # shrunk ("026-09-18." on AutoRef page 10 at 0.65, closure ticket 07).
+    widths = dict.fromkeys("026-09-18.", 4)
+
+    scale, lines = set_paragraph(char_units("026-09-18.", widths), 41, hanging_indent=10)
+
+    assert (scale, lines) == (1.0, ["026-09-18."])
 
 
 def source_line(rows: list[tuple[str, float, float]]) -> PdfParagraphComposition:
