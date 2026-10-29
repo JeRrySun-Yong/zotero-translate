@@ -17,10 +17,11 @@ Reliability (ADR 0002):
   or the connection breaks before an answer; not a timeout, not an HTTP
   status) waits ``connection_retry_seconds[n - 1]``, by default 5, 15 and 45
   seconds; every other retried failure waits ``retry_backoff_seconds`` and
-  then twice as long each time, by default 1, 2 and 4 seconds. Together they outlast a network outage of about a minute,
-  which failed two papers of the closure-02 run (2026-10-28 18:22) under the
-  1, 2 and 4 seconds that suit an overloaded endpoint. The number of
-  attempts stays the same.
+  then twice as long each time, by default 1, 2 and 4 seconds. The network
+  waits together outlast a network outage of about a minute, which failed
+  two papers of the closure-02 run (2026-10-28 18:22) under the 1, 2 and 4
+  seconds that suit an overloaded endpoint. The number of attempts is the
+  same for every kind of failure.
 - HTTP 400 is retried because the relay endpoint answered a valid request
   with 400 once and the same request succeeded when the paper was submitted
   again (closure-01 run2, MaLiang page 7).
