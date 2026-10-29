@@ -122,9 +122,9 @@ _NEAR = 0.4
 _NEAR_SCRIPT = 0.75
 _SCRIPT = 0.85
 # Two numbered rows of one algorithm are at most this x the size apart
-# (2412.16318 p37: a display formula puts 50.3 pt between lines 4 and 5 of
-# 10 pt text).
-_MAX_DROP = 6
+# (2412.16318: display formulas put 73 pt between lines 7 and 8 of 10 pt
+# text on p27, 68.7 pt between lines 12 and 13 on p41).
+_MAX_DROP = 8
 
 
 @dataclass
