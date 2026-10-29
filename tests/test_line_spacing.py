@@ -8,12 +8,16 @@ the lines were far apart, not because the text was too long.
 
 import collections
 import json
+import logging
 import re
 from types import SimpleNamespace
 
 import pymupdf
+import pytest
 from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfStyle
+from babeldoc.format.pdf.document_il.midend import typesetting as typesetting_module
 from babeldoc.format.pdf.document_il.midend.typesetting import (
+    MIN_SCALE,
     Typesetting,
     TypesettingUnit,
 )
@@ -123,6 +127,17 @@ def char_units(text: str, widths: dict[str, float]) -> list[TypesettingUnit]:
     ]
 
 
+def bare_typesetting() -> Typesetting:
+    """A Typesetting without a translation config: enough for the layout
+    methods, whose only other dependency is the base font's CJK width."""
+    typesetting = object.__new__(Typesetting)
+    typesetting.font_mapper = SimpleNamespace(
+        base_font=SimpleNamespace(char_lengths=lambda text, size: [size])
+    )
+    typesetting.is_cjk = True
+    return typesetting
+
+
 def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
     # AutoRef page 9 at the 1.25 line skip: "Seedream" fit at the end of a line
     # but came out as "Seedrea" / "m". The English line break check added the
@@ -133,11 +148,7 @@ def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
     units = char_units("中文中文 Seedream 中文", widths)
     # "中文中文 " ends at 43, "Seedream" (37 pt) at 80: the word fits a line
     # ending at 86, but 72 (before "m") + 8 + 8 does not.
-    typesetting = object.__new__(Typesetting)
-    typesetting.font_mapper = SimpleNamespace(
-        base_font=SimpleNamespace(char_lengths=lambda text, size: [size])
-    )
-    laid_out, fits = typesetting._layout_typesetting_units(
+    laid_out, fits = bare_typesetting()._layout_typesetting_units(
         units,
         Box(x=0, y=0, x2=86, y2=100),
         1.0,
@@ -151,3 +162,33 @@ def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
         lines.setdefault(round(unit.box.y, 3), []).append(unit.try_get_unicode())
     first_line = next(iter(lines.values()))
     assert "".join(first_line).rstrip() == "中文中文 Seedream"
+
+
+def test_a_paragraph_that_does_not_fit_at_the_scale_floor_is_set_there_and_logged(caplog):
+    # Ten 10 pt CJK characters in a 20 x 12 pt box: at the floor (0.5) they
+    # take 3 lines of 4 and the third runs below the box. The paragraph is set
+    # at the floor anyway (it used to shrink to 0.1) and a warning names it
+    # and how far it runs past its box.
+    units = char_units("中文" * 5, {"中": 10, "文": 10})
+    paragraph = SimpleNamespace(
+        box=Box(x=0, y=0, x2=20, y2=12),
+        debug_id="floor-p",
+        first_line_indent=False,
+        scale=None,
+        pdf_paragraph_composition=[],
+    )
+    # No page content: the attempts to grow the box into free space fail.
+    page = SimpleNamespace(pdf_curve=[], pdf_form=[])
+
+    with caplog.at_level(logging.WARNING, logger=typesetting_module.__name__):
+        scale, laid_out = bare_typesetting()._find_optimal_scale_and_layout(
+            paragraph, page, units, apply_layout=True
+        )
+
+    assert scale == pytest.approx(MIN_SCALE)
+    assert paragraph.scale == pytest.approx(MIN_SCALE)
+    assert len(paragraph.pdf_paragraph_composition) == 10
+    lowest = min(unit.box.y for unit in laid_out)
+    assert lowest < 0
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("floor-p" in w and f"{-lowest:.1f} pt" in w for w in warnings), warnings
