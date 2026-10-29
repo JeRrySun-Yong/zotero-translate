@@ -86,11 +86,14 @@ def test_narrow_header_cells_keep_their_chinese_near_the_source_size(fake_model,
         assert header in text, text
     small = sorted({(c, round(size, 2)) for c, size, _ in glyphs if "一" <= c <= "鿿" and size < MIN_SHARE * SOURCE_SIZE})
     assert small == [], small
-    # Widened cells do not run into each other.
+    # The widened Chinese cells do not run into other text (the English
+    # glyphs of one word may touch: "fi" in "Qualified").
     touching = [
         (a, b)
         for i, (a, _, box_a) in enumerate(glyphs)
         for b, _, box_b in glyphs[i + 1 :]
-        if (box_a & box_b).width > 0.5 and (box_a & box_b).height > 0.5
+        if ("一" <= a <= "鿿" or "一" <= b <= "鿿")
+        and (box_a & box_b).width > 0.5
+        and (box_a & box_b).height > 0.5
     ]
     assert touching == [], touching
