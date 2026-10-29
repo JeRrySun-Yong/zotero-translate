@@ -12,6 +12,7 @@ made some names smaller than the rest of their column.
 import json
 
 import pymupdf
+import pytest
 
 from tests.conftest import FIXTURES
 from tests.fake_model import PSEUDO_PREFIX
@@ -40,13 +41,14 @@ NAMES = {
 SIZE_TOLERANCE = 0.1
 
 
-def names_unchanged(body: dict) -> str:
-    """A batch answer that returns the system names unchanged and
-    pseudo-translates everything else."""
+def names_unchanged(body: dict, respace=lambda name: name) -> str:
+    """A batch answer that returns the system names unchanged (``respace``
+    may change their whitespace) and pseudo-translates everything else."""
     answer = []
     for item in batch_items(body["messages"][-1]["content"]) or []:
         text = item["input"]
-        answer.append({"id": item["id"], "output": text if text.strip() in NAMES else PSEUDO_PREFIX + text})
+        output = respace(text) if text.strip() in NAMES else PSEUDO_PREFIX + text
+        answer.append({"id": item["id"], "output": output})
     return json.dumps(answer, ensure_ascii=False)
 
 
@@ -67,8 +69,16 @@ def name_cells(pdf: bytes) -> list[tuple[str, set[str], list[float]]]:
     return [cell[1:] for cell in sorted(cells)]
 
 
-def test_names_returned_unchanged_keep_their_source_font_and_size(fake_model, start_service):
-    fake_model.respond("translate_batch", names_unchanged)
+@pytest.mark.parametrize(
+    "respace",
+    [
+        pytest.param(lambda name: name, id="unchanged"),
+        # Only the whitespace differs: a leading space, doubled inner spaces.
+        pytest.param(lambda name: " " + name.replace(" ", "  "), id="whitespace-only"),
+    ],
+)
+def test_names_returned_unchanged_keep_their_source_font_and_size(fake_model, start_service, respace):
+    fake_model.respond("translate_batch", lambda body: names_unchanged(body, respace))
     service = start_service(fake_model)
     task_id = service.submit(EXCERPT)
     final = service.wait(task_id)
