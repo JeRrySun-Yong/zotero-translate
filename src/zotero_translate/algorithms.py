@@ -1,4 +1,4 @@
-"""Algorithm detection: find pseudocode by its consecutive ``N:`` line numbers.
+"""Algorithm detection: find pseudocode by its consecutive line numbers.
 
 The engine's layout model has no algorithm class, so it groups a whole
 algorithm into one ordinary paragraph and reflows it. The engine's
@@ -7,11 +7,30 @@ order, with the page's characters; the characters of every detected
 algorithm stay out of the ordinary paragraphs, so the engine keeps them as
 they are in the source.
 
-Rules (spec "算法识别", user decision D4 = 2 on 2026-10-21):
+Rules (M2 spec "算法识别", user decision D4 = 2 on 2026-10-21; closure spec
+"行号规则" and "算法的栏界", ticket 08):
 
-- Consecutive ``N:`` line numbers are the only necessary condition: at
-  least ``MIN_LINES`` numbers that count up by one, aligned on their left or
-  right edge, each the first thing in its row.
+- Consecutive line numbers are the only necessary condition: at least
+  ``MIN_LINES`` numbers written the same way that count up by one, aligned
+  on their left or right edge, each the first thing in its row, at most
+  ``_MAX_DROP`` rows of text apart.
+- Line numbers are written ``N:``, ``N.`` (algorithmic styles; "1." may run
+  into the line's text, but not into a digit: "3.4" is a section number) or
+  a bare ``N`` (algorithm2e, smaller than the text, sometimes in the gap
+  beside the text's column). ``N.`` and ``N`` also need a title row
+  (``Algorithm N``, ``Procedure``) above line 1, so an ordinary list
+  numbered "1.", "2." is not an algorithm; a sentence that cites
+  "Algorithm 1" does not start its row with it, so it is no title. ``N.``
+  steps may be indented with a loop (up to 2 x the size). Drawn rules are
+  not used: the detector sees characters only.
+- The algorithm stays in the column of its line numbers, header rows
+  included: the first x range right of the most indented numbered line, at
+  least the numbers' size wide, that no glyph of the numbered rows crosses,
+  with text right of it at the same height (not a ``▷`` comment), is the
+  gap to another column; beside another column the algorithm takes its
+  whole column (``_other_column``).
+- A code listing is not an algorithm: most glyphs of its numbered lines are
+  in a code font, or (in a font without a name) its letters are monospaced.
 - Line numbers and line text are joined by their vertical position, not by
   text line: in a line with math the number and the text are separate text
   lines whose baselines differ by about 1.8 pt.
@@ -20,9 +39,9 @@ Rules (spec "算法识别", user decision D4 = 2 on 2026-10-21):
   algorithm. Rows above line 1 belong to it up to the highest title
   (``Algorithm N``, ``Procedure``) or ``Require``/``Ensure``/``Input``/
   ``Output`` row.
-- An ordinary numbered list is not an algorithm: the numbers must be ``N:``
-  and the block must contain an algorithm keyword (``for``, ``end for``,
-  ``←``, ``Require``, ``return``).
+- An ordinary numbered list is not an algorithm: the block must contain an
+  algorithm keyword (``for``, ``end for``, ``←``, ``Require``, ``return``),
+  and ``N.`` or ``N`` numbers a title.
 - On the next page, a block whose numbers continue the previous page's
   algorithm and that has no title of its own is another fragment of it.
 
@@ -56,7 +75,10 @@ TRANSLATED = "translated"
 # An algorithm keeps its source text until its translation is typeset.
 NOT_TRANSLATED = "算法没有经过逐行翻译，整个算法保留原文"
 
-_NUMBER = re.compile(r"^(\d{1,3}):$")
+# A line number token: "N:", "N." or a bare "N". "N." may run into the
+# line's text ("1.Sample": the space is narrow), but not into a digit
+# ("3.4" is a section number).
+_NUMBER = re.compile(r"^(\d{1,3})(:$|\.(?!\d)|$)")
 _KEYWORD = re.compile(r"\b(for|return|Require)\b|←")
 _TITLE = re.compile(r"^(Algorithm\s*\d+|Procedure\b)")
 _HEADER = re.compile(r"^(Algorithm\s*\d+|Procedure\b|Require\b|Ensure\b|Input\b|Output\b)")
@@ -71,9 +93,12 @@ KEYWORD_PHRASES = (
 KEYWORDS = frozenset(word.lower() for phrase in KEYWORD_PHRASES for word in phrase.split())
 _LABEL = re.compile(r"^(Algorithm\d+[:.]?|Procedure|Require:|Ensure:|Input:|Output:)")
 _MATH_FONT = re.compile(
-    r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol)"
+    r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol"
+    r"|LMMathItalic|NewTXMI)"
 )
-_CODE_FONT = re.compile(r"Courier|Mono|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE)
+_CODE_FONT = re.compile(
+    r"Courier|Mono|NimbusMon|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE
+)
 COMMENT_MARK = "▷"
 _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 
@@ -96,6 +121,10 @@ _MIN_COLUMN_GAP = 1.0
 _NEAR = 0.4
 _NEAR_SCRIPT = 0.75
 _SCRIPT = 0.85
+# Two numbered rows of one algorithm are at most this x the size apart
+# (2412.16318 p37: a display formula puts 50.3 pt between lines 4 and 5 of
+# 10 pt text).
+_MAX_DROP = 6
 
 
 @dataclass
@@ -309,6 +338,8 @@ class _Number:
     x1: float
     yc: float
     size: float
+    style: str = ":"  # ":", "." or "" (a bare number)
+    row_size: float = 0.0  # the median glyph size of the number's row
 
 
 @dataclass
@@ -321,6 +352,7 @@ class _Band:
     left: float
     top: float
     bottom: float
+    style: str = ":"  # the numbers' style
 
 
 def _band(chain: list[_Number]) -> _Band:
@@ -333,6 +365,7 @@ def _band(chain: list[_Number]) -> _Band:
         left=min(n.x0 for n in chain) - 1,
         top=chain[0].yc + 0.5 * pitch,
         bottom=chain[-1].yc - 0.5 * pitch,
+        style=chain[0].style,
     )
 
 
@@ -373,7 +406,7 @@ def _rows(glyphs: list[Glyph], indexes, tolerance: float) -> list[list[int]]:
 
 
 def _line_numbers(glyphs: list[Glyph]) -> list[_Number]:
-    """Every ``N:`` token that starts its row (nothing just to its left)."""
+    """Every ``N:``, ``N.`` or ``N`` token that starts its row (nothing just to its left)."""
     sizes = [g.size for g in glyphs if not g.blank]
     if not sizes:
         return []
@@ -394,32 +427,53 @@ def _line_numbers(glyphs: list[Glyph]) -> list[_Number]:
             if not match:
                 continue
             first = glyphs[token[0]]
-            if k > 0 and first.x0 - glyphs[tokens[k - 1][-1]].x1 < 6:
-                continue  # "Figure 10:" and the like
+            previous = glyphs[tokens[k - 1][-1]] if k > 0 else None
+            # "Figure 10:" and the like; a smaller number just right of
+            # larger text is algorithm2e's, in the gap beside the text's column.
+            if previous is not None and first.x0 - previous.x1 < 6 and previous.size <= 1.25 * first.size:
+                continue
+            # Only the number's own glyphs ("1." of "1.Sample").
+            length, number = 0, []
+            for i in token:
+                if length >= len(match.group(0)):
+                    break
+                number.append(i)
+                length += len(glyphs[i].text)
             numbers.append(
                 _Number(
                     int(match.group(1)),
-                    token,
+                    number,
                     first.x0,
-                    glyphs[token[-1]].x1,
-                    statistics.mean(glyphs[i].yc for i in token),
-                    max(glyphs[i].size for i in token),
+                    glyphs[number[-1]].x1,
+                    statistics.mean(glyphs[i].yc for i in number),
+                    max(glyphs[i].size for i in number),
+                    style=match.group(2),
+                    row_size=statistics.median(glyphs[i].size for i in row),
                 )
             )
     return numbers
 
 
 def _number_chains(glyphs: list[Glyph]) -> list[list[_Number]]:
-    """Runs of line numbers that count up by one, aligned, top to bottom."""
+    """Runs of line numbers of one style that count up by one, aligned, top to bottom.
+
+    Two numbered rows may be up to ``_MAX_DROP`` rows of text apart (wrapped
+    lines, display formulas), measured in the larger of the numbers' and
+    their rows' size: algorithm2e sets its numbers smaller than the text.
+    """
     chains: list[list[_Number]] = []
     for number in sorted(_line_numbers(glyphs), key=lambda n: -n.yc):
         for chain in chains:
             last = chain[-1]
             drop = last.yc - number.yc
+            aligned = abs(number.x1 - last.x1) <= 3 or abs(number.x0 - last.x0) <= 3
+            if number.style != ":":  # "1." steps may be indented with a loop (2602.03211 p4)
+                aligned = aligned or abs(number.x0 - last.x0) <= 2 * max(last.size, number.size)
             if (
                 number.value == last.value + 1
-                and (abs(number.x1 - last.x1) <= 3 or abs(number.x0 - last.x0) <= 3)
-                and 0 < drop <= 5 * max(last.size, number.size)
+                and number.style == last.style
+                and aligned
+                and 0 < drop <= _MAX_DROP * max(last.size, number.size, last.row_size, number.row_size)
             ):
                 chain.append(number)
                 break
@@ -451,6 +505,8 @@ def _fragment(
     if column is not None:  # the header rows stay in the algorithm's column too
         free = [i for i in free if glyphs[i].x0 < column]
     header_rows, title = _header_rows(glyphs, band, free, gap)
+    if band.style != ":" and title is None:
+        return None  # "1." or "1" without a title: an ordinary numbered list
     header_glyphs = {i for row in header_rows for i in row}
     left, top = band.left, band.top
     if header_rows:
@@ -463,7 +519,7 @@ def _fragment(
     members |= {i for n in band.numbers for i in n.glyphs}
     lines = _lines(glyphs, members, band)
     # Match keywords on the line texts, which have spaces between words.
-    if not _KEYWORD.search("\n".join(line.text for line in lines)):
+    if not _KEYWORD.search("\n".join(line.text for line in lines)) or _code_listing(lines):
         return None
     box = (
         min(glyphs[i].x0 for i in members),
@@ -478,6 +534,27 @@ def _fragment(
         if g.blank and i not in used and box[0] <= g.xc <= box[2] and box[1] <= g.yc <= box[3]
     }
     return title, AlgorithmFragment(page_number, box, lines, members)
+
+
+def _code_listing(lines: list[AlgorithmLine]) -> bool:
+    """Is the block a code listing, not an algorithm?
+
+    Most glyphs of its numbered lines are set in a code font; or most are
+    in a font without a name (SWE-agent's listings drawn in figures) and
+    their letters are monospaced: 90% of them as wide as the median letter.
+    """
+    body = [g for line in lines if line.number is not None for g in line.glyphs]
+    if 2 * sum(1 for g in body if _CODE_FONT.search(g.font or "")) > len(body):
+        return True
+    unnamed = [g for g in body if (g.font or "unknown").lower() == "unknown"]
+    if 2 * len(unnamed) <= len(body):
+        return False
+    # Width over size: listings of two sizes side by side are monospaced too.
+    widths = [(g.x1 - g.x0) / g.size for g in unnamed if g.text.strip().isalpha() and g.size > 0]
+    if len(widths) < 20:
+        return False
+    median = statistics.median(widths)
+    return sum(1 for w in widths if abs(w - median) <= 0.03 * median) >= 0.9 * len(widths)
 
 
 def _right_edge(
