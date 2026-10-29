@@ -201,13 +201,38 @@ def _normalised(text: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", _STYLE_TAG.sub("", text)))
 
 
+def references_range(paragraphs: list[Paragraph]) -> range:
+    """The paragraph indices of the reference list: after the References
+    heading, up to the next heading (empty when not found).
+
+    The engine's ``reference_section`` hook: each entry there becomes a
+    paragraph of its own.
+    """
+    headings = _headings(paragraphs)
+    start = _references_heading(paragraphs, headings)
+    if start is None:
+        return range(0)
+    stop = next((i for i in headings if i > start), len(paragraphs))
+    return range(start + 1, stop)
+
+
+def _headings(paragraphs: list[Paragraph]) -> list[int]:
+    return [i for i, (_, label, text) in enumerate(paragraphs) if _is_heading(label, text)]
+
+
+def _references_heading(paragraphs: list[Paragraph], headings: list[int]) -> int | None:
+    return next(
+        (i for i in headings if _REFERENCES_HEADING.match(paragraphs[i][2].strip())), None
+    )
+
+
 def find_ranges(paragraphs: list[Paragraph]) -> tuple[range, range]:
     """The paragraph indices of the abstract and of the body (empty when not found)."""
     count = len(paragraphs)
-    headings = [i for i, (_, label, text) in enumerate(paragraphs) if _is_heading(label, text)]
-    end = next(
-        (i for i in headings if _REFERENCES_HEADING.match(paragraphs[i][2].strip())), count
-    )
+    headings = _headings(paragraphs)
+    end = _references_heading(paragraphs, headings)
+    if end is None:
+        end = count
 
     def next_heading(after: int) -> int | None:
         return next((i for i in headings if i > after), None)
