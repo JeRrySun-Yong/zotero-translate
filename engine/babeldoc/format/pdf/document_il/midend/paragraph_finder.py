@@ -809,14 +809,18 @@ class ParagraphFinder:
         into pieces, and a piece shorter than ``min_text_length`` was not
         translated: it stayed as source glyphs beside the translation ("Figu"
         / "e" / "back" on AutoRef page 30). The layout parser adds a
-        ``fallback_line`` box around each text line of the page. A line goes
-        to the text box that holds most of its characters, unless most of
-        them lie outside every text box. A character of the line moves to
-        that box from the line's own box (it lay outside every text box), or
-        from another text box that it shares with the line's box (a title box
-        that reaches into the line below), or that mostly overlaps it (a
-        caption box inside another). Characters left out of the paragraphs
-        (pseudocode, isolated formulas, non-text boxes) neither vote nor move.
+        ``fallback_line`` box around each text line of the page. A line with
+        characters in a text box goes to the text box that holds most of
+        them, if that box holds more than lie outside every text box, or if
+        the box holds the line from top to bottom (a caption line
+        that starts far left of its box); otherwise it goes to its own box (a
+        box edge that clips a line above or below). A character of the line
+        moves to the line's box from the line's own box (it lay outside every
+        text box), or from another text box that it shares with the line's
+        box (a title box that reaches into the line below), or that mostly
+        overlaps it (a caption box inside another). Characters left out of
+        the paragraphs (pseudocode, isolated formulas, non-text boxes)
+        neither vote nor move.
         """
         boxes = {layout.id: layout for layout in page.page_layout}
         # (character, its own layout, its line's id; None for a character
@@ -838,9 +842,17 @@ class ParagraphFinder:
                 count[layout.id] = count.get(layout.id, 0) + 1
         owners = {}
         for line, count in votes.items():
-            owner = boxes[max(count, key=count.get)]
-            if owner.class_name != "fallback_line":
+            inside = {
+                k: n for k, n in count.items() if boxes[k].class_name != "fallback_line"
+            }
+            if not inside:
+                continue
+            owner = boxes[max(inside, key=inside.get)]
+            outside = sum(count.values()) - sum(inside.values())
+            if inside[owner.id] > outside or self._holds_line(owner, boxes[line]):
                 owners[line] = owner
+            else:
+                owners[line] = boxes[line]
         result = []
         for char, layout, line in rows:
             owner = owners.get(line)
@@ -872,6 +884,14 @@ class ParagraphFinder:
             if best_key is None or key < best_key:
                 best, best_key = line.id, key
         return best
+
+    @staticmethod
+    def _holds_line(box, line) -> bool:
+        """Whether the layout ``box`` holds the text line ``line`` from top to
+        bottom: more than half of the line's height lies in it."""
+        height = line.box.y2 - line.box.y
+        shared = min(box.box.y2, line.box.y2) - max(box.box.y, line.box.y)
+        return height > 0 and shared > height / 2
 
     @staticmethod
     def _joins_line_box(char: PdfCharacter, current, owner) -> bool:
