@@ -1722,7 +1722,9 @@ class Typesetting:
             # "/" and "." do not break a line; a label like "Idea2Img" in a
             # narrow box) does not fit above the scale floor, so the search
             # tries a smaller scale; at the floor it is set where it is and
-            # breaks at the right edge.
+            # breaks at the right edge. A run that fits where the current line
+            # is fits too: the first line of a hanging entry is wider than
+            # the lines after it (closure ticket 07).
             width_before_next_break_point = 0
             if use_english_line_break and (
                 i == 0 or typesetting_units[i - 1].can_break_line
@@ -1730,7 +1732,7 @@ class Typesetting:
                 run_width = self._get_width_before_next_break_point(
                     typesetting_units[i:], scale
                 )
-                if run_width <= box.x2 - next_line_x:
+                if run_width <= box.x2 - next_line_x or current_x + run_width <= box.x2:
                     width_before_next_break_point = run_width
                 elif scale > MIN_SCALE + SCALE_EPSILON:
                     return [], False
