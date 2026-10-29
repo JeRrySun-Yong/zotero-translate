@@ -161,6 +161,32 @@ def test_a_centred_cell_widens_to_both_sides_and_stays_centred():
     assert (left + right) / 2 == pytest.approx(60, abs=0.5)
 
 
+def test_a_header_as_wide_as_its_column_counts_as_centred():
+    # Review 2 of ticket 06: "Inst." on AutoRef page 25 is as wide as the
+    # numbers below it, so they share both its left edge and its centre; the
+    # tie was read as left-aligned, the cell widened to the right only and
+    # shrank (7.62 -> 5.83 pt). Neighbours 20 pt away on both sides.
+    column = [Box(x=50, y=80, x2=70, y2=92), Box(x=50, y=60, x2=70, y2=72)]
+    row = [Box(x=10, y=100, x2=30, y2=112), Box(x=90, y=100, x2=110, y2=112)]
+    scale, laid_out, _ = lay_out_cell(column + row)
+
+    assert scale == pytest.approx(1.0)
+    left, right = min(u.box.x for u in laid_out), max(u.box.x2 for u in laid_out)
+    assert (left + right) / 2 == pytest.approx(60, abs=0.5)
+
+
+def test_a_form_on_the_row_stops_the_widening():
+    # A form (an embedded graphic) 2 pt right of the centred cell, as the
+    # table rule below.
+    form = Box(x=72, y=95, x2=90, y2=115)
+    scale, laid_out, _ = lay_out_cell(
+        [Box(x=45, y=80, x2=75, y2=92), Box(x=52, y=60, x2=68, y2=72)], {"pdf_form": [form]}
+    )
+
+    assert max(unit.box.x2 for unit in laid_out) <= form.x
+    assert scale < 1.0
+
+
 def test_a_table_rule_on_the_row_stops_the_widening():
     # A vertical rule (a curve) 2 pt right of the centred cell: the cell
     # cannot widen past it and shrinks to fit its own box instead.
