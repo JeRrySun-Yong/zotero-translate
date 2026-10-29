@@ -1,4 +1,4 @@
-"""Algorithm detection: find pseudocode by its consecutive ``N:`` line numbers.
+"""Algorithm detection: find pseudocode by its consecutive line numbers.
 
 The engine's layout model has no algorithm class, so it groups a whole
 algorithm into one ordinary paragraph and reflows it. The engine's
@@ -7,11 +7,30 @@ order, with the page's characters; the characters of every detected
 algorithm stay out of the ordinary paragraphs, so the engine keeps them as
 they are in the source.
 
-Rules (spec "算法识别", user decision D4 = 2 on 2026-10-21):
+Rules (M2 spec "算法识别", user decision D4 = 2 on 2026-10-21; closure spec
+"行号规则" and "算法的栏界", ticket 08):
 
-- Consecutive ``N:`` line numbers are the only necessary condition: at
-  least ``MIN_LINES`` numbers that count up by one, aligned on their left or
-  right edge, each the first thing in its row.
+- Consecutive line numbers are the only necessary condition: at least
+  ``MIN_LINES`` numbers written the same way that count up by one, aligned
+  on their left or right edge, each the first thing in its row, at most
+  ``_MAX_DROP`` rows of text apart.
+- Line numbers are written ``N:``, ``N.`` (algorithmic styles; "1." may run
+  into the line's text, but not into a digit: "3.4" is a section number) or
+  a bare ``N`` (algorithm2e, smaller than the text, sometimes in the gap
+  beside the text's column). ``N.`` and ``N`` also need a title row
+  (``Algorithm N``, ``Procedure``) above line 1, so an ordinary list
+  numbered "1.", "2." is not an algorithm; a sentence that cites
+  "Algorithm 1" does not start its row with it, so it is no title. ``N.``
+  steps may be indented with a loop (up to 2 x the size). Drawn rules are
+  not used: the detector sees characters only.
+- The algorithm stays in the column of its line numbers, header rows
+  included: the first x range right of the most indented numbered line, at
+  least the numbers' size wide, that no glyph of the numbered rows crosses,
+  with text right of it at the same height (not a ``▷`` comment), is the
+  gap to another column; beside another column the algorithm takes its
+  whole column (``_other_column``).
+- A code listing is not an algorithm: most glyphs of its numbered lines are
+  in a code font, or (in a font without a name) its letters are monospaced.
 - Line numbers and line text are joined by their vertical position, not by
   text line: in a line with math the number and the text are separate text
   lines whose baselines differ by about 1.8 pt.
@@ -20,11 +39,16 @@ Rules (spec "算法识别", user decision D4 = 2 on 2026-10-21):
   algorithm. Rows above line 1 belong to it up to the highest title
   (``Algorithm N``, ``Procedure``) or ``Require``/``Ensure``/``Input``/
   ``Output`` row.
-- An ordinary numbered list is not an algorithm: the numbers must be ``N:``
-  and the block must contain an algorithm keyword (``for``, ``end for``,
-  ``←``, ``Require``, ``return``).
+- An ordinary numbered list is not an algorithm: the block must contain an
+  algorithm keyword (``for``, ``end for``, ``←``, ``Require``, ``return``),
+  and ``N.`` or ``N`` numbers a title.
 - On the next page, a block whose numbers continue the previous page's
   algorithm and that has no title of its own is another fragment of it.
+
+Each algorithm is found in two steps: its anchors (the chain of line
+numbers) give a band, the rows of the numbered lines (``_band``); the band
+gives the column bounds, the header rows above line 1 and the lines
+(``_fragment``).
 
 For each line the detector records the line number, the x where the line
 text starts, the baseline and the glyph runs (font, size, bold, small caps),
@@ -51,21 +75,34 @@ TRANSLATED = "translated"
 # An algorithm keeps its source text until its translation is typeset.
 NOT_TRANSLATED = "算法没有经过逐行翻译，整个算法保留原文"
 
-_NUMBER = re.compile(r"^(\d{1,3}):$")
+# A line number token: "N:", "N." or a bare "N". "N." may run into the
+# line's text ("1.Sample": the space is narrow), but not into a digit
+# ("3.4" is a section number).
+_NUMBER = re.compile(r"^(\d{1,3})(:$|\.(?!\d)|$)")
 _KEYWORD = re.compile(r"\b(for|return|Require)\b|←")
 _TITLE = re.compile(r"^(Algorithm\s*\d+|Procedure\b)")
 _HEADER = re.compile(r"^(Algorithm\s*\d+|Procedure\b|Require\b|Ensure\b|Input\b|Output\b)")
-# Keywords set in bold keep their source text.
-KEYWORDS = frozenset(
-    "for forall each all while do if then else elseif elsif end return repeat until to in "
-    "function procedure and or not break continue loop downto parallel "
-    "require ensure input output".split()
+# The keywords the translation prompt names: they stay in English, even as
+# plain text. Only these go into the prompt.
+PROMPT_KEYWORDS = (
+    "for", "for each", "for all", "while", "do", "if", "then", "else", "else if", "end",
+    "end for", "end if", "end while", "repeat", "until", "return", "to", "in",
+    "Require", "Ensure", "Input", "Output", "function", "procedure",
 )
+# Words that keep their source text when set in bold: the prompt keywords'
+# words and words that are keywords only in bold ("and" in plain text is
+# natural language to translate).
+KEYWORDS = frozenset(word.lower() for phrase in PROMPT_KEYWORDS for word in phrase.split()) | {
+    "forall", "elseif", "elsif", "downto", "and", "or", "not", "break", "continue", "loop", "parallel",
+}
 _LABEL = re.compile(r"^(Algorithm\d+[:.]?|Procedure|Require:|Ensure:|Input:|Output:)")
 _MATH_FONT = re.compile(
-    r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol)"
+    r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol"
+    r"|LMMathItalic|NewTXMI)"
 )
-_CODE_FONT = re.compile(r"Courier|Mono|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE)
+_CODE_FONT = re.compile(
+    r"Courier|Mono|NimbusMon|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE
+)
 COMMENT_MARK = "▷"
 _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 
@@ -73,6 +110,37 @@ _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 # Require row, a bold section heading) may sit between header rows; more
 # than this many in a row end the search upwards.
 _MAX_PLAIN_HEADER_ROWS = 2
+# Distances as fractions of a size or of the pitch (the smallest distance
+# between two numbered rows):
+_WORD_GAP = 0.2  # a gap wider than this x the glyph's size is a word gap
+_ROW = 0.3  # glyphs whose centres are this x the pitch (or median size) apart or less share a row
+_COLUMN_GAP = 2.5  # a gap wider than this x the numbers' size ends a row: another column
+# An x range at least this x the numbers' size wide that no glyph of the
+# numbered rows crosses, with text right of it at the same height, is the
+# gap to another column (``_other_column``).
+_MIN_COLUMN_GAP = 1.0
+# A glyph belongs to the numbered line whose number is nearest by height
+# when it is at most _NEAR x the pitch from it; a sub- or superscript
+# (smaller than _SCRIPT x the median size) when at most _NEAR_SCRIPT x.
+_NEAR = 0.4
+_NEAR_SCRIPT = 0.75
+_SCRIPT = 0.85
+# "N." steps may be indented with a loop: two numbers of a chain may start
+# this x their size apart (2602.03211 p4: 10 pt at 10 pt).
+_STEP_INDENT = 2
+# A number just right of text (closer than 6 pt) is part of that text
+# ("Figure 10:") unless the text is more than this x the number's size:
+# algorithm2e's smaller numbers in the gap beside the text's column.
+_GUTTER_NUMBER_RATIO = 1.25
+# Monospaced letters (``_code_listing``): at least _MONO_LETTERS letters, of
+# which _MONO_SHARE have a width/size within _MONO_TOLERANCE of the median.
+_MONO_LETTERS = 20
+_MONO_SHARE = 0.9
+_MONO_TOLERANCE = 0.03
+# Two numbered rows of one algorithm are at most this x the size apart
+# (2412.16318: display formulas put 73 pt between lines 7 and 8 of 10 pt
+# text on p27, 68.7 pt between lines 12 and 13 on p41).
+_MAX_DROP = 8
 
 
 @dataclass
@@ -155,14 +223,24 @@ class AlgorithmUnit:
     def numbers(self) -> list[int]:
         return [n for fragment in self.fragments for n in fragment.numbers]
 
+    def keep_source(self, reason: str) -> None:
+        """The whole algorithm keeps its source text, for ``reason`` (in the task report)."""
+        self.result = KEPT_SOURCE
+        self.reason = reason
+
+    def mark_translated(self) -> None:
+        """The algorithm's translation is typeset on every page it is on."""
+        self.result = TRANSLATED
+        self.reason = None
+
     def report(self) -> dict:
         numbers = self.numbers
         return {
             "pages": [fragment.page for fragment in self.fragments],
             "title": self.title,
             "numbered_lines": len(numbers),
-            "first_line": numbers[0],
-            "last_line": numbers[-1],
+            "first_line": numbers[0] if numbers else None,
+            "last_line": numbers[-1] if numbers else None,
             "result": self.result,
             "reason": self.reason,
             "translations": self.translations,
@@ -214,6 +292,8 @@ class AlgorithmDetector:
                 and title is None
                 and previous is not None
                 and previous.fragments[-1].page == page_number - 1
+                and fragment.numbers
+                and previous.numbers
                 and fragment.numbers[0] == previous.numbers[-1] + 1
             ):
                 previous.fragments.append(fragment)
@@ -257,13 +337,13 @@ def detect_page(page_number: int, glyphs: list[Glyph]) -> list[tuple[str | None,
     found = []
     used: set[int] = set()
     for chain in _number_chains(glyphs):
-        fragment, title = _fragment(page_number, glyphs, chain, used)
-        if fragment is None:
+        detected = _fragment(page_number, glyphs, _band(chain), used)
+        if detected is None:
             continue
-        used |= fragment.glyphs
-        found.append((fragment.box[3], title, fragment))
-    found.sort(key=lambda item: -item[0])
-    return [(title, fragment) for _, title, fragment in found]
+        used |= detected[1].glyphs
+        found.append(detected)
+    found.sort(key=lambda item: -item[1].box[3])
+    return found
 
 
 @dataclass
@@ -274,6 +354,57 @@ class _Number:
     x1: float
     yc: float
     size: float
+    style: str = ":"  # ":", "." or "" (a bare number)
+    row_size: float = 0.0  # the median glyph size of the number's row
+
+
+@dataclass
+class _Band:
+    """The rows of an algorithm's numbered lines, found from its line numbers (the anchors)."""
+
+    numbers: list[_Number]  # top to bottom
+    pitch: float  # the smallest distance between two numbered rows
+    size: float  # the numbers' median size
+    left: float
+    top: float
+    bottom: float
+    style: str = ":"  # the numbers' style
+
+
+def _band(chain: list[_Number]) -> _Band:
+    """Step 1, anchors to band: where the numbered rows are."""
+    pitch = min(a.yc - b.yc for a, b in zip(chain, chain[1:]))
+    return _Band(
+        numbers=chain,
+        pitch=pitch,
+        size=statistics.median(n.size for n in chain),
+        left=min(n.x0 for n in chain) - 1,
+        top=chain[0].yc + 0.5 * pitch,
+        bottom=chain[-1].yc - 0.5 * pitch,
+        style=chain[0].style,
+    )
+
+
+def _by_number(
+    glyphs: list[Glyph], indexes: list[int], band: _Band, small: float
+) -> tuple[dict[int, list[int]], list[int]]:
+    """Join each glyph to the line number nearest by height: each numbered line's glyphs, and the rest.
+
+    Sub- and superscripts (smaller than ``_SCRIPT`` x ``small``) sit further
+    from their line's centre.
+    """
+    numbered: dict[int, list[int]] = {}
+    rest: list[int] = []
+    for i in indexes:
+        nearest = min(band.numbers, key=lambda n: abs(n.yc - glyphs[i].yc))
+        distance = abs(nearest.yc - glyphs[i].yc)
+        if distance <= _NEAR * band.pitch or (
+            glyphs[i].size < _SCRIPT * small and distance <= _NEAR_SCRIPT * band.pitch
+        ):
+            numbered.setdefault(nearest.value, []).append(i)
+        else:
+            rest.append(i)
+    return numbered, rest
 
 
 def _rows(glyphs: list[Glyph], indexes, tolerance: float) -> list[list[int]]:
@@ -291,11 +422,11 @@ def _rows(glyphs: list[Glyph], indexes, tolerance: float) -> list[list[int]]:
 
 
 def _line_numbers(glyphs: list[Glyph]) -> list[_Number]:
-    """Every ``N:`` token that starts its row (nothing just to its left)."""
+    """Every ``N:``, ``N.`` or ``N`` token that starts its row (nothing just to its left)."""
     sizes = [g.size for g in glyphs if not g.blank]
     if not sizes:
         return []
-    tolerance = 0.3 * statistics.median(sizes)
+    tolerance = _ROW * statistics.median(sizes)
     numbers = []
     for row in _rows(glyphs, [i for i, g in enumerate(glyphs) if not g.blank], tolerance):
         # Split the row into tokens at gaps wider than a quarter of the glyph size.
@@ -312,32 +443,57 @@ def _line_numbers(glyphs: list[Glyph]) -> list[_Number]:
             if not match:
                 continue
             first = glyphs[token[0]]
-            if k > 0 and first.x0 - glyphs[tokens[k - 1][-1]].x1 < 6:
-                continue  # "Figure 10:" and the like
+            previous = glyphs[tokens[k - 1][-1]] if k > 0 else None
+            # "Figure 10:" and the like; a smaller number just right of
+            # larger text is algorithm2e's, in the gap beside the text's column.
+            if (
+                previous is not None
+                and first.x0 - previous.x1 < 6
+                and previous.size <= _GUTTER_NUMBER_RATIO * first.size
+            ):
+                continue
+            # Only the number's own glyphs ("1." of "1.Sample").
+            length, number = 0, []
+            for i in token:
+                if length >= len(match.group(0)):
+                    break
+                number.append(i)
+                length += len(glyphs[i].text)
             numbers.append(
                 _Number(
                     int(match.group(1)),
-                    token,
+                    number,
                     first.x0,
-                    glyphs[token[-1]].x1,
-                    statistics.mean(glyphs[i].yc for i in token),
-                    max(glyphs[i].size for i in token),
+                    glyphs[number[-1]].x1,
+                    statistics.mean(glyphs[i].yc for i in number),
+                    max(glyphs[i].size for i in number),
+                    style=match.group(2),
+                    row_size=statistics.median(glyphs[i].size for i in row),
                 )
             )
     return numbers
 
 
 def _number_chains(glyphs: list[Glyph]) -> list[list[_Number]]:
-    """Runs of line numbers that count up by one, aligned, top to bottom."""
+    """Runs of line numbers of one style that count up by one, aligned, top to bottom.
+
+    Two numbered rows may be up to ``_MAX_DROP`` rows of text apart (wrapped
+    lines, display formulas), measured in the larger of the numbers' and
+    their rows' size: algorithm2e sets its numbers smaller than the text.
+    """
     chains: list[list[_Number]] = []
     for number in sorted(_line_numbers(glyphs), key=lambda n: -n.yc):
         for chain in chains:
             last = chain[-1]
             drop = last.yc - number.yc
+            aligned = abs(number.x1 - last.x1) <= 3 or abs(number.x0 - last.x0) <= 3
+            if number.style != ":":  # "1." steps may be indented with a loop (2602.03211 p4)
+                aligned = aligned or abs(number.x0 - last.x0) <= _STEP_INDENT * max(last.size, number.size)
             if (
                 number.value == last.value + 1
-                and (abs(number.x1 - last.x1) <= 3 or abs(number.x0 - last.x0) <= 3)
-                and 0 < drop <= 5 * max(last.size, number.size)
+                and number.style == last.style
+                and aligned
+                and 0 < drop <= _MAX_DROP * max(last.size, number.size, last.row_size, number.row_size)
             ):
                 chain.append(number)
                 break
@@ -353,29 +509,95 @@ def _reach(glyphs: list[Glyph], row: list[int], start: float, gap: float) -> flo
         g = glyphs[i]
         if g.x1 <= right:
             continue
-        if g.x0 - right > gap and g.text != "▷":
+        if g.x0 - right > gap and g.text != COMMENT_MARK:
             break
         right = max(right, g.x1)
     return right
 
 
-def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used: set[int]):
-    pitch = min(a.yc - b.yc for a, b in zip(chain, chain[1:]))
-    half = 0.5 * pitch
-    left = min(n.x0 for n in chain) - 1
-    top = chain[0].yc + half
-    bottom = chain[-1].yc - half
-    size = statistics.median(n.size for n in chain)
+def _fragment(
+    page_number: int, glyphs: list[Glyph], band: _Band, used: set[int]
+) -> tuple[str | None, AlgorithmFragment] | None:
+    """Step 2, band to fragment: column bounds, header rows and lines; None without a keyword."""
     free = [i for i, g in enumerate(glyphs) if i not in used and not g.blank]
+    gap = _COLUMN_GAP * band.size
+    right, column = _right_edge(glyphs, band, free, gap)
+    if column is not None:  # the header rows stay in the algorithm's column too
+        free = [i for i in free if glyphs[i].x0 < column]
+    header_rows, title = _header_rows(glyphs, band, free, gap)
+    if band.style != ":" and title is None:
+        return None  # "1." or "1" without a title: an ordinary numbered list
+    header_glyphs = {i for row in header_rows for i in row}
+    left, top = band.left, band.top
+    if header_rows:
+        top = max(glyphs[i].yc for i in header_rows[-1]) + _ROW * band.pitch
+        left = min(left, min(glyphs[i].x0 for i in header_glyphs) - 1)
 
-    # Right edge: as far as the numbered rows run without crossing a column
-    # gap (the gap after the line number is indentation, not a column gap),
-    # and the comment rows (``▷``) and headings between them.
-    number_glyphs = {i for n in chain for i in n.glyphs}
-    numbers_right = max(n.x1 for n in chain)
-    gap = 2.5 * size
-    band = [i for i in free if bottom <= glyphs[i].yc <= top and glyphs[i].xc >= left]
-    rows = _rows(glyphs, band, 0.3 * pitch)
+    members = {
+        i for i in free if band.bottom <= glyphs[i].yc <= top and left <= glyphs[i].xc <= right + 1
+    } | header_glyphs
+    members |= {i for n in band.numbers for i in n.glyphs}
+    lines = _lines(glyphs, members, band)
+    # Match keywords on the line texts, which have spaces between words.
+    if not _KEYWORD.search("\n".join(line.text for line in lines)) or _code_listing(lines):
+        return None
+    box = (
+        min(glyphs[i].x0 for i in members),
+        min(glyphs[i].y0 for i in members),
+        max(glyphs[i].x1 for i in members),
+        max(glyphs[i].y1 for i in members),
+    )
+    # Blank glyphs (spaces) inside the box belong to the algorithm too.
+    members |= {
+        i
+        for i, g in enumerate(glyphs)
+        if g.blank and i not in used and box[0] <= g.xc <= box[2] and box[1] <= g.yc <= box[3]
+    }
+    return title, AlgorithmFragment(page_number, box, lines, members)
+
+
+def _code_listing(lines: list[AlgorithmLine]) -> bool:
+    """Is the block a code listing, not an algorithm?
+
+    Most glyphs of its numbered lines are set in a code font; or most are
+    in a font without a name (SWE-agent's listings drawn in figures) and
+    their letters are monospaced: 90% of them as wide as the median letter.
+    """
+    body = [g for line in lines if line.number is not None for g in line.glyphs]
+    if 2 * sum(1 for g in body if _CODE_FONT.search(g.font or "")) > len(body):
+        return True
+    unnamed = [g for g in body if (g.font or "unknown").lower() == "unknown"]
+    if 2 * len(unnamed) <= len(body):
+        return False
+    # Width over size: listings of two sizes side by side are monospaced too.
+    widths = [(g.x1 - g.x0) / g.size for g in unnamed if g.text.strip().isalpha() and g.size > 0]
+    if len(widths) < _MONO_LETTERS:
+        return False
+    median = statistics.median(widths)
+    even = sum(1 for w in widths if abs(w - median) <= _MONO_TOLERANCE * median)
+    return even >= _MONO_SHARE * len(widths)
+
+
+def _right_edge(
+    glyphs: list[Glyph], band: _Band, free: list[int], gap: float
+) -> tuple[float, float | None]:
+    """How far right the numbered rows run, and the middle of the gap to another column beside them.
+
+    As far as the numbered rows run without crossing a column gap (the gap
+    after the line number is indentation, not a column gap), and the comment
+    rows (``▷``) and headings between them. A numbered line runs on past
+    that edge while its glyphs continue without a column gap, sub- and
+    superscripts included (AutoDesign p7 line 4 ends in H'_{t+1} beyond the
+    other lines). Nothing reaches into another column (``_other_column``).
+    """
+    number_glyphs = {i for n in band.numbers for i in n.glyphs}
+    numbers_right = max(n.x1 for n in band.numbers)
+    inside = [i for i in free if band.bottom <= glyphs[i].yc <= band.top and glyphs[i].xc >= band.left]
+    rows = _rows(glyphs, inside, _ROW * band.pitch)
+    column = _other_column(glyphs, rows, number_glyphs, numbers_right, band.size)
+    if column is not None:
+        inside = [i for i in inside if glyphs[i].x0 < column]
+        rows = [kept for kept in ([i for i in row if glyphs[i].x0 < column] for row in rows) if kept]
     body_starts = [
         glyphs[row[k]].x0
         for row in rows
@@ -389,39 +611,72 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
         if not body:
             continue
         first = glyphs[body[0]]
-        if first.text != "▷" and first.x0 > deepest:
+        if first.text != COMMENT_MARK and first.x0 > deepest:
             continue  # a row of another column
         right = max(right, _reach(glyphs, body, first.x0, gap))
-    # A numbered line runs on past that edge while its glyphs continue without
-    # a column gap, sub- and superscripts included (AutoDesign p7 line 4 ends
-    # in H'_{t+1} beyond the other lines): join each glyph to the nearest line
-    # number by height, as ``_lines`` does, and follow each line rightwards.
-    small = statistics.median(glyphs[i].size for i in band) if band else size
-    per_number: dict[int, list[int]] = {}
-    for i in band:
-        if i in number_glyphs or glyphs[i].x0 < numbers_right - 0.5:
-            continue
-        nearest = min(chain, key=lambda n: abs(n.yc - glyphs[i].yc))
-        distance = abs(nearest.yc - glyphs[i].yc)
-        if distance <= 0.4 * pitch or (glyphs[i].size < 0.85 * small and distance <= 0.75 * pitch):
-            per_number.setdefault(nearest.value, []).append(i)
+    small = statistics.median(glyphs[i].size for i in inside) if inside else band.size
+    body = [i for i in inside if i not in number_glyphs and glyphs[i].x0 >= numbers_right - 0.5]
+    per_number, _ = _by_number(glyphs, body, band, small)
     for line_glyphs in per_number.values():
         line_glyphs.sort(key=lambda i: glyphs[i].x0)
         first = glyphs[line_glyphs[0]]
         if first.x0 <= deepest:
             right = max(right, _reach(glyphs, line_glyphs, first.x0, gap))
+    if column is not None and inside:
+        # Beside another column, the numbered rows' whole column is the
+        # algorithm's: comments after a wide gap ("// Encode x0") included.
+        right = max(right, max(glyphs[i].x1 for i in inside))
+    return right, column
 
-    # Header rows above line 1: title, Require/Ensure, and what lies between.
+
+def _other_column(
+    glyphs: list[Glyph], rows: list[list[int]], number_glyphs: set[int], numbers_right: float, size: float
+) -> float | None:
+    """The middle of the gap to another column beside the numbered rows, or None.
+
+    The column gap is the first x range, right of where the most indented
+    numbered line starts, at least ``_MIN_COLUMN_GAP`` x ``size`` wide, that
+    no glyph of the rows crosses, with text right of it at the same height.
+    A range with a ``▷`` comment right of it in any row is not a column gap.
+    """
+    starts = []
+    for row in rows:
+        body = [i for i in row if i not in number_glyphs and glyphs[i].x0 >= numbers_right - 0.5]
+        numbered = any(i in number_glyphs for i in row)
+        if numbered and body and glyphs[body[0]].text != COMMENT_MARK:
+            starts.append(glyphs[body[0]].x0)
+    covered = max(starts, default=numbers_right)
+    for i in sorted((i for row in rows for i in row), key=lambda i: glyphs[i].x0):
+        g = glyphs[i]
+        if g.x1 <= covered:
+            continue
+        if g.x0 - covered >= _MIN_COLUMN_GAP * size:
+            right_of = [
+                glyphs[next(j for j in row if glyphs[j].x0 >= g.x0)]
+                for row in rows
+                if glyphs[row[-1]].x0 >= g.x0
+            ]
+            if all(first.text != COMMENT_MARK for first in right_of):
+                return 0.5 * (covered + g.x0)  # the middle of the column gap
+        covered = max(covered, g.x1)
+    return None
+
+
+def _header_rows(
+    glyphs: list[Glyph], band: _Band, free: list[int], gap: float
+) -> tuple[list[list[int]], str | None]:
+    """Header rows above line 1, bottom up: title, Require/Ensure, and what lies between; the title."""
+    pitch = band.pitch
     above = [
         i
         for i in free
-        if top < glyphs[i].yc <= top + 6 * pitch and glyphs[i].xc >= left - 4
+        if band.top < glyphs[i].yc <= band.top + 6 * pitch and glyphs[i].xc >= band.left - 4
     ]
-    header_rows: list[list[int]] = []
+    rows: list[tuple[list[int], bool]] = []  # (row, is a title or Require/Ensure row)
     plain = 0
-    edge = top
+    edge = band.top
     title = None
-    for row in reversed(_rows(glyphs, above, 0.3 * pitch)):
+    for row in reversed(_rows(glyphs, above, _ROW * pitch)):
         # A header row ends at the first column gap.
         reach = _reach(glyphs, row, glyphs[row[0]].x0, gap)
         row = [i for i in row if glyphs[i].x1 <= reach + 0.5]
@@ -429,65 +684,31 @@ def _fragment(page_number: int, glyphs: list[Glyph], chain: list[_Number], used:
         if row_top - edge > 2.5 * pitch:
             break
         text = _row_text(glyphs, row)
-        if _HEADER.match(text):
-            header_rows.append(row)
+        header = bool(_HEADER.match(text))
+        if header:
             plain = 0
-            if _TITLE.match(text):
+            if is_title(text):
                 title = text
         else:
             plain += 1
             if plain > _MAX_PLAIN_HEADER_ROWS:
                 break
-            header_rows.append(row)
+        rows.append((row, header))
         edge = row_top
-    while header_rows and not _HEADER.match(_row_text(glyphs, header_rows[-1])):
-        header_rows.pop()
-    header_glyphs = {i for row in header_rows for i in row}
-    if header_rows:
-        top = max(glyphs[i].yc for i in header_rows[-1]) + 0.3 * pitch
-        left = min(left, min(glyphs[i].x0 for i in header_glyphs) - 1)
-
-    members = {
-        i for i in free if bottom <= glyphs[i].yc <= top and left <= glyphs[i].xc <= right + 1
-    } | header_glyphs
-    members |= {i for n in chain for i in n.glyphs}
-    lines = _lines(glyphs, members, chain, pitch)
-    # Match keywords on the line texts, which have spaces between words.
-    if not _KEYWORD.search("\n".join(line.text for line in lines)):
-        return None, None
-    box = (
-        min(glyphs[i].x0 for i in members),
-        min(glyphs[i].y0 for i in members),
-        max(glyphs[i].x1 for i in members),
-        max(glyphs[i].y1 for i in members),
-    )
-    # Blank glyphs (spaces) inside the box belong to the algorithm too.
-    members |= {
-        i
-        for i, g in enumerate(glyphs)
-        if g.blank and i not in used and box[0] <= g.xc <= box[2] and box[1] <= g.yc <= box[3]
-    }
-    return AlgorithmFragment(page_number, box, lines, members), title
+    while rows and not rows[-1][1]:
+        rows.pop()
+    return [row for row, _ in rows], title
 
 
-def _lines(glyphs: list[Glyph], members: set[int], chain: list[_Number], pitch: float) -> list[AlgorithmLine]:
+def _lines(glyphs: list[Glyph], members: set[int], band: _Band) -> list[AlgorithmLine]:
     """Join each line number with the glyphs at its height; the rest form unnumbered rows."""
-    number_glyphs = {i: n for n in chain for i in n.glyphs}
-    numbered: dict[int, list[int]] = {n.value: [] for n in chain}
+    number_glyphs = {i for n in band.numbers for i in n.glyphs}
     small = statistics.median(glyphs[i].size for i in members)
-    rest = []
-    for i in members:
-        if i in number_glyphs:
-            continue
-        nearest = min(chain, key=lambda n: abs(n.yc - glyphs[i].yc))
-        distance = abs(nearest.yc - glyphs[i].yc)
-        # Superscripts and subscripts sit further from the line's centre.
-        if distance <= 0.4 * pitch or (glyphs[i].size < 0.85 * small and distance <= 0.75 * pitch):
-            numbered[nearest.value].append(i)
-        else:
-            rest.append(i)
-    placed = [(n.yc, _line(glyphs, n.value, n.x0, numbered[n.value], n.yc)) for n in chain]
-    for row in _rows(glyphs, rest, 0.3 * pitch):
+    numbered, rest = _by_number(glyphs, [i for i in members if i not in number_glyphs], band, small)
+    placed = [
+        (n.yc, _line(glyphs, n.value, n.x0, numbered.get(n.value, []), n.yc)) for n in band.numbers
+    ]
+    for row in _rows(glyphs, rest, _ROW * band.pitch):
         yc = statistics.mean(glyphs[i].yc for i in row)
         placed.append((yc, _line(glyphs, None, None, row, yc)))
     placed.sort(key=lambda item: -item[0])
@@ -577,13 +798,23 @@ def keep_flags(line: list[Glyph]) -> list[bool]:
     return keep
 
 
+def word_gap(left: Glyph, right: Glyph) -> bool:
+    """Is there a word gap between two glyphs of a row, ``left`` before ``right``?"""
+    return right.x0 - left.x1 > _WORD_GAP * right.size
+
+
+def is_title(text: str) -> bool:
+    """Is a row with this text an algorithm's title (``Algorithm N``, ``Procedure``)?"""
+    return bool(_TITLE.match(text))
+
+
 def _words(line: list[Glyph]) -> list[list[int]]:
     """Positions of the line's glyphs grouped into words: a word gap or a font change ends a word."""
     words: list[list[int]] = []
     for k, g in enumerate(line):
         if words:
             last = line[words[-1][-1]]
-            if g.x0 - last.x1 <= 0.2 * g.size and g.font == last.font:
+            if not word_gap(last, g) and g.font == last.font:
                 words[-1].append(k)
                 continue
         words.append([k])
@@ -598,7 +829,7 @@ def _row_text(glyphs: list[Glyph], row: list[int]) -> str:
         g = glyphs[i]
         if g.blank:
             continue
-        if previous is not None and g.x0 - previous.x1 > 0.2 * g.size:
+        if previous is not None and word_gap(previous, g):
             parts.append(" ")
         parts.append(g.text)
         previous = g
@@ -608,15 +839,9 @@ def _row_text(glyphs: list[Glyph], row: list[int]) -> str:
 def _runs(glyphs: list[Glyph], body: list[int]) -> list[dict]:
     """Glyph runs of one line: same font, size, bold and small caps."""
     chars = [glyphs[i] for i in sorted(body, key=lambda i: glyphs[i].x0) if not glyphs[i].blank]
-    # Words: glyphs a word gap apart start a new word.
-    words: list[list[Glyph]] = []
-    for g in chars:
-        if words and g.x0 - words[-1][-1].x1 <= 0.2 * g.size and g.font == words[-1][-1].font:
-            words[-1].append(g)
-        else:
-            words.append([g])
     runs: list[dict] = []
-    for word in words:
+    for positions in _words(chars):
+        word = [chars[k] for k in positions]
         small_caps = _small_caps(word)
         pieces = [word] if small_caps else [[g] for g in word]
         for piece in pieces:
