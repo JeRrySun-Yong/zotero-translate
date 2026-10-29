@@ -13,8 +13,10 @@ lies outside the authors' box and was a paragraph of its own: it stayed at
 its source place while the translated line before it got shorter.
 """
 
+import itertools
 import json
 import re
+import unicodedata
 
 import pymupdf
 
@@ -38,10 +40,13 @@ CHINESE = {
     "Project lead": "项目负责人",
 }
 # The author block of each excerpt's page 1, below the title and above the
-# abstract, right of the arXiv side line (PDF points from the top).
+# abstract, right of the arXiv side line (PDF points from the top). The
+# AutoDesign abstract has no heading: it is the first long paragraph before
+# the next heading, so the excerpt needs a later page with a heading (page
+# 16); on page 1 alone there is no abstract and no front matter.
 AUTHOR_AREA = {
     "maliang-p1.pdf": pymupdf.Rect(100, 160, 560, 225),
-    "autodesign-p1.pdf": pymupdf.Rect(60, 115, 560, 195),
+    "autodesign-p1-p16.pdf": pymupdf.Rect(60, 115, 560, 195),
 }
 # A character smaller than this share of the area's largest one is a
 # superscript (an affiliation number, "*", "†").
@@ -106,13 +111,15 @@ def author_rows(mono: bytes, name: str) -> list[list[tuple[float, float, str]]]:
 
 
 def text(row: list[tuple[float, float, str]]) -> str:
-    return "".join(c for _, _, c in row)
+    """The row's characters, NFKC-normalised: the PDF text layer holds CJK
+    compatibility characters for some ideographs."""
+    return unicodedata.normalize("NFKC", "".join(c for _, _, c in row))
 
 
 def runs(row: list[tuple[float, float, str]]) -> list[str]:
     """The row cut where two characters are more than ``RUN_GAP`` apart."""
     parts = [[row[0]]]
-    for before, char in zip(row, row[1:], strict=False):
+    for before, char in itertools.pairwise(row):
         if char[0] - before[1] > RUN_GAP:
             parts.append([])
         parts[-1].append(char)
@@ -141,18 +148,18 @@ def test_maliang_affiliations_stay_a_line_of_their_own(fake_model, start_service
 
 
 def test_autodesign_affiliations_note_and_line_end_comma(fake_model, start_service):
-    name = "autodesign-p1.pdf"
+    name = "autodesign-p1-p16.pdf"
     rows = author_rows(translate(fake_model, start_service, name), name)
     texts = [text(row) for row in rows]
 
     # Two author lines, two affiliation lines and the note line, as in the
     # source: "上海交通大学" whole and not on the note's line (C-04 had
-    # "…7上海交通大" / "学*同等贡献，†项目负责人").
+    # "…7上海交通大" / "学*同等贡献，†项目负责人"). NFKC makes "，" a ",".
     assert len(texts) == 5, texts
     assert texts[2:] == [
-        "1美团，2MBZUAI，3华中科技大学，4北京大学,",
-        "5清华大学，6香港中文大学，7上海交通大学",
-        "*同等贡献，†项目负责人",
+        "1美团,2MBZUAI,3华中科技大学,4北京大学,",
+        "5清华大学,6香港中文大学,7上海交通大学",
+        "*同等贡献,†项目负责人",
     ], texts
     # The comma that ends the first author line follows "Yue1,7", not
     # alone at the right end of the line.
