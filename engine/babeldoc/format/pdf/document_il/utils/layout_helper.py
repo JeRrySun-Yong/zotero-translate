@@ -254,7 +254,7 @@ def letter_gaps(chars: list) -> dict:
     is its letter gap; it is 0 for ordinary fonts.
     """
     gaps: dict = {}
-    for a, b in zip(chars, chars[1:]):
+    for a, b in zip(chars, chars[1:], strict=False):
         if not (isinstance(a, PdfCharacter) and isinstance(b, PdfCharacter)):
             continue
         if not (a.pdf_style and b.pdf_style) or a.pdf_style.font_id != b.pdf_style.font_id:
