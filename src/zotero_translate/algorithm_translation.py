@@ -206,10 +206,18 @@ def structure_problems(parts: list[Part], content: str) -> tuple[dict[int, str],
 
 
 def where(part: Part) -> str:
-    """The row in readable Chinese, for reasons in the task report."""
+    """The row in readable Chinese, for reasons in the task report.
+
+    A row without a line number is named by the start of its text: in an
+    algorithm without line numbers (ticket 12) every row has none.
+    """
     if part.number is not None:
         return f"第 {part.number} 行" + ("的注释" if part.kind == "comment" else "")
-    return {"title": "标题", "comment": "注释行"}.get(part.kind, "无行号的行")
+    if part.kind == "title":
+        return "标题"
+    text = part.line.text
+    row = f"无行号的行「{text if len(text) <= 20 else text[:20] + '…'}」"
+    return row + ("的注释" if part.kind == "comment" else "")
 
 
 def _parse(content: str) -> list[dict]:

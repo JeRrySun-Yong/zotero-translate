@@ -28,6 +28,8 @@ from tests.fake_model import PSEUDO_PREFIX
 from tests.fake_model import FakeModel
 from tests.fake_model import pseudo_translate_algorithm
 from tests.test_algorithm_columns import text_glyphs
+from zotero_translate.algorithm_translation import parts_of
+from zotero_translate.algorithm_translation import where
 from zotero_translate.algorithms import AlgorithmDetector
 
 LEFT, RIGHT_END = 54.0, 288.0  # the left column of a two-column page
@@ -115,6 +117,15 @@ def test_a_code_listing_under_a_ruled_title_is_no_algorithm():
     """2605.03984 p4: Python in NimbusMonL under "Algorithm 1" (M2 user story 16)."""
     code = [(0, "for _ in range(outer_loops):"), (1, "x_0 = randn(bz, *shape)"), (1, "buffer.push(x_1)"), (0, "return model")]
     assert detect(*ruled(body=code, font="NimbusMonL-Regu")).units == []
+
+
+def test_a_reason_in_the_task_report_names_the_row_by_its_text():
+    """Every row of such an algorithm has no line number: the reason says which row by its text."""
+    (unit,) = detect(*ruled()).units
+    parts = parts_of(unit)
+    assert [where(part) for part in parts] == ["标题"] + [
+        f"无行号的行「{text if len(text) <= 20 else text[:20] + '…'}」" for _, text in BODY
+    ]
 
 
 def test_a_numbered_ruled_algorithm_is_found_once_with_its_numbers():
