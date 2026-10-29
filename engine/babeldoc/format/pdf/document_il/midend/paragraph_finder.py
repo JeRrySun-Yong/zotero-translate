@@ -229,8 +229,8 @@ class ParagraphFinder:
         give it the source's hanging indent (closure ticket 04, R2).
 
         The paragraphs follow the layout boxes, and one box can cover several
-        entries; the lines of a paragraph tell the entries apart: an entry's
-        first line starts at the left, its other lines about 1 em right.
+        entries; the text rows of a paragraph tell the entries apart: an
+        entry's first row starts at the left, its other rows about 1 em right.
         """
         section = self.translation_config.reference_section
         if section is None:
@@ -247,12 +247,18 @@ class ParagraphFinder:
             ]
         )
         paragraphs = [located[i][1] for i in indexes]
-        # A one-line paragraph shows no indent of its own: it gets the list's.
+        # A one-row paragraph shows no indent of its own: it gets the list's.
         indents = []
         for paragraph in paragraphs:
-            if shape := self._line_offsets(paragraph):
-                offsets, em = shape
-                indents += [o / em for o in offsets if o >= HANGING_INDENT_EM * em]
+            if shape := self._row_starts(paragraph):
+                rows, em = shape
+                left = min(x for line in rows for x in line)
+                indents += [
+                    (x - left) / em
+                    for line in rows
+                    for x in line
+                    if x - left >= HANGING_INDENT_EM * em
+                ]
         list_indent = statistics.median(indents) if indents else None
         entries = {
             id(paragraph): self._reference_entries(paragraph, list_indent)
@@ -268,9 +274,15 @@ class ParagraphFinder:
                 self._set_paragraph_render_order(page)
 
     @staticmethod
-    def _line_offsets(paragraph: PdfParagraph) -> tuple[list[float], float] | None:
-        """How far each line of ``paragraph`` starts right of its leftmost
-        line, and its median font size; None unless it is made of lines."""
+    def _row_starts(paragraph: PdfParagraph) -> tuple[list[list[float]], float] | None:
+        """Where each text row of each line of ``paragraph`` starts, top row
+        first, and its median font size; None unless it is made of lines.
+
+        The line finder can keep several rows in one line (in the whole
+        AutoDesign paper it made one line of each reference entry), so the
+        rows come from the characters: a row is the characters whose bottom
+        lies within half a font size of the row's first (topmost) character.
+        """
         lines = [c.pdf_line for c in paragraph.pdf_paragraph_composition]
         if not lines or any(line is None for line in lines):
             return None
@@ -282,30 +294,44 @@ class ParagraphFinder:
         ]
         if not sizes:
             return None
-        left = min(line.box.x for line in lines)
-        return [line.box.x - left for line in lines], statistics.median(sizes)
+        em = statistics.median(sizes)
+        starts = []
+        for line in lines:
+            rows: list[list[float]] = []  # [bottom y, left x]
+            chars = [c for c in line.pdf_character if (c.char_unicode or "").strip()]
+            for char in sorted(chars, key=lambda c: -c.visual_bbox.box.y):
+                box = char.visual_bbox.box
+                if rows and rows[-1][0] - box.y < em / 2:
+                    rows[-1][1] = min(rows[-1][1], box.x)
+                else:
+                    rows.append([box.y, box.x])
+            if not rows:
+                return None
+            starts.append([x for _, x in rows])
+        return starts, em
 
     def _reference_entries(
         self, paragraph: PdfParagraph, list_indent: float | None
     ) -> list[PdfParagraph]:
-        """``paragraph`` cut before each line that starts an entry; each part
-        that starts an entry gets the hanging indent of the lines after it.
+        """``paragraph`` cut before each line whose top row starts an entry;
+        each part that starts an entry gets the hanging indent of its rows.
 
-        ``list_indent`` is the list's hanging indent in ems, for a one-line
-        paragraph. A paragraph without indented lines is left as it is.
+        ``list_indent`` is the list's hanging indent in ems, for a one-row
+        paragraph. A paragraph without indented rows is left as it is.
         """
-        shape = self._line_offsets(paragraph)
+        shape = self._row_starts(paragraph)
         if shape is None:
             return [paragraph]
-        offsets, em = shape
-        if len(offsets) == 1:
-            if list_indent is not None:
+        rows, em = shape
+        left = min(x for line in rows for x in line)
+        indents = [x - left for line in rows for x in line]
+        hanging = [o for o in indents if o >= HANGING_INDENT_EM * em]
+        if not hanging:
+            if len(indents) == 1 and list_indent is not None:
                 paragraph.hanging_indent = list_indent * em
             return [paragraph]
-        indents = [o for o in offsets if o >= HANGING_INDENT_EM * em]
-        if not indents:
-            return [paragraph]
-        hanging_indent = statistics.median(indents)
+        hanging_indent = statistics.median(hanging)
+        offsets = [line[0] - left for line in rows]
         cuts = [0]
         cuts += [j for j, o in enumerate(offsets) if j and o < ENTRY_START_EM * em]
         cuts.append(len(offsets))
