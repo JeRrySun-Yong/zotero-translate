@@ -236,6 +236,8 @@ class TranslationConfig:
         algorithm_typesetter: Callable[[object, Callable], None] | None = None,
         reference_section: Callable[[list[tuple[int, str | None, str]]], range]
         | None = None,
+        front_matter: Callable[[list[tuple[int, str | None, str]]], range]
+        | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -437,6 +439,11 @@ class TranslationConfig:
         # the paragraphs of the reference list. Each entry there becomes a
         # paragraph of its own. None leaves the paragraphs as found.
         self.reference_section = reference_section
+        # Called like ``reference_section``; returns the indexes of the
+        # paragraphs of the front matter (authors, affiliations and the notes
+        # under them). Each source line there becomes a paragraph of its own.
+        # None leaves the paragraphs as found.
+        self.front_matter = front_matter
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False
