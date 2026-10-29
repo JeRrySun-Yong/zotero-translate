@@ -9,13 +9,21 @@ like a 5xx; 401 still fails at once. An HTTP error's reason, in the task log
 and in the failure reason, carries the first 200 characters of the response
 body, on one line, with the API keys replaced by "[redacted]"; a 401 or 403
 carries no body.
+
+Closure ticket 09 (orchestrator 2026-10-29, after both endpoints were
+unreachable for about a minute in a real run): a request that cannot reach
+the endpoint waits 5, 15 and then 45 seconds before its resends, so a
+network outage of about a minute costs no paper; the attempts stay 4.
 """
 
 import collections
 import json
+import re
 import socket
 import subprocess
 import time
+
+from zotero_translate.paper_task import DOSSIER_STAGE
 
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import launch_service
@@ -203,16 +211,46 @@ def test_an_api_key_echoed_in_a_400_response_is_redacted_everywhere(fake_model, 
         assert FAKE_API_KEY.encode() not in service.http.get(path).content, path
 
 
-def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, start_service):
+def _unused_port() -> int:
     with socket.socket() as probe:  # a port that nothing listens on
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    service = start_service(f"http://127.0.0.1:{port}/v1")
+        return probe.getsockname()[1]
 
-    final = service.wait(service.submit(), timeout=120)
+
+def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, start_service):
+    service = start_service(f"http://127.0.0.1:{_unused_port()}/v1")
+
+    # The dossier request waits 5 + 15 + 45 seconds before giving up.
+    final = service.wait(service.submit(), timeout=180)
 
     assert final["state"] == "failed"
     assert "无法连接管线模型" in final["error"], final["error"]
+
+
+# The endpoint stays unreachable this long after the first request: past the
+# old backoff (1 + 2 + 4 seconds), within the first two waits (5 + 15).
+OUTAGE_SECONDS = 10.0
+
+
+def test_an_endpoint_unreachable_for_seconds_is_waited_out_and_the_task_succeeds(start_service):
+    port = _unused_port()
+    service = start_service(f"http://127.0.0.1:{port}/v1")
+    task_id = service.submit()
+    service.wait_for(task_id, lambda s: s["stage"] == DOSSIER_STAGE, timeout=60)
+    outage_began = time.monotonic()  # at most a poll after the dossier request's first attempt
+
+    time.sleep(OUTAGE_SECONDS)
+    with FakeModel(port=port) as model:
+        final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    log = (service.data_dir / "tasks" / task_id / "task.log").read_text("utf-8")
+    waits = [float(w) for w in re.findall(r"无法连接管线模型; retrying in ([\d.]+)s", log)]
+    assert waits == [5.0, 15.0], log
+    # The third attempt of the dossier request is the first to arrive.
+    assert model.requests[0].kind == "dossier"
+    assert model.requests[0].received_at - outage_began >= sum(waits) - 1
+    assert service.report(task_id)["model"]["retries"] == 2
 
 
 def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):

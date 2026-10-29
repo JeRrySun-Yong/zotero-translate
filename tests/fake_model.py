@@ -154,6 +154,7 @@ class FakeModel:
 
     delay: float = 0.0
     slow_body_seconds: float = 30.0  # how long a "slow" fault takes to send its body
+    port: int = 0  # 0 picks a free port; a test can bring up an endpoint that was unreachable
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
 
@@ -224,7 +225,7 @@ class FakeModel:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 fake._handle(self, body)
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
