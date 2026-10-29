@@ -50,6 +50,9 @@ from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 
 PLACEHOLDER = re.compile(r"\{v\d+\}")
+# A reason in the task report names a row without a line number by this many
+# characters of its text (enough to find the row, short enough to read).
+_ROW_NAME_LENGTH = 20
 
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
@@ -206,10 +209,18 @@ def structure_problems(parts: list[Part], content: str) -> tuple[dict[int, str],
 
 
 def where(part: Part) -> str:
-    """The row in readable Chinese, for reasons in the task report."""
+    """The row in readable Chinese, for reasons in the task report.
+
+    A row without a line number is named by the start of its text: in an
+    algorithm without line numbers (ticket 12) every row has none.
+    """
     if part.number is not None:
         return f"第 {part.number} 行" + ("的注释" if part.kind == "comment" else "")
-    return {"title": "标题", "comment": "注释行"}.get(part.kind, "无行号的行")
+    if part.kind == "title":
+        return "标题"
+    text = part.line.text
+    shown = text if len(text) <= _ROW_NAME_LENGTH else text[:_ROW_NAME_LENGTH] + "…"
+    return f"无行号的行「{shown}」" + ("的注释" if part.kind == "comment" else "")
 
 
 def _parse(content: str) -> list[dict]:
