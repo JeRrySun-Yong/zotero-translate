@@ -64,6 +64,9 @@ class ModelSettings:
     timeout_seconds: float = 480.0  # whole request, from sending to the last byte read
     max_retries: int = 3  # per request, after the first attempt (ADR 0002)
     retry_backoff_seconds: float = 1.0  # first wait; doubles on each retry
+    # The waits before the resends of a request that could not reach the
+    # endpoint: together about a minute, the network outage of closure-02.
+    connection_retry_seconds: tuple[float, ...] = (5.0, 15.0, 45.0)
     cache_dir: Path | None = None  # successful responses; None turns the cache off
 
 

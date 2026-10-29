@@ -10,10 +10,18 @@ Reliability (ADR 0002):
   the last byte of the response (see ``_post``).
 - Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
   answers the caller's ``validate`` rejects are retried, at most
-  ``max_retries`` times, waiting ``retry_backoff_seconds`` and then twice as
-  long each time. Other HTTP errors (e.g. 401, 403) fail at once. When the
-  attempts are used up, ``complete`` raises ``ModelCallError`` with a
-  readable Chinese reason.
+  ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
+  When the attempts are used up, ``complete`` raises ``ModelCallError`` with
+  a readable Chinese reason.
+- Before the n-th resend, a network error (the endpoint cannot be reached,
+  or the connection breaks before an answer; not a timeout, not an HTTP
+  status) waits ``connection_retry_seconds[n - 1]``, by default 5, 15 and 45
+  seconds; every other retried failure waits ``retry_backoff_seconds`` and
+  then twice as long each time, by default 1, 2 and 4 seconds. The network
+  waits together outlast a network outage of about a minute, which failed
+  two papers of the closure-02 run (2026-10-28 18:22) under the 1, 2 and 4
+  seconds that suit an overloaded endpoint. The number of attempts is the
+  same for every kind of failure.
 - HTTP 400 is retried because the relay endpoint answered a valid request
   with 400 once and the same request succeeded when the paper was submitted
   again (closure-01 run2, MaLiang page 7).
@@ -87,6 +95,10 @@ class _RetryableError(Exception):
 
 class _Timeout(_RetryableError):
     """One attempt ran past the request timeout."""
+
+
+class _NetworkError(_RetryableError):
+    """One attempt could not reach the endpoint, or lost the connection before an answer."""
 
 
 class ModelClient:
@@ -181,7 +193,7 @@ class ModelClient:
                         page,
                         target.model,
                     )
-                wait = self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
+                wait = self._wait_before_resend(attempt, e)
                 logger.warning(
                     "model request failed (attempt %d/%d): %s; retrying in %.1fs",
                     attempt,
@@ -197,6 +209,13 @@ class ModelClient:
                 self._cache.put(key, content)
             return content
         raise AssertionError("unreachable")
+
+    def _wait_before_resend(self, attempt: int, error: _RetryableError) -> float:
+        """Seconds to wait after the failed ``attempt`` (1-based) before the next one."""
+        if isinstance(error, _NetworkError):
+            waits = self.settings.connection_retry_seconds
+            return waits[min(attempt, len(waits)) - 1]
+        return self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
 
     def _body(self, messages: list[dict]) -> dict:
         return {
@@ -218,12 +237,12 @@ class ModelClient:
                 self._count_timeout()
                 raise
             except httpx.ConnectError as e:
-                raise _RetryableError("无法连接管线模型") from e
+                raise _NetworkError("无法连接管线模型") from e
             except httpx.TimeoutException as e:
                 self._count_timeout()
                 raise _Timeout(self._timeout_reason()) from e
             except httpx.TransportError as e:
-                raise _RetryableError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
+                raise _NetworkError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
             finally:
                 with self._lock:
                     self._in_flight -= 1

@@ -14,30 +14,34 @@ short Chinese reasons. An empty list means the translation passes.
   often as the source (same count, same ids).
 - Literals: URLs, e-mail addresses, code identifiers (``snake_case``,
   ``call()``, file names), and names that mix letters and digits with a
-  capital (``GPT-5.5``, ``H100``, ``Qwen2.5-VL``) occur in the translation
-  character for character, whitespace ignored: the translation loses its
-  whitespace before the comparison (a literal never contains any).
-  Spellings the paper's glossary translates are not checked.
+  capital (``GPT-5.5``, ``H100``, and versions written as a word and digits:
+  ``Qwen2.5-VL``, ``Wan2.1``, ``Veo3``) occur in the translation character
+  for character, whitespace ignored: the translation loses its whitespace
+  before the comparison (a literal never contains any), so ``Wan 2.1``
+  keeps ``Wan2.1``. Spellings the paper's glossary translates are not
+  checked.
 
 The checks are deliberately conservative: a false alarm makes a paragraph
-fall back to its draft, be resent, or keep its source text. The engine's
-paragraph text often lacks the space between two words
-(``PosterBenchScore``, ``Section3.2``, ``...ac.aeWork``), so:
+fall back to its draft, be resent, or keep its source text. CamelCase names
+(``PosterBench``) and acronyms (``LLMs``) are not checked.
 
-- CamelCase names (``PosterBench``) and acronyms (``LLMs``) are not checked;
-- a word directly followed by digits (``Section3.2``, ``Qwen2``) is not a
-  literal;
-- a literal also passes when the translation has it without a glued-on
-  word: a leading lower-case word before a capital (``theGPT-4``), a
-  trailing lower-case word of 2 or more letters after a capital or digit
-  (``GPT-5.5and``), or a trailing capitalised word after a lower-case
-  letter (``...ac.aeWork``).
+The engine's paragraph text used to lack the space between two words
+(``PosterBenchScore``, ``Section3.2``, ``...ac.aeWork``). Closure ticket 02
+fixed the engine's word spaces (``Appendix H.1``, ``Introducing GPT-5.5``,
+``Fig. 4`` now keep their space), so the rules for glued words are gone:
 
-Closure ticket 02 fixed the engine's word spaces (``Appendix H.1``,
-``Introducing GPT-5.5``, ``Fig. 4`` now keep their space), so ticket 12's
-rule for a leading capitalised word glued to a name (``AppendixH.1``,
-``Fig.4``) is gone: a source that really writes ``Fig.4`` without a space
-needs ``Fig.4`` in the translation.
+- ticket 12's leading capitalised word glued to a name (``AppendixH.1``,
+  ``Fig.4``): a source that really writes ``Fig.4`` without a space needs
+  ``Fig.4`` in the translation;
+- the exemption of a word directly followed by digits (``Section3.2``,
+  commit 34d113f; closure ticket 09, red team D1), which let a changed
+  version (``Wan2.1`` written as ``Wan2.2``) pass. A superscript after an
+  author's name is a formula placeholder in the engine's text
+  (``Yaxin Luo{v1}``), so it never makes the name a literal;
+- the stopgap that let a literal pass without a glued-on word (M1 ticket
+  12; closure ticket 09): a leading lower-case word (``theGPT-4``), a
+  trailing lower-case word (``GPT-5.5and``) or a trailing capitalised word
+  (``...ac.aeWork``).
 """
 
 from __future__ import annotations
@@ -62,12 +66,6 @@ _LITERALS = [
     re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:[-.][A-Za-z0-9]+)*"),
 ]
 _NAME = _LITERALS[-1]
-_WORD_THEN_DIGITS = re.compile(r"[A-Za-z][a-z]+\d")
-_GLUED = [
-    re.compile(r"^[a-z]+(?=[A-Z])"),
-    re.compile(r"(?<=[A-Z0-9])[a-z]{2,}$"),
-    re.compile(r"(?<=[a-z])[A-Z][a-z]+$"),
-]
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\""
 _WHITESPACE = re.compile(r"\s+")
 
@@ -96,7 +94,7 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
     source_numbers = _numbers(source_text, literals)
     target_numbers = _numbers(target_text, literals)
     for literal in dict.fromkeys(literals):
-        if not any(variant in target_squeezed for variant in _variants(literal)):
+        if literal not in target_squeezed:
             found.append(f"字面值 {literal} 被改动或缺失")
     for number, count in source_numbers.items():
         if target_numbers[number] < count:
@@ -115,24 +113,12 @@ def _literals(text: str) -> list[str]:
         for match in pattern.finditer(text):
             literal = match.group(0).rstrip(_TRAILING_PUNCTUATION)
             if pattern is _NAME and (
-                not re.search(r"\d", literal)
-                or not re.search(r"[A-Z]", literal)
-                or _WORD_THEN_DIGITS.match(literal)
+                not re.search(r"\d", literal) or not re.search(r"[A-Z]", literal)
             ):
                 continue
             if len(literal) > 1:
                 found.append(literal)
     return found
-
-
-def _variants(literal: str) -> list[str]:
-    """The literal, and the literal without each kind of glued-on word."""
-    variants = [literal]
-    for glued in _GLUED:
-        shorter = glued.sub("", literal)
-        if shorter != literal and len(shorter) > 1:
-            variants.append(shorter)
-    return variants
 
 
 def _numbers(text: str, literals: list[str]) -> collections.Counter:
