@@ -20,6 +20,15 @@ from types import SimpleNamespace
 
 import pymupdf
 from babeldoc.format.pdf.document_il import Box
+from babeldoc.format.pdf.document_il import Document
+from babeldoc.format.pdf.document_il import Page
+from babeldoc.format.pdf.document_il import PdfCharacter
+from babeldoc.format.pdf.document_il import PdfLine
+from babeldoc.format.pdf.document_il import PdfParagraph
+from babeldoc.format.pdf.document_il import PdfParagraphComposition
+from babeldoc.format.pdf.document_il import PdfStyle
+from babeldoc.format.pdf.document_il import VisualBbox
+from babeldoc.format.pdf.document_il.midend.paragraph_finder import ParagraphFinder
 
 from tests.conftest import FIXTURES
 from tests.test_line_spacing import bare_typesetting
@@ -127,3 +136,54 @@ def test_a_run_longer_than_the_line_breaks_at_the_right_edge():
     # The URL starts after "中文 " and each line is filled to the right edge;
     # it was one letter per line.
     assert texts == ["中文 " + url[:15], url[15:35], url[35:55], url[55:75], url[75:]]
+
+
+def source_line(rows: list[tuple[str, float, float]]) -> PdfParagraphComposition:
+    """One line of the paragraph finder holding ``(text, x, y)`` rows of 9 pt
+    characters 5 pt wide."""
+    chars = []
+    for text, x, y in rows:
+        for k, c in enumerate(text):
+            box = Box(x=x + 5 * k, y=y, x2=x + 5 * k + 5, y2=y + 9)
+            chars.append(
+                PdfCharacter(
+                    char_unicode=c,
+                    box=box,
+                    visual_bbox=VisualBbox(box=box),
+                    pdf_style=PdfStyle(font_id="F", font_size=9),
+                )
+            )
+    line = PdfLine(pdf_character=chars)
+    ParagraphFinder.update_line_data(None, line)
+    return PdfParagraphComposition(pdf_line=line)
+
+
+def test_entries_that_the_line_finder_kept_whole_are_cut_apart():
+    # In the whole AutoDesign paper the line finder makes one "line" of each
+    # entry of page 17 (the 17 pt gap between entries separates them, the
+    # 11 pt line pitch inside an entry does not), so no line starts indented:
+    # the entries must be told apart by the rows inside the lines.
+    lines = [
+        source_line([("Agrawal", 71, 700), ("learning", 81, 689)]),
+        source_line([("Bradley", 71, 670), ("Biometrika", 81, 659), ("doi", 81, 648)]),
+        source_line([("Chameleon", 71, 630)]),
+    ]
+    paragraph = PdfParagraph(pdf_paragraph_composition=lines, layout_id=1, debug_id="p")
+    page = Page(page_number=16, pdf_paragraph=[paragraph])
+    finder = object.__new__(ParagraphFinder)
+    finder.translation_config = SimpleNamespace(reference_section=lambda found: range(len(found)))
+
+    finder._split_reference_entries(Document(page=[page]))
+
+    entries = [
+        (
+            "".join(c.char_unicode for p in e.pdf_paragraph_composition for c in p.pdf_line.pdf_character),
+            round(e.hanging_indent or 0),
+        )
+        for e in page.pdf_paragraph
+    ]
+    assert entries == [
+        ("Agrawallearning", 10),
+        ("BradleyBiometrikadoi", 10),
+        ("Chameleon", 10),
+    ]
