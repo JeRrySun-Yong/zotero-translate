@@ -61,20 +61,18 @@ def _running(pid: int) -> bool:
 def test_stopping_the_service_also_ends_its_running_task_subprocess(tmp_path):
     with FakeModel(delay=600) as model:
         service = launch_service(model, tmp_path)
-        task_id = service.submit()
-        service.wait_for(task_id, lambda s: s["state"] == "running" and model.requests)
-        task_dir = service.data_dir / "tasks" / task_id
-        workers = _task_processes(task_dir)
-        assert workers
-
-        stop_service(service)
-
         try:
+            task_id = service.submit()
+            service.wait_for(task_id, lambda s: s["state"] == "running" and model.requests)
+            workers = _task_processes(service.data_dir / "tasks" / task_id)
+            assert workers
+
+            stop_service(service)
+
             assert service.process.poll() is not None
             assert [pid for pid in workers if _running(pid)] == []
         finally:
-            for pid in _task_processes(task_dir):
-                os.kill(pid, signal.SIGKILL)
+            stop_service(service)  # again, should the test end before it did
 
 
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
