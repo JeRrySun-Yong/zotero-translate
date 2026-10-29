@@ -151,3 +151,51 @@ def test_the_cache_key_changes_with_the_weights_and_the_input_size():
     assert key != _key(one_byte_changed, 1024)
     assert key.isalnum() and len(key) <= 64  # onnxruntime ignores any other key
     assert key.endswith("ort" + onnxruntime.__version__.replace(".", ""))
+
+
+class _FakeSession:
+    """Stands in for onnxruntime.InferenceSession; records the providers."""
+
+    fail_with_cache = False
+
+    def __init__(self, model_bytes, providers):
+        self.providers = providers
+        if self.fail_with_cache and _uses_cache(providers):
+            raise RuntimeError("broken cache entry")
+
+
+def _uses_cache(providers) -> bool:
+    return any(isinstance(p, tuple) and "ModelCacheDirectory" in p[1] for p in providers)
+
+
+@pytest.mark.parametrize("failure", ["directory", "lock", "cached session"])
+def test_without_a_usable_cache_the_model_still_loads_and_a_warning_is_logged(
+    failure, tmp_path, monkeypatch, caplog
+):
+    fcntl = pytest.importorskip("fcntl")
+    from babeldoc.docvision import doclayout
+
+    cache = tmp_path / "coreml"
+    if failure == "directory":
+        cache = tmp_path / "a-file" / "coreml"  # mkdir fails: a-file is a file
+        (tmp_path / "a-file").write_text("")
+    elif failure == "lock":
+
+        def refuse(*_args):
+            raise OSError("no locks on this file system")
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+    monkeypatch.setattr(doclayout, "COREML_CACHE_DIR", cache)
+    monkeypatch.setattr(_FakeSession, "fail_with_cache", failure == "cached session")
+    monkeypatch.setattr(doclayout.onnxruntime, "InferenceSession", _FakeSession)
+    static = OnnxModel._make_static_model(_small_layout_model(), 1024)
+
+    with caplog.at_level("WARNING", logger=doclayout.__name__):
+        session = doclayout._coreml_session(static)
+
+    assert isinstance(session, _FakeSession)
+    assert session.providers == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    assert not _uses_cache(session.providers)
+    assert any(
+        r.levelname == "WARNING" and "$TMPDIR" in r.getMessage() for r in caplog.records
+    ), caplog.text
