@@ -125,6 +125,18 @@ _MIN_COLUMN_GAP = 1.0
 _NEAR = 0.4
 _NEAR_SCRIPT = 0.75
 _SCRIPT = 0.85
+# "N." steps may be indented with a loop: two numbers of a chain may start
+# this x their size apart (2602.03211 p4: 10 pt at 10 pt).
+_STEP_INDENT = 2
+# A number just right of text (closer than 6 pt) is part of that text
+# ("Figure 10:") unless the text is more than this x the number's size:
+# algorithm2e's smaller numbers in the gap beside the text's column.
+_GUTTER_NUMBER_RATIO = 1.25
+# Monospaced letters (``_code_listing``): at least _MONO_LETTERS letters, of
+# which _MONO_SHARE have a width/size within _MONO_TOLERANCE of the median.
+_MONO_LETTERS = 20
+_MONO_SHARE = 0.9
+_MONO_TOLERANCE = 0.03
 # Two numbered rows of one algorithm are at most this x the size apart
 # (2412.16318: display formulas put 73 pt between lines 7 and 8 of 10 pt
 # text on p27, 68.7 pt between lines 12 and 13 on p41).
@@ -434,7 +446,11 @@ def _line_numbers(glyphs: list[Glyph]) -> list[_Number]:
             previous = glyphs[tokens[k - 1][-1]] if k > 0 else None
             # "Figure 10:" and the like; a smaller number just right of
             # larger text is algorithm2e's, in the gap beside the text's column.
-            if previous is not None and first.x0 - previous.x1 < 6 and previous.size <= 1.25 * first.size:
+            if (
+                previous is not None
+                and first.x0 - previous.x1 < 6
+                and previous.size <= _GUTTER_NUMBER_RATIO * first.size
+            ):
                 continue
             # Only the number's own glyphs ("1." of "1.Sample").
             length, number = 0, []
@@ -472,7 +488,7 @@ def _number_chains(glyphs: list[Glyph]) -> list[list[_Number]]:
             drop = last.yc - number.yc
             aligned = abs(number.x1 - last.x1) <= 3 or abs(number.x0 - last.x0) <= 3
             if number.style != ":":  # "1." steps may be indented with a loop (2602.03211 p4)
-                aligned = aligned or abs(number.x0 - last.x0) <= 2 * max(last.size, number.size)
+                aligned = aligned or abs(number.x0 - last.x0) <= _STEP_INDENT * max(last.size, number.size)
             if (
                 number.value == last.value + 1
                 and number.style == last.style
@@ -555,10 +571,11 @@ def _code_listing(lines: list[AlgorithmLine]) -> bool:
         return False
     # Width over size: listings of two sizes side by side are monospaced too.
     widths = [(g.x1 - g.x0) / g.size for g in unnamed if g.text.strip().isalpha() and g.size > 0]
-    if len(widths) < 20:
+    if len(widths) < _MONO_LETTERS:
         return False
     median = statistics.median(widths)
-    return sum(1 for w in widths if abs(w - median) <= 0.03 * median) >= 0.9 * len(widths)
+    even = sum(1 for w in widths if abs(w - median) <= _MONO_TOLERANCE * median)
+    return even >= _MONO_SHARE * len(widths)
 
 
 def _right_edge(
