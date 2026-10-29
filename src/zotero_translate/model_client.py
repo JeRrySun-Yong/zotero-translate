@@ -10,14 +10,14 @@ Reliability (ADR 0002):
   the last byte of the response (see ``_post``).
 - Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
   answers the caller's ``validate`` rejects are retried, at most
-  ``max_retries`` times, waiting ``retry_backoff_seconds`` and then twice as
-  long each time. Other HTTP errors (e.g. 401, 403) fail at once. When the
-  attempts are used up, ``complete`` raises ``ModelCallError`` with a
-  readable Chinese reason.
-- A network error (the endpoint cannot be reached, or the connection breaks
-  before an answer; not a timeout, not an HTTP status) waits longer before
-  the n-th resend: ``connection_retry_seconds[n - 1]``, by default 5, 15 and
-  45 seconds. Together they outlast a network outage of about a minute,
+  ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
+  When the attempts are used up, ``complete`` raises ``ModelCallError`` with
+  a readable Chinese reason.
+- Before the n-th resend, a network error (the endpoint cannot be reached,
+  or the connection breaks before an answer; not a timeout, not an HTTP
+  status) waits ``connection_retry_seconds[n - 1]``, by default 5, 15 and 45
+  seconds; every other retried failure waits ``retry_backoff_seconds`` and
+  then twice as long each time, by default 1, 2 and 4 seconds. Together they outlast a network outage of about a minute,
   which failed two papers of the closure-02 run (2026-10-28 18:22) under the
   1, 2 and 4 seconds that suit an overloaded endpoint. The number of
   attempts stays the same.
