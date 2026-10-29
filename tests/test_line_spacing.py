@@ -9,8 +9,14 @@ the lines were far apart, not because the text was too long.
 import collections
 import json
 import re
+from types import SimpleNamespace
 
 import pymupdf
+from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfStyle
+from babeldoc.format.pdf.document_il.midend.typesetting import (
+    Typesetting,
+    TypesettingUnit,
+)
 
 from tests.conftest import FIXTURES
 from tests.fake_model import PSEUDO_PREFIX, batch_items
@@ -101,3 +107,47 @@ def test_the_autoref_abstract_keeps_a_font_size_close_to_the_source(fake_model, 
     assert sum(sizes.values()) > 400, sizes
     # The source is 10.1 pt; the abstract was set at 9.0 pt with a 1.5 line skip.
     assert min(sizes) >= 9.5, sizes
+
+
+def char_units(text: str, widths: dict[str, float]) -> list[TypesettingUnit]:
+    """One typesetting unit per character, 10 pt high, at the given widths."""
+    return [
+        TypesettingUnit(
+            char=PdfCharacter(
+                char_unicode=c,
+                box=Box(x=0, y=0, x2=widths[c], y2=10),
+                pdf_style=PdfStyle(font_id="F", font_size=10),
+            )
+        )
+        for c in text
+    ]
+
+
+def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
+    # AutoRef page 9 at the 1.25 line skip: "Seedream" fit at the end of a line
+    # but came out as "Seedrea" / "m". The English line break check added the
+    # width up to the next break point, which already holds the current letter,
+    # to the current letter's width: the word passed at its narrow "S" and
+    # failed at its wider "m".
+    widths = {"中": 10, "文": 10, " ": 3, "S": 5, "e": 4, "d": 5, "r": 3, "a": 4, "m": 8}
+    units = char_units("中文中文 Seedream 中文", widths)
+    # "中文中文 " ends at 43, "Seedream" (37 pt) at 80: the word fits a line
+    # ending at 86, but 72 (before "m") + 8 + 8 does not.
+    typesetting = object.__new__(Typesetting)
+    typesetting.font_mapper = SimpleNamespace(
+        base_font=SimpleNamespace(char_lengths=lambda text, size: [size])
+    )
+    laid_out, fits = typesetting._layout_typesetting_units(
+        units,
+        Box(x=0, y=0, x2=86, y2=100),
+        1.0,
+        1.25,
+        SimpleNamespace(first_line_indent=False),
+    )
+
+    assert fits
+    lines = {}
+    for unit in laid_out:
+        lines.setdefault(round(unit.box.y, 3), []).append(unit.try_get_unicode())
+    first_line = next(iter(lines.values()))
+    assert "".join(first_line) == "中文中文 Seedream"
