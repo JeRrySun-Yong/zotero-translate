@@ -36,17 +36,21 @@ and ``ModelFormat``, both left at their defaults), holding the converted
 onnxruntime never checks a cache entry against the model. Rule 2 for bytes
 ignores the weights and the input shape, so a changed model or input size
 would silently reuse a stale compiled model. The static model therefore
-carries its own ``COREML_CACHE_KEY``: the first 32 hex digits of the SHA-256
-of the serialized static model (weights, input shape and inferred shapes)
-followed by the onnxruntime version. Any change to the model file, the input
-size, the static rewrite or onnxruntime gives a new key and a new entry; old
-entries stay on disk until someone deletes them.
+carries its own ``COREML_CACHE_KEY`` (``_set_coreml_cache_key``): a
+``COREML_CACHE_KEY`` metadata entry with an empty value is added first, the
+static model with that empty entry (weights, input shape, inferred shapes and
+the other metadata) is serialized and hashed with SHA-256, and the entry's
+value becomes the first 32 hex digits of that hash followed by ``ort`` and
+the onnxruntime version without dots. Any change to the model file, the
+input size, the static rewrite or onnxruntime gives a new key and a new
+entry; old entries stay on disk until someone deletes them.
 
 Two processes compiling the same entry at the same time would race (the
 second one's move into the cache fails), so creating the session holds an
-exclusive ``flock`` on ``COREML_CACHE_DIR/lock``. If the cached session
-cannot be created (an unwritable directory, a broken entry left by a killed
-process), the process logs a warning and compiles in ``$TMPDIR`` as before.
+exclusive ``flock`` on ``COREML_CACHE_DIR/lock``. If the cache directory or
+its lock file cannot be created, or the cached session cannot be created
+(for example a broken entry left by a killed process), the process logs a
+warning saying which and compiles in ``$TMPDIR`` as before.
 """
 
 import ast
@@ -93,11 +97,18 @@ COREML_CACHE_DIR = CACHE_FOLDER / "coreml"
 _COREML_CACHE_KEY = "COREML_CACHE_KEY"
 
 
-def _coreml_cache_key(static_model) -> str:
-    """The cache key of the static model: content hash plus onnxruntime version."""
+def _set_coreml_cache_key(static_model) -> str:
+    """Add the ``COREML_CACHE_KEY`` metadata entry to the static model; return the key.
+
+    The hash covers the static model as serialized with the entry already
+    present and its value still empty (see the module docstring).
+    """
+    key_prop = static_model.metadata_props.add()
+    key_prop.key = _COREML_CACHE_KEY
     digest = hashlib.sha256(static_model.SerializeToString()).hexdigest()[:32]
     version = re.sub(r"[^0-9A-Za-z]", "", onnxruntime.__version__)
-    return f"{digest}ort{version}"[:64]
+    key_prop.value = f"{digest}ort{version}"[:64]
+    return key_prop.value
 
 
 def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
@@ -107,15 +118,23 @@ def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
     """
     import fcntl
 
-    entry = static_model.metadata_props.add()
-    entry.key = _COREML_CACHE_KEY
-    entry.value = _coreml_cache_key(static_model)
+    cache_key = _set_coreml_cache_key(static_model)
     model_bytes = static_model.SerializeToString()
-    fallback = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    uncached = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
     try:
         COREML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with (COREML_CACHE_DIR / "lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        lock = (COREML_CACHE_DIR / "lock").open("a")
+    except OSError:
+        logger.warning(
+            "CoreML compile cache directory %s or its lock file cannot be "
+            "created; compiling in $TMPDIR for this process.",
+            COREML_CACHE_DIR,
+            exc_info=True,
+        )
+        return onnxruntime.InferenceSession(model_bytes, providers=uncached)
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
             return onnxruntime.InferenceSession(
                 model_bytes,
                 providers=[
@@ -126,14 +145,14 @@ def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
                     "CPUExecutionProvider",
                 ],
             )
-    except Exception:
-        logger.warning(
-            "CoreML compile cache unusable; compiling in $TMPDIR for this "
-            "process. Deleting %s rebuilds the entry.",
-            COREML_CACHE_DIR / entry.value,
-            exc_info=True,
-        )
-        return onnxruntime.InferenceSession(model_bytes, providers=fallback)
+        except Exception:
+            logger.warning(
+                "CoreML compile cache entry %s cannot be used; compiling in "
+                "$TMPDIR for this process. Deleting the entry rebuilds it.",
+                COREML_CACHE_DIR / cache_key,
+                exc_info=True,
+            )
+    return onnxruntime.InferenceSession(model_bytes, providers=uncached)
 
 
 class OnnxModel(DocLayoutModel):
