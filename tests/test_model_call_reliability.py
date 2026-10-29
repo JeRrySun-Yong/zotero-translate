@@ -284,14 +284,16 @@ def test_run_exits_with_a_nonzero_code_when_the_paper_task_fails(tmp_path, fake_
 def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
     with FakeModel(delay=1.0) as model:
         service = launch_service(model, tmp_path)
-        running = service.submit()
-        queued = service.submit()
-        service.wait_for(running, lambda s: s["state"] == "running" and model.requests)
-
-        service.process.kill()
-        service.process.wait(timeout=10)
-        restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
+        restarted = None
         try:
+            running = service.submit()
+            queued = service.submit()
+            service.wait_for(running, lambda s: s["state"] == "running" and model.requests)
+
+            # Only the service: its task subprocess must end itself.
+            service.process.kill()
+            service.process.wait(timeout=10)
+            restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
             for task_id in (running, queued):
                 status = restarted.status(task_id)
                 assert status["state"] == "failed"
@@ -305,7 +307,10 @@ def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
             task_dir = service.data_dir / "tasks" / running
             assert subprocess.run(["pgrep", "-f", str(task_dir)]).returncode == 1
         finally:
-            stop_service(restarted)
+            if restarted is not None:
+                stop_service(restarted)
+            # The old service's group, should the test end before its subprocess did.
+            stop_service(service)
 
 
 def test_api_key_appears_in_no_report_log_or_http_response(fake_model, start_service):
