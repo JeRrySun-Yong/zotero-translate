@@ -1493,6 +1493,10 @@ class Typesetting:
         line_ys = [current_y]
         if paragraph.first_line_indent:
             current_x += space_width * 4
+        # Where the current line and the lines after the first start: a
+        # reference entry keeps its hanging indent (closure ticket 04, R2).
+        line_start_x = box.x
+        next_line_x = box.x + (paragraph.hanging_indent or 0)
         # 遍历所有排版单元
         for i, unit in enumerate(typesetting_units):
             # 计算当前单元在当前缩放下的尺寸
@@ -1500,7 +1504,7 @@ class Typesetting:
             unit_height = unit.height * scale
 
             # 跳过行首的空格
-            if current_x == box.x and unit.is_space:
+            if current_x == line_start_x and unit.is_space:
                 continue
 
             if (
@@ -1515,7 +1519,7 @@ class Typesetting:
                 )  # 在同一行，且有垂直重叠
                 and not last_unit.mixed_character_blacklist  # 不是混排空格黑名单字符
                 and not unit.mixed_character_blacklist  # 同上
-                and current_x > box.x  # 不是行首
+                and current_x > line_start_x  # 不是行首
                 and unit.try_get_unicode() != " "  # 不是空格
                 and last_unit.try_get_unicode() != " "  # 不是空格
                 and last_unit.try_get_unicode()
@@ -1541,7 +1545,7 @@ class Typesetting:
                 run_width = self._get_width_before_next_break_point(
                     typesetting_units[i:], scale
                 )
-                if run_width <= box.x2 - box.x:
+                if run_width <= box.x2 - next_line_x:
                     width_before_next_break_point = run_width
 
             # 如果当前行放不下这个元素，换行
@@ -1561,7 +1565,7 @@ class Typesetting:
                 )
             ):
                 # 换行
-                current_x = box.x
+                current_x = line_start_x = next_line_x
                 if not current_line_heights:
                     return [], False
                 max_height = max(current_line_heights)

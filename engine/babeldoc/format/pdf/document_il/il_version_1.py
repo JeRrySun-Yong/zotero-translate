@@ -1214,6 +1214,14 @@ class PdfParagraph:
             "type": "Attribute",
         },
     )
+    # Lines after the first start this many points right of the box: a
+    # reference entry's hanging indent (zotero-translate closure ticket 04).
+    hanging_indent: float | None = field(
+        default=None,
+        metadata={
+            "type": "Attribute",
+        },
+    )
     debug_id: str | None = field(
         default=None,
         metadata={

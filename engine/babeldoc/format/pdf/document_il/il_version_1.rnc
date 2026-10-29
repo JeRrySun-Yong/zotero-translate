@@ -106,6 +106,7 @@ PDFParagraph =
     attribute optimal_scale { xsd:float }?,
     attribute vertical { xsd:boolean }?,
     attribute FirstLineIndent { xsd:boolean }?,
+    attribute hanging_indent { xsd:float }?,
     attribute debug_id { xsd:string }?,
     attribute layout_label { xsd:string }?,
     attribute layout_id { xsd:int }?,

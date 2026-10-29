@@ -153,7 +153,7 @@ def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
         Box(x=0, y=0, x2=86, y2=100),
         1.0,
         1.25,
-        SimpleNamespace(first_line_indent=False),
+        SimpleNamespace(first_line_indent=False, hanging_indent=None),
     )
 
     assert fits
@@ -174,6 +174,7 @@ def test_a_paragraph_that_does_not_fit_at_the_scale_floor_is_set_there_and_logge
         box=Box(x=0, y=0, x2=20, y2=12),
         debug_id="floor-p",
         first_line_indent=False,
+        hanging_indent=None,
         scale=None,
         pdf_paragraph_composition=[],
     )
