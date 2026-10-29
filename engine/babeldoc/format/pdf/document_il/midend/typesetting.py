@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Line advance of a CJK paragraph, as a multiple of its font size (upstream 1.5;
 # closure ticket 03).
-CJK_LINE_SKIP = 1.20
+CJK_LINE_SKIP = 1.25
 # Smallest font scale the layout search tries before it sets the paragraph at
 # this scale past its box (upstream 0.1; closure ticket 03).
 MIN_SCALE = 0.5
@@ -974,8 +974,9 @@ class Typesetting:
         scale = initial_scale
         # closure 03 (F1): a CJK line skip of 1.5 set the AutoRef abstract
         # (source 10.1 pt on an 11.0 pt pitch) at 9.0 pt on a 13.5 pt pitch; the
-        # font shrank because the lines were far apart. 1.2 keeps the
-        # translation near the source size.
+        # font shrank because the lines were far apart. 1.25 keeps the
+        # translation near the source size (1.3 set the AutoDesign and
+        # MaLiang abstracts at 9.0 pt).
         line_skip = CJK_LINE_SKIP if self.is_cjk else 1.3
         # closure 03 (T1, T4): table header cells shrank to 0.1 of their size
         # (3.0 pt). Below MIN_SCALE the paragraph is set at MIN_SCALE and may
