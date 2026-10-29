@@ -238,9 +238,29 @@ def word_space_threshold(char: PdfCharacter) -> float:
     gap lost every ordinary word space (``XiaofuChen``, ``AppendixH.1``).
     Letter gaps inside a word stay well below 0.15 em.
     """
+    return max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * _font_size(char))
+
+
+# The width of an inferred space: the source gap, at most half an em; at a
+# line break (no gap on the line) an ordinary space of a quarter em.
+WORD_SPACE_MAX_EM = 0.5
+LINE_BREAK_SPACE_EM = 0.25
+
+
+def word_space_width(char: PdfCharacter, distance: float) -> float:
+    """The width of the dummy space after ``char``, ``distance`` before the next character.
+
+    A space narrower than the source gap makes the reused source glyphs of an
+    untranslated span (an author line) print without a visible word space.
+    """
+    if distance >= word_space_threshold(char):
+        return min(distance, WORD_SPACE_MAX_EM * _font_size(char))
+    return LINE_BREAK_SPACE_EM * _font_size(char)
+
+
+def _font_size(char: PdfCharacter) -> float:
     style = char.pdf_style
-    font_size = style.font_size if style and style.font_size else 10
-    return max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * font_size)
+    return style.font_size if style and style.font_size else 10
 
 
 # A line ending with one of these is a hyphenated word: no space at the break.
@@ -268,7 +288,7 @@ def line_break_space(
     box = Box(
         x=last_char.box.x2,
         y=last_char.box.y,
-        x2=last_char.box.x2 + word_space_threshold(last_char),
+        x2=last_char.box.x2 + LINE_BREAK_SPACE_EM * _font_size(last_char),
         y2=last_char.box.y2,
     )
     return PdfCharacter(
@@ -542,15 +562,14 @@ def _add_space_dummy_chars_to_list(chars: list[PdfCharacter]) -> None:
         next_char = chars[i + 1]
 
         distance = next_char.box.x - curr_char.box.x2
-        threshold = word_space_threshold(curr_char)
-        if distance >= threshold or Layout.is_newline(curr_char, next_char):
-            if distance < 0:
-                distance = -distance
+        if distance >= word_space_threshold(curr_char) or Layout.is_newline(
+            curr_char, next_char
+        ):
             # 创建一个 dummy 字符作为空格
             space_box = Box(
                 x=curr_char.box.x2,
                 y=curr_char.box.y,
-                x2=curr_char.box.x2 + min(distance, threshold),
+                x2=curr_char.box.x2 + word_space_width(curr_char, distance),
                 y2=curr_char.box.y2,
             )
 

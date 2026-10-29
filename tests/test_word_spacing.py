@@ -21,6 +21,8 @@ from tests.fake_model import batch_items
 from tests.test_paper_task import pdf_text
 
 STYLE_TAG = re.compile(r"</?style[^>]*>")
+# "Appendix H.1", the "H.1" possibly in a style tag of its own (a link).
+APPENDIX_H1 = re.compile(r"Appendix(\s*(?:</?style[^>]*>\s*)*)H\.1")
 AUTHORS = ["Xiaofu Chen", "Jiacheng Liu", "Jiacheng Cui", "Zhiqiang Shen", "Xiaotong Li"]
 
 
@@ -39,7 +41,7 @@ def like_the_model(body: dict) -> str:
         if "Xiaofu" in STYLE_TAG.sub("", text):
             output = text
         else:
-            output = PSEUDO_PREFIX + re.sub(r"Appendix\s*H\.1", "附录 H.1", text)
+            output = PSEUDO_PREFIX + APPENDIX_H1.sub(r"附录 \1H.1", text)
         answer.append({"id": item["id"], "output": output})
     return json.dumps(answer, ensure_ascii=False)
 
@@ -68,7 +70,8 @@ def test_the_author_names_on_autodesign_page_1_keep_their_spaces(fake_model, sta
     # The unchanged author line reuses the source glyphs, spaces included.
     mono = page_text(service.download(task_id, "mono"), 1)
     for name in AUTHORS:
-        assert name in mono, name
+        surname = name.split()[1]
+        assert name in mono, mono[mono.find(surname) - 40 : mono.find(surname) + 40]
         assert name.replace(" ", "") not in mono, name
 
 
