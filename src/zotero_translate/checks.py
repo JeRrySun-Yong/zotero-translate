@@ -29,16 +29,15 @@ paragraph text often lacks the space between two words
   literal;
 - a literal also passes when the translation has it without a glued-on
   word: a leading lower-case word before a capital (``theGPT-4``), a
-  leading capitalised word, or abbreviation with its dot, before what
-  starts like a name of its own (``IntroducingGPT-5.5``, ``AppendixH.1``,
-  ``Fig.4``; the translation writes "Introducing GPT-5.5", "附录 H.1",
-  "图 4"), a trailing lower-case word of 2 or more letters after a capital
-  or digit (``GPT-5.5and``), or a trailing capitalised word after a
-  lower-case letter (``...ac.aeWork``). What is left of ``Fig.4`` or
-  ``Sec.3.2`` is a number: it must be one of the numbers the number check
-  finds in the translation (outside the source's literals, so not the 4 of
-  ``GPT-4``), so "图 14", "第 13.2 节" and "图 5" fail as they would for
-  ``Fig. 4`` and ``Sec. 3.2``.
+  trailing lower-case word of 2 or more letters after a capital or digit
+  (``GPT-5.5and``), or a trailing capitalised word after a lower-case
+  letter (``...ac.aeWork``).
+
+Closure ticket 02 fixed the engine's word spaces (``Appendix H.1``,
+``Introducing GPT-5.5``, ``Fig. 4`` now keep their space), so ticket 12's
+rule for a leading capitalised word glued to a name (``AppendixH.1``,
+``Fig.4``) is gone: a source that really writes ``Fig.4`` without a space
+needs ``Fig.4`` in the translation.
 """
 
 from __future__ import annotations
@@ -66,7 +65,6 @@ _NAME = _LITERALS[-1]
 _WORD_THEN_DIGITS = re.compile(r"[A-Za-z][a-z]+\d")
 _GLUED = [
     re.compile(r"^[a-z]+(?=[A-Z])"),
-    re.compile(r"^[A-Z][a-z]+(?:\.(?=\d)|(?=[A-Z][A-Z0-9.-]))"),
     re.compile(r"(?<=[A-Z0-9])[a-z]{2,}$"),
     re.compile(r"(?<=[a-z])[A-Z][a-z]+$"),
 ]
@@ -98,10 +96,7 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
     source_numbers = _numbers(source_text, literals)
     target_numbers = _numbers(target_text, literals)
     for literal in dict.fromkeys(literals):
-        if not any(
-            _in_translation(variant, target_squeezed, target_numbers)
-            for variant in _variants(literal)
-        ):
+        if not any(variant in target_squeezed for variant in _variants(literal)):
             found.append(f"字面值 {literal} 被改动或缺失")
     for number, count in source_numbers.items():
         if target_numbers[number] < count:
@@ -130,24 +125,12 @@ def _literals(text: str) -> list[str]:
     return found
 
 
-def _in_translation(variant: str, target_squeezed: str, target_numbers: collections.Counter) -> bool:
-    """A number variant among the translation's numbers; any other in its text without whitespace."""
-    number = _NUMBER.fullmatch(variant)
-    if number:
-        return target_numbers[_number(number)] > 0
-    return variant in target_squeezed
-
-
 def _variants(literal: str) -> list[str]:
-    """The literal, and the literal without each kind of glued-on word.
-
-    A variant is a number only when an abbreviation was glued to a number
-    (``Fig.4``, ``Sec.3.2``); it is then matched as a whole number.
-    """
+    """The literal, and the literal without each kind of glued-on word."""
     variants = [literal]
     for glued in _GLUED:
         shorter = glued.sub("", literal)
-        if shorter != literal and (len(shorter) > 1 or _NUMBER.fullmatch(shorter)):
+        if shorter != literal and len(shorter) > 1:
             variants.append(shorter)
     return variants
 
