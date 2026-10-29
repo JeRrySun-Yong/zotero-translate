@@ -216,6 +216,31 @@ def references_range(paragraphs: list[Paragraph]) -> range:
     return range(start + 1, stop)
 
 
+def front_matter_range(paragraphs: list[Paragraph]) -> range:
+    """The paragraph indices of the front matter: the authors, their
+    affiliations and the notes under them. They follow the paper title (and
+    any heading right after it) and end before the abstract or its heading,
+    on the title's page. Empty without a paper title or an abstract.
+
+    The engine's ``front_matter`` hook: each line there becomes a paragraph
+    of its own.
+    """
+    headings = _headings(paragraphs)
+    title = _paper_title(paragraphs, headings)
+    abstract, _ = find_ranges(paragraphs)
+    if title is None or not abstract or abstract.start <= title:
+        return range(0)
+    stop = abstract.start
+    if _ABSTRACT_HEADING.match(paragraphs[stop - 1][2].strip()):
+        stop -= 1
+    start = title + 1
+    while start < stop and start in headings:
+        start += 1
+    page = paragraphs[title][0]
+    stop = next((i for i in range(start, stop) if paragraphs[i][0] != page), stop)
+    return range(start, stop)
+
+
 def _headings(paragraphs: list[Paragraph]) -> list[int]:
     return [i for i, (_, label, text) in enumerate(paragraphs) if _is_heading(label, text)]
 

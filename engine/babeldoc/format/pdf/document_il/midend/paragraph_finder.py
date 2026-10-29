@@ -2,6 +2,7 @@ import logging
 import random
 import re
 import statistics
+import unicodedata
 
 import numpy as np
 
@@ -214,6 +215,7 @@ class ParagraphFinder:
                 pbar.advance()
 
             self._split_reference_entries(document)
+            self._split_front_matter_lines(document)
 
             total_paragraph_count = 0
             for page in document.page:
@@ -357,6 +359,116 @@ class ParagraphFinder:
             self.update_paragraph_data(entry, update_unicode=True)
             entries.append(entry)
         return entries
+
+    def _split_front_matter_lines(self, document: Document) -> None:
+        """Make each line of the front matter (the authors, their
+        affiliations and the notes under them) a paragraph of its own
+        (closure ticket 05, A1-A3).
+
+        One layout box can hold author lines and an affiliation line
+        (MaLiang page 1), or two affiliation lines and a note (AutoDesign
+        page 1). As one paragraph, the translation was set as running text:
+        the affiliations followed the last author name and a line broke
+        inside an institution name. A paragraph of punctuation only, such as
+        the comma that ends an author line outside the authors' layout box
+        (AutoDesign page 1), joins the line it sits on; alone it kept its
+        source place while the translated line before it got shorter.
+        """
+        front_matter = self.translation_config.front_matter
+        if front_matter is None:
+            return
+        located = [
+            (page, paragraph)
+            for page in document.page
+            for paragraph in page.pdf_paragraph
+        ]
+        indexes = front_matter(
+            [
+                (page.page_number, p.layout_label, (p.unicode or "").strip())
+                for page, p in located
+            ]
+        )
+        front = [located[i] for i in indexes]
+        joined = {
+            id(paragraph)
+            for page, paragraph in front
+            if self._is_punctuation(paragraph)
+            and self._join_to_its_line(
+                paragraph,
+                [p for q, p in front if q is page and not self._is_punctuation(p)],
+            )
+        }
+        parts = {
+            id(paragraph): self._line_paragraphs(paragraph)
+            for _, paragraph in front
+            if id(paragraph) not in joined
+        }
+        for page in {id(page): page for page, _ in front}.values():
+            page.pdf_paragraph = [
+                part
+                for paragraph in page.pdf_paragraph
+                if id(paragraph) not in joined
+                for part in parts.get(id(paragraph), [paragraph])
+            ]
+            self._set_paragraph_render_order(page)
+
+    @staticmethod
+    def _is_punctuation(paragraph: PdfParagraph) -> bool:
+        text = (paragraph.unicode or "").strip()
+        return bool(text) and all(unicodedata.category(c).startswith("P") for c in text)
+
+    def _join_to_its_line(
+        self, paragraph: PdfParagraph, others: list[PdfParagraph]
+    ) -> bool:
+        """Append the characters of ``paragraph`` to the line of ``others``
+        that ends left of it and shares the most height with it. Returns
+        whether there was such a line."""
+        box = paragraph.box
+        best, best_overlap = None, 0.0
+        for other in others:
+            for composition in other.pdf_paragraph_composition:
+                line = composition.pdf_line
+                if line is None or line.box.x2 > box.x:
+                    continue
+                overlap = min(line.box.y2, box.y2) - max(line.box.y, box.y)
+                if overlap > best_overlap:
+                    best, best_overlap = (other, line), overlap
+        if best is None:
+            return False
+        other, line = best
+        line.pdf_character.extend(
+            char
+            for composition in paragraph.pdf_paragraph_composition
+            if composition.pdf_line
+            for char in composition.pdf_line.pdf_character
+        )
+        self.update_line_data(line)
+        self.update_paragraph_data(other, update_unicode=True)
+        return True
+
+    def _line_paragraphs(self, paragraph: PdfParagraph) -> list[PdfParagraph]:
+        """One paragraph per line of a horizontal paragraph made of lines;
+        any other paragraph as it is."""
+        compositions = paragraph.pdf_paragraph_composition
+        if (
+            paragraph.vertical
+            or len(compositions) < 2
+            or any(c.pdf_line is None for c in compositions)
+        ):
+            return [paragraph]
+        lines = []
+        for composition in compositions:
+            line = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=[composition],
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+            )
+            self.update_paragraph_data(line, update_unicode=True)
+            lines.append(line)
+        return lines
 
     def check_cid_paragraph(self, doc: Document):
         cid_para_count = 0
