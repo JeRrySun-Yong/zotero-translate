@@ -1529,12 +1529,20 @@ class Typesetting:
                 ]
             ):
                 current_x += space_width * 0.5
-            if use_english_line_break:
-                width_before_next_break_point = self._get_width_before_next_break_point(
+            # A run without a break point moves to the next line only from its
+            # first character, and only if it fits a whole line. A longer run
+            # (a URL: "/" and "." do not break a line) is set where it is and
+            # breaks at the right edge; checking it again at each character
+            # set it one character per line (closure ticket 04, R3).
+            width_before_next_break_point = 0
+            if use_english_line_break and (
+                i == 0 or typesetting_units[i - 1].can_break_line
+            ):
+                run_width = self._get_width_before_next_break_point(
                     typesetting_units[i:], scale
                 )
-            else:
-                width_before_next_break_point = 0
+                if run_width <= box.x2 - box.x:
+                    width_before_next_break_point = run_width
 
             # 如果当前行放不下这个元素，换行
             if not unit.is_hung_punctuation and (
