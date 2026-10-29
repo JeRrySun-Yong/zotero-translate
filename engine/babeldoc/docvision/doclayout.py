@@ -1,4 +1,54 @@
+"""Layout detection with the DocLayout-YOLO ONNX model.
+
+On macOS the model runs through onnxruntime's ``CoreMLExecutionProvider``
+with a static input of ``[1, 3, 1024, 1024]`` (``_make_static_model`` builds
+the static model in memory). onnxruntime converts the CoreML part of the
+graph into CoreML models and compiles them; the system then compiles them
+again for the neural engine (``ANECompilerService``) and keeps the result in
+its own cache.
+
+CoreML compile cache (zotero-translate closure ticket 13)
+---------------------------------------------------------
+
+Without a cache every new process writes its own
+``onnxruntime-<UUID>-<PID>-….model.mlmodel`` and ``.mlmodelc`` to
+``$TMPDIR``, and the system compiles each of them for the neural engine
+again; the neural engine cache grew to about 88 GB that way. So the
+CoreML EP gets the provider option ``ModelCacheDirectory`` pointing at
+``COREML_CACHE_DIR`` (``~/.cache/babeldoc/coreml``). The first process
+stores the converted and compiled models there, and later processes load
+the compiled models from the same paths without compiling. Only the cache
+option is set: ``MLComputeUnits``, ``ModelFormat`` and the other options
+that change inference stay at their defaults.
+
+How onnxruntime 1.31.0 names a cache entry (``coreml_execution_provider.cc``
+``gen_metadef_name`` and ``model_builder.cc`` ``GetModelOutputPath``): the
+entry is ``<cache dir>/<key>/<partition id>_static_nn/``, holding the
+converted ``model`` and ``compiled_model.mlmodelc``. The key is
+
+1. the model metadata value ``COREML_CACHE_KEY`` when it is alphanumeric and
+   at most 64 characters; otherwise
+2. a hash of the path the model was loaded from; or, for a model given as
+   bytes (our case), a hash of the graph input names and node output names.
+
+onnxruntime never checks a cache entry against the model. Rule 2 for bytes
+ignores the weights and the input shape, so a changed model or input size
+would silently reuse a stale compiled model. The static model therefore
+carries its own ``COREML_CACHE_KEY``: the first 32 hex digits of the SHA-256
+of the serialized static model (weights, input shape and inferred shapes)
+followed by the onnxruntime version. Any change to the model file, the input
+size, the static rewrite or onnxruntime gives a new key and a new entry; old
+entries stay on disk until someone deletes them.
+
+Two processes compiling the same entry at the same time would race (the
+second one's move into the cache fails), so creating the session holds an
+exclusive ``flock`` on ``COREML_CACHE_DIR/lock``. If the cached session
+cannot be created (an unwritable directory, a broken entry left by a killed
+process), the process logs a warning and compiles in ``$TMPDIR`` as before.
+"""
+
 import ast
+import hashlib
 import logging
 import platform
 import re
@@ -27,6 +77,7 @@ import pymupdf
 
 import babeldoc.format.pdf.document_il.il_version_1
 from babeldoc.assets.assets import get_doclayout_onnx_model_path
+from babeldoc.const import CACHE_FOLDER
 
 # from huggingface_hub import hf_hub_download
 
@@ -35,6 +86,52 @@ logger = logging.getLogger(__name__)
 
 # 检测操作系统类型
 os_name = platform.system()
+
+COREML_CACHE_DIR = CACHE_FOLDER / "coreml"
+_COREML_CACHE_KEY = "COREML_CACHE_KEY"
+
+
+def _coreml_cache_key(static_model) -> str:
+    """The cache key of the static model: content hash plus onnxruntime version."""
+    digest = hashlib.sha256(static_model.SerializeToString()).hexdigest()[:32]
+    version = re.sub(r"[^0-9A-Za-z]", "", onnxruntime.__version__)
+    return f"{digest}ort{version}"[:64]
+
+
+def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
+    """A CoreML session that reuses the compiled model across processes.
+
+    See the module docstring for the cache layout and the key.
+    """
+    import fcntl
+
+    entry = static_model.metadata_props.add()
+    entry.key = _COREML_CACHE_KEY
+    entry.value = _coreml_cache_key(static_model)
+    model_bytes = static_model.SerializeToString()
+    fallback = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    try:
+        COREML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with (COREML_CACHE_DIR / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return onnxruntime.InferenceSession(
+                model_bytes,
+                providers=[
+                    (
+                        "CoreMLExecutionProvider",
+                        {"ModelCacheDirectory": str(COREML_CACHE_DIR)},
+                    ),
+                    "CPUExecutionProvider",
+                ],
+            )
+    except Exception:
+        logger.warning(
+            "CoreML compile cache unusable; compiling in $TMPDIR for this "
+            "process. Deleting %s rebuilds the entry.",
+            COREML_CACHE_DIR / entry.value,
+            exc_info=True,
+        )
+        return onnxruntime.InferenceSession(model_bytes, providers=fallback)
 
 
 class OnnxModel(DocLayoutModel):
@@ -57,14 +154,11 @@ class OnnxModel(DocLayoutModel):
             # Fix input shapes to [1, 3, 1024, 1024] so CoreML can take over
             # 96%+ of the graph nodes (658/681) instead of just 3/823.
             model = self._make_static_model(model, self._FIXED_IMGSZ)
-            providers = [
-                "CoreMLExecutionProvider",
-                "CPUExecutionProvider",
-            ]
             logger.info(
                 "Using CoreMLExecutionProvider with static input "
                 f"[1, 3, {self._FIXED_IMGSZ}, {self._FIXED_IMGSZ}]"
             )
+            self.model = _coreml_session(model)
         else:
             for provider in available_providers:
                 # disable dml|cuda|
@@ -72,10 +166,10 @@ class OnnxModel(DocLayoutModel):
                 if re.match(r"cpu", provider, re.IGNORECASE):
                     logger.info(f"Available Provider: {provider}")
                     providers.append(provider)
-        self.model = onnxruntime.InferenceSession(
-            model.SerializeToString(),
-            providers=providers,
-        )
+            self.model = onnxruntime.InferenceSession(
+                model.SerializeToString(),
+                providers=providers,
+            )
         self.lock = threading.Lock()
 
     @staticmethod
