@@ -35,6 +35,7 @@ from babeldoc.format.pdf.document_il.utils.layout_helper import (
     is_curve_overlapping_with_paragraphs,
 )
 from babeldoc.format.pdf.document_il.utils.layout_helper import is_same_style
+from babeldoc.format.pdf.document_il.utils.layout_helper import line_break_space
 from babeldoc.format.pdf.document_il.utils.spatial_analyzer import (
     is_element_contained_in_formula,
 )
@@ -680,6 +681,14 @@ class StylesAndFormulas:
                 if not comp.pdf_line:
                     new_compositions.append(comp)
                     continue
+
+                # 行与行之间补上词间空格（closure 票 02）
+                if current_chars and comp.pdf_line.pdf_character:
+                    space = line_break_space(
+                        current_chars[-1], comp.pdf_line.pdf_character[0]
+                    )
+                    if space is not None:
+                        current_chars.append(space)
 
                 for char in comp.pdf_line.pdf_character:
                     char_style = char.pdf_style

@@ -243,6 +243,44 @@ def word_space_threshold(char: PdfCharacter) -> float:
     return max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * font_size)
 
 
+# A line ending with one of these is a hyphenated word: no space at the break.
+_LINE_END_HYPHENS = ("-", "\u2010", "\u2011")
+
+
+def line_break_space(
+    last_char: PdfCharacter, next_char: PdfCharacter
+) -> PdfCharacter | None:
+    """A dummy space for the line break between two lines of a paragraph, or None.
+
+    The paragraph finder strips the trailing spaces of each line, and the
+    styles stage then joins the characters of consecutive lines into one
+    composition; without this space, a translation that reuses those source
+    glyphs prints the last word of a line glued to the first word of the next
+    (closure ticket 02). No space after a hyphen, so hyphenated words stay whole.
+    """
+    if (
+        last_char.char_unicode.isspace()
+        or next_char.char_unicode.isspace()
+        or last_char.char_unicode in _LINE_END_HYPHENS
+        or not Layout.is_newline(last_char, next_char)
+    ):
+        return None
+    box = Box(
+        x=last_char.box.x2,
+        y=last_char.box.y,
+        x2=last_char.box.x2 + word_space_threshold(last_char),
+        y2=last_char.box.y2,
+    )
+    return PdfCharacter(
+        pdf_style=last_char.pdf_style,
+        box=box,
+        char_unicode=" ",
+        scale=last_char.scale,
+        advance=box.x2 - box.x,
+        visual_bbox=il_version_1.VisualBbox(box=box),
+    )
+
+
 def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
     """
     将字符列表转换为 Unicode 字符串，根据字符间距自动插入空格。
