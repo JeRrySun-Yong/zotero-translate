@@ -21,13 +21,19 @@ import json
 import re
 import socket
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 from zotero_translate.paper_task import DOSSIER_STAGE
 
+from tests.conftest import EXCERPT
 from tests.conftest import FAKE_API_KEY
+from tests.conftest import FAKE_ARGON_API_KEY
+from tests.conftest import FAKE_MODEL_NAME
 from tests.conftest import launch_service
 from tests.conftest import stop_service
+from tests.conftest import write_env_file
 from tests.fake_model import REJECTION_BODY
 from tests.fake_model import REJECTION_MESSAGE
 from tests.fake_model import FakeModel
@@ -251,6 +257,28 @@ def test_an_endpoint_unreachable_for_seconds_is_waited_out_and_the_task_succeeds
     assert model.requests[0].kind == "dossier"
     assert model.requests[0].received_at - outage_began >= sum(waits) - 1
     assert service.report(task_id)["model"]["retries"] == 2
+
+
+def test_run_exits_with_a_nonzero_code_when_the_paper_task_fails(tmp_path, fake_model):
+    fake_model.inject_error("401", kind="dossier")
+    output_dir = tmp_path / "out"
+    # The installed command, as run scripts call it.
+    command = Path(sys.executable).with_name("zotero-translate")
+
+    result = subprocess.run(
+        [str(command), "run", str(EXCERPT), "--output-dir", str(output_dir)]
+        + ["--env-file", str(write_env_file(tmp_path, fake_model.base_url, FAKE_API_KEY, FAKE_MODEL_NAME))]
+        + ["--argon-env-file", str(write_env_file(tmp_path, fake_model.base_url, FAKE_ARGON_API_KEY))]
+        + ["--data-dir", str(tmp_path / "data")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    report = json.loads((output_dir / "report.json").read_text("utf-8"))
+    assert report["state"] == "failed"
+    assert result.returncode != 0, result.stderr
+    assert "论文任务失败" in result.stderr
 
 
 def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):

@@ -5,6 +5,12 @@ PDF directly, without Zotero or the service, and writes ``mono.pdf``,
 ``dual.pdf``, ``dossier.json``, ``terms.json`` and ``report.json`` into the
 output directory. Both share the
 model response cache in the data directory.
+
+``run`` exits with 0 when the paper task succeeds, 1 when it fails (the
+task report's ``state`` is ``failed`` and its ``error`` says why) and 2 when
+an environment file is missing or incomplete. A script that logs the exit
+status must read ``$?`` before anything else runs: in
+``echo "$(date) exit=$?"`` the command substitution resets it to 0.
 """
 
 from __future__ import annotations
