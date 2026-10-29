@@ -234,6 +234,8 @@ class TranslationConfig:
         algorithm_translator: Callable[[list[tuple[int, object, str | None]]], None]
         | None = None,
         algorithm_typesetter: Callable[[object, Callable], None] | None = None,
+        reference_section: Callable[[list[tuple[int, str | None, str]]], range]
+        | None = None,
     ):
         self.translator = translator
         self.term_extraction_translator = term_extraction_translator or translator
@@ -429,6 +431,12 @@ class TranslationConfig:
         # ``like`` (x = 0, on its baseline), or None without a glyph.
         # It lays translated pseudocode out line by line.
         self.algorithm_typesetter = algorithm_typesetter
+        # Called by the paragraph finder once, after it has found the
+        # paragraphs of every page, with every paragraph in page order as
+        # (0-based page, layout label, source text); returns the indexes of
+        # the paragraphs of the reference list. Each entry there becomes a
+        # paragraph of its own. None leaves the paragraphs as found.
+        self.reference_section = reference_section
 
         if self.ocr_workaround:
             self.remove_non_formula_lines = False

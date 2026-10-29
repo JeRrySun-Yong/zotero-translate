@@ -1,6 +1,7 @@
 import logging
 import random
 import re
+import statistics
 
 import numpy as np
 
@@ -38,6 +39,13 @@ from babeldoc.format.pdf.document_il.utils.style_helper import WHITE
 from babeldoc.format.pdf.translation_config import TranslationConfig
 
 logger = logging.getLogger(__name__)
+
+# A line of a reference list starts an entry when it starts less than this
+# many ems right of the list's leftmost line, and continues one (hanging
+# indent) when it starts at least HANGING_INDENT_EM right of it. The source
+# hanging indent is about 1 em (closure ticket 04).
+ENTRY_START_EM = 0.3
+HANGING_INDENT_EM = 0.5
 
 # Base58 alphabet (Bitcoin style, without numbers 0, O, I, l)
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -205,6 +213,8 @@ class ParagraphFinder:
                 self.process_page(page)
                 pbar.advance()
 
+            self._split_reference_entries(document)
+
             total_paragraph_count = 0
             for page in document.page:
                 total_paragraph_count += len(page.pdf_paragraph)
@@ -213,6 +223,114 @@ class ParagraphFinder:
 
             if self.check_cid_paragraph(document):
                 raise ExtractTextError("The document contains too many CID paragraphs.")
+
+    def _split_reference_entries(self, document: Document) -> None:
+        """Make each entry of the reference list a paragraph of its own and
+        give it the source's hanging indent (closure ticket 04, R2).
+
+        The paragraphs follow the layout boxes, and one box can cover several
+        entries; the lines of a paragraph tell the entries apart: an entry's
+        first line starts at the left, its other lines about 1 em right.
+        """
+        section = self.translation_config.reference_section
+        if section is None:
+            return
+        located = [
+            (page, paragraph)
+            for page in document.page
+            for paragraph in page.pdf_paragraph
+        ]
+        indexes = section(
+            [
+                (page.page_number, p.layout_label, (p.unicode or "").strip())
+                for page, p in located
+            ]
+        )
+        paragraphs = [located[i][1] for i in indexes]
+        # A one-line paragraph shows no indent of its own: it gets the list's.
+        indents = []
+        for paragraph in paragraphs:
+            if shape := self._line_offsets(paragraph):
+                offsets, em = shape
+                indents += [o / em for o in offsets if o >= HANGING_INDENT_EM * em]
+        list_indent = statistics.median(indents) if indents else None
+        entries = {
+            id(paragraph): self._reference_entries(paragraph, list_indent)
+            for paragraph in paragraphs
+        }
+        for page in document.page:
+            if any(len(entries.get(id(p), ())) > 1 for p in page.pdf_paragraph):
+                page.pdf_paragraph = [
+                    entry
+                    for paragraph in page.pdf_paragraph
+                    for entry in entries.get(id(paragraph), [paragraph])
+                ]
+                self._set_paragraph_render_order(page)
+
+    @staticmethod
+    def _line_offsets(paragraph: PdfParagraph) -> tuple[list[float], float] | None:
+        """How far each line of ``paragraph`` starts right of its leftmost
+        line, and its median font size; None unless it is made of lines."""
+        lines = [c.pdf_line for c in paragraph.pdf_paragraph_composition]
+        if not lines or any(line is None for line in lines):
+            return None
+        sizes = [
+            char.pdf_style.font_size
+            for line in lines
+            for char in line.pdf_character
+            if char.pdf_style and char.pdf_style.font_size
+        ]
+        if not sizes:
+            return None
+        left = min(line.box.x for line in lines)
+        return [line.box.x - left for line in lines], statistics.median(sizes)
+
+    def _reference_entries(
+        self, paragraph: PdfParagraph, list_indent: float | None
+    ) -> list[PdfParagraph]:
+        """``paragraph`` cut before each line that starts an entry; each part
+        that starts an entry gets the hanging indent of the lines after it.
+
+        ``list_indent`` is the list's hanging indent in ems, for a one-line
+        paragraph. A paragraph without indented lines is left as it is.
+        """
+        shape = self._line_offsets(paragraph)
+        if shape is None:
+            return [paragraph]
+        offsets, em = shape
+        if len(offsets) == 1:
+            if list_indent is not None:
+                paragraph.hanging_indent = list_indent * em
+            return [paragraph]
+        indents = [o for o in offsets if o >= HANGING_INDENT_EM * em]
+        if not indents:
+            return [paragraph]
+        hanging_indent = statistics.median(indents)
+        cuts = [0]
+        cuts += [j for j, o in enumerate(offsets) if j and o < ENTRY_START_EM * em]
+        cuts.append(len(offsets))
+        if len(cuts) == 2:
+            if offsets[0] < ENTRY_START_EM * em:
+                paragraph.hanging_indent = hanging_indent
+            return [paragraph]
+        entries = []
+        for start, stop in zip(cuts, cuts[1:], strict=False):
+            entry = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=paragraph.pdf_paragraph_composition[
+                    start:stop
+                ],
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+                hanging_indent=(
+                    hanging_indent if offsets[start] < ENTRY_START_EM * em else None
+                ),
+            )
+            self.update_paragraph_data(entry, update_unicode=True)
+            entries.append(entry)
+        return entries
 
     def check_cid_paragraph(self, doc: Document):
         cid_para_count = 0
@@ -429,7 +547,11 @@ class ParagraphFinder:
         return {id(page.pdf_character[i]) for i in detector(page)}
 
     def _group_characters_into_paragraphs(
-        self, page: Page, layout_index, layout_map, algorithm_chars: set[int] = frozenset()
+        self,
+        page: Page,
+        layout_index,
+        layout_map,
+        algorithm_chars: set[int] = frozenset(),
     ) -> list[PdfParagraph]:
         paragraphs: list[PdfParagraph] = []
         if page.pdf_paragraph:
