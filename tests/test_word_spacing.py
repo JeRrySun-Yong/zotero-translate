@@ -91,3 +91,59 @@ def test_the_appendix_h1_paragraph_on_autoref_page_7_is_translated(fake_model, s
     assert final["kept_source_paragraphs"] == 0
     assert service.report(task_id)["review"]["drafts_used"] == []
     assert "附录H.1" in pdf_text(service.download(task_id, "mono"))
+
+
+# AutoRef page 22, figure 8: the instruction is set in a font whose glyph
+# boxes overlap (letters -1.18 pt apart, words 0.52 pt), so only a threshold
+# moved down by the font's letter gap finds its word spaces.
+INSTRUCTION = "The Siamese cat in Image 1 is on the left"
+INSTRUCTION_ZH = (
+    "“图像 1 中的暹罗猫在左侧，图像 2 中的紫色贵宾犬在中间，"
+    "图像 3 中的女人在右侧，图像 4 中拉小提琴的女人在前景。"
+    "它们聚在一间光线昏暗的图书馆里，像是要去听一场神秘的独奏会。”"
+)
+
+
+def instruction_in_chinese(body: dict) -> str:
+    """A draft like the real model writes: the quoted instruction in Chinese."""
+    answer = []
+    for item in batch_items(body["messages"][-1]["content"]) or []:
+        text = item["input"]
+        if "Input: four references" in STYLE_TAG.sub("", text):
+            text = re.sub(r"“.*”", INSTRUCTION_ZH, text, flags=re.S)
+        answer.append({"id": item["id"], "output": PSEUDO_PREFIX + text})
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def test_the_instruction_in_a_font_with_overlapping_glyphs_is_translated(
+    fake_model, start_service
+):
+    fake_model.respond("translate_batch", instruction_in_chinese)
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / "autoref-p22.pdf")
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    # The model sees the words apart, not one glued literal per clause.
+    inputs = batch_inputs(fake_model)
+    assert any(INSTRUCTION in text for text in inputs)
+    assert not any(INSTRUCTION.replace(" ", "") in text for text in inputs)
+    # The Chinese instruction passes the literal check: nothing keeps its source.
+    assert final["kept_source_paragraphs"] == 0
+    assert "暹罗猫在左侧" in pdf_text(service.download(task_id, "mono"))
+
+
+def test_a_reused_citation_keeps_the_space_at_its_line_break(fake_model, start_service):
+    # MaLiang page 4: "[Gupta and" ends a line and "Kembhavi, 2023]" starts the
+    # next; the citation is a styled span the pseudo-translation keeps, so the
+    # mono PDF reuses its source glyphs.
+    service = start_service(fake_model)
+
+    task_id = service.submit(FIXTURES / "maliang-p4.pdf")
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    mono = page_text(service.download(task_id, "mono"), 1)
+    assert "Kembhavi" in mono
+    assert "andKembhavi" not in mono, mono[mono.find("Kembhavi") - 40 : mono.find("Kembhavi") + 20]
