@@ -86,6 +86,10 @@ _MAX_PLAIN_HEADER_ROWS = 2
 _WORD_GAP = 0.2  # a gap wider than this x the glyph's size is a word gap
 _ROW = 0.3  # glyphs whose centres are this x the pitch (or median size) apart or less share a row
 _COLUMN_GAP = 2.5  # a gap wider than this x the numbers' size ends a row: another column
+# An x range at least this x the numbers' size wide that no glyph of the
+# numbered rows crosses, with text right of it at the same height, is the
+# gap to another column (``_other_column``).
+_MIN_COLUMN_GAP = 1.0
 # A glyph belongs to the numbered line whose number is nearest by height
 # when it is at most _NEAR x the pitch from it; a sub- or superscript
 # (smaller than _SCRIPT x the median size) when at most _NEAR_SCRIPT x.
@@ -443,7 +447,9 @@ def _fragment(
     """Step 2, band to fragment: column bounds, header rows and lines; None without a keyword."""
     free = [i for i, g in enumerate(glyphs) if i not in used and not g.blank]
     gap = _COLUMN_GAP * band.size
-    right = _right_edge(glyphs, band, free, gap)
+    right, column = _right_edge(glyphs, band, free, gap)
+    if column is not None:  # the header rows stay in the algorithm's column too
+        free = [i for i in free if glyphs[i].x0 < column]
     header_rows, title = _header_rows(glyphs, band, free, gap)
     header_glyphs = {i for row in header_rows for i in row}
     left, top = band.left, band.top
@@ -474,20 +480,26 @@ def _fragment(
     return title, AlgorithmFragment(page_number, box, lines, members)
 
 
-def _right_edge(glyphs: list[Glyph], band: _Band, free: list[int], gap: float) -> float:
-    """How far right the numbered rows run.
+def _right_edge(
+    glyphs: list[Glyph], band: _Band, free: list[int], gap: float
+) -> tuple[float, float | None]:
+    """How far right the numbered rows run, and the middle of the gap to another column beside them.
 
     As far as the numbered rows run without crossing a column gap (the gap
     after the line number is indentation, not a column gap), and the comment
     rows (``▷``) and headings between them. A numbered line runs on past
     that edge while its glyphs continue without a column gap, sub- and
     superscripts included (AutoDesign p7 line 4 ends in H'_{t+1} beyond the
-    other lines).
+    other lines). Nothing reaches into another column (``_other_column``).
     """
     number_glyphs = {i for n in band.numbers for i in n.glyphs}
     numbers_right = max(n.x1 for n in band.numbers)
     inside = [i for i in free if band.bottom <= glyphs[i].yc <= band.top and glyphs[i].xc >= band.left]
     rows = _rows(glyphs, inside, _ROW * band.pitch)
+    column = _other_column(glyphs, rows, number_glyphs, numbers_right, band.size)
+    if column is not None:
+        inside = [i for i in inside if glyphs[i].x0 < column]
+        rows = [kept for kept in ([i for i in row if glyphs[i].x0 < column] for row in rows) if kept]
     body_starts = [
         glyphs[row[k]].x0
         for row in rows
@@ -512,7 +524,44 @@ def _right_edge(glyphs: list[Glyph], band: _Band, free: list[int], gap: float) -
         first = glyphs[line_glyphs[0]]
         if first.x0 <= deepest:
             right = max(right, _reach(glyphs, line_glyphs, first.x0, gap))
-    return right
+    if column is not None and inside:
+        # Beside another column, the numbered rows' whole column is the
+        # algorithm's: comments after a wide gap ("// Encode x0") included.
+        right = max(right, max(glyphs[i].x1 for i in inside))
+    return right, column
+
+
+def _other_column(
+    glyphs: list[Glyph], rows: list[list[int]], number_glyphs: set[int], numbers_right: float, size: float
+) -> float | None:
+    """The middle of the gap to another column beside the numbered rows, or None.
+
+    The column gap is the first x range, right of where the most indented
+    numbered line starts, at least ``_MIN_COLUMN_GAP`` x ``size`` wide, that
+    no glyph of the rows crosses, with text right of it at the same height.
+    A range with a ``▷`` comment right of it in any row is not a column gap.
+    """
+    starts = []
+    for row in rows:
+        body = [i for i in row if i not in number_glyphs and glyphs[i].x0 >= numbers_right - 0.5]
+        numbered = any(i in number_glyphs for i in row)
+        if numbered and body and glyphs[body[0]].text != COMMENT_MARK:
+            starts.append(glyphs[body[0]].x0)
+    covered = max(starts, default=numbers_right)
+    for i in sorted((i for row in rows for i in row), key=lambda i: glyphs[i].x0):
+        g = glyphs[i]
+        if g.x1 <= covered:
+            continue
+        if g.x0 - covered >= _MIN_COLUMN_GAP * size:
+            right_of = [
+                glyphs[next(j for j in row if glyphs[j].x0 >= g.x0)]
+                for row in rows
+                if glyphs[row[-1]].x0 >= g.x0
+            ]
+            if all(first.text != COMMENT_MARK for first in right_of):
+                return 0.5 * (covered + g.x0)  # the middle of the column gap
+        covered = max(covered, g.x1)
+    return None
 
 
 def _header_rows(
