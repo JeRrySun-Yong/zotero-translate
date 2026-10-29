@@ -13,10 +13,9 @@ import re
 import pymupdf
 
 from tests.conftest import FIXTURES
-from tests.fake_model import PSEUDO_PREFIX
-from tests.fake_model import batch_items
+from tests.fake_model import PSEUDO_PREFIX, batch_items
 
-STYLE_SPAN = re.compile(r"<style[^>]*>.*?</style>", re.S)
+STYLE_SPAN = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL)
 PLACEHOLDER = re.compile(r"\{v\d+\}")
 CJK = re.compile(r"[一-鿿]")
 ABSTRACT_START = "Recent image generation models can take multiple reference images"
