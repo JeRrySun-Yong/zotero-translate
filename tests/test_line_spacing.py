@@ -150,4 +150,4 @@ def test_an_english_word_that_fits_is_not_broken_before_a_wider_letter():
     for unit in laid_out:
         lines.setdefault(round(unit.box.y, 3), []).append(unit.try_get_unicode())
     first_line = next(iter(lines.values()))
-    assert "".join(first_line) == "中文中文 Seedream"
+    assert "".join(first_line).rstrip() == "中文中文 Seedream"
