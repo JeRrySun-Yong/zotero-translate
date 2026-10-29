@@ -7,6 +7,7 @@ subprocesses, and an interrupted test run (SIGINT, SIGTERM) still stops its
 services.
 """
 
+import errno
 import json
 import os
 import signal
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +48,23 @@ def test_holds_a_running_task(start_service):
         time.sleep(600)
 """
 
+# A process group like the service's: the leader dies at once on SIGTERM; its
+# member, like a task subprocess on a heavily loaded machine, takes 2 seconds
+# to exit.
+SLOW_TO_EXIT = """
+import signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: (time.sleep(2), sys.exit(0)))
+print("ready", flush=True)
+time.sleep(600)
+"""
+LEADER = """
+import subprocess, sys
+member = subprocess.Popen([sys.executable, "-c", sys.argv[1]], stdout=subprocess.PIPE, text=True)
+member.stdout.readline()
+print(member.pid, flush=True)
+member.wait()
+"""
+
 
 def _task_processes(task_dir: Path | str) -> list[int]:
     """The running task subprocesses of a task directory."""
@@ -73,6 +92,36 @@ def test_stopping_the_service_also_ends_its_running_task_subprocess(tmp_path):
             assert [pid for pid in workers if _running(pid)] == []
         finally:
             stop_service(service)  # again, should the test end before it did
+
+
+def test_stopping_the_service_waits_for_a_task_subprocess_that_is_still_exiting(monkeypatch):
+    # macOS answers killpg(group, 0) with EPERM, as for a group of zombies, as
+    # soon as the group's last live process has begun to exit, while ps still
+    # shows it (state "?E"); under heavy load a task subprocess stays so long
+    # enough for a test to see it running (closure ticket 09, follow-up). The
+    # answer is simulated here for the member's 2-second exit.
+    leader = subprocess.Popen(
+        [sys.executable, "-c", LEADER, SLOW_TO_EXIT], stdout=subprocess.PIPE, text=True, start_new_session=True
+    )
+    member = int(leader.stdout.readline())
+    killpg = os.killpg
+
+    def killpg_as_while_exiting(group: int, sig: int) -> None:
+        if group == leader.pid and sig == 0:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        killpg(group, sig)
+
+    monkeypatch.setattr(os, "killpg", killpg_as_while_exiting)
+    try:
+        stop_service(SimpleNamespace(process=leader))
+
+        assert leader.poll() is not None
+        assert not _running(member)
+    finally:
+        for pid in (leader.pid, member):
+            if _running(pid):
+                os.kill(pid, signal.SIGKILL)
+        leader.stdout.close()
 
 
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
