@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+import statistics
 import unicodedata
 from typing import Literal
 
@@ -228,7 +229,7 @@ WORD_SPACE_EM = 0.15
 WORD_SPACE_MIN_PT = 1.0
 
 
-def word_space_threshold(char: PdfCharacter) -> float:
+def word_space_threshold(char: PdfCharacter, letter_gaps: dict | None = None) -> float:
     """The smallest gap after ``char`` that is a word space (closure ticket 02).
 
     The source PDFs often have no space glyphs: the space is inferred from the
@@ -236,9 +237,48 @@ def word_space_threshold(char: PdfCharacter) -> float:
     of the line as the threshold, so word gaps that differ only by rounding
     (1.84988 and 1.8499) lost their spaces, and a line with one wider sentence
     gap lost every ordinary word space (``XiaofuChen``, ``AppendixH.1``).
-    Letter gaps inside a word stay well below 0.15 em.
+    Letter gaps inside a word stay well below 0.15 em. ``letter_gaps``
+    (from ``letter_gaps``) moves the threshold down for a font whose glyph
+    boxes overlap.
     """
-    return max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * _font_size(char))
+    base = max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * _font_size(char))
+    return base + _letter_gap(char, letter_gaps)
+
+
+def letter_gaps(chars: list) -> dict:
+    """The usual gap between two letters of the same font in ``chars``, per font, when negative.
+
+    Some fonts have glyph boxes wider than their advance, so two letters of a
+    word overlap by about 1 pt and a word gap measures only about 0.5 pt
+    (AutoRef page 22, the instruction in figure 8). The median gap of a font
+    is its letter gap; it is 0 for ordinary fonts.
+    """
+    gaps: dict = {}
+    for a, b in zip(chars, chars[1:]):
+        if not (isinstance(a, PdfCharacter) and isinstance(b, PdfCharacter)):
+            continue
+        if not (a.pdf_style and b.pdf_style) or a.pdf_style.font_id != b.pdf_style.font_id:
+            continue
+        if a.char_unicode.isspace() or b.char_unicode.isspace():
+            continue
+        if Layout.is_newline(a, b):
+            continue
+        gaps.setdefault(a.pdf_style.font_id, []).append(b.box.x - a.box.x2)
+    return {
+        font: min(0.0, statistics.median(values))
+        for font, values in gaps.items()
+        if len(values) >= LETTER_GAP_MIN_PAIRS
+    }
+
+
+# Fewer letter pairs than this say nothing about a font's letter gap.
+LETTER_GAP_MIN_PAIRS = 8
+
+
+def _letter_gap(char: PdfCharacter, letter_gaps: dict | None) -> float:
+    if not letter_gaps or not char.pdf_style:
+        return 0.0
+    return letter_gaps.get(char.pdf_style.font_id, 0.0)
 
 
 # The width of an inferred space: the source gap, at most half an em; at a
@@ -247,14 +287,17 @@ WORD_SPACE_MAX_EM = 0.5
 LINE_BREAK_SPACE_EM = 0.25
 
 
-def word_space_width(char: PdfCharacter, distance: float) -> float:
+def word_space_width(
+    char: PdfCharacter, distance: float, letter_gaps: dict | None = None
+) -> float:
     """The width of the dummy space after ``char``, ``distance`` before the next character.
 
     A space narrower than the source gap makes the reused source glyphs of an
     untranslated span (an author line) print without a visible word space.
     """
-    if distance >= word_space_threshold(char):
-        return min(distance, WORD_SPACE_MAX_EM * _font_size(char))
+    if distance >= word_space_threshold(char, letter_gaps):
+        gap = distance - _letter_gap(char, letter_gaps)
+        return min(gap, WORD_SPACE_MAX_EM * _font_size(char))
     return LINE_BREAK_SPACE_EM * _font_size(char)
 
 
@@ -313,6 +356,7 @@ def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
         str: 处理后的 Unicode 字符串
     """
     # 构建 unicode 字符串，根据间距插入空格（阈值见 word_space_threshold）
+    gaps = letter_gaps(chars)
     unicode_chars = []
     for i in range(len(chars)):
         # 如果不是字符对象，直接添加，一般来说这个时候 chars[i] 是字符串
@@ -336,7 +380,7 @@ def get_char_unicode_string(chars: list[PdfCharacter | str]) -> str:
         # 如果两个字符都是 PdfCharacter，检查间距
         if i < len(chars) - 1 and isinstance(chars[i + 1], PdfCharacter):
             distance = chars[i + 1].box.x - chars[i].box.x2
-            if distance >= word_space_threshold(chars[i]) or Layout.is_newline(
+            if distance >= word_space_threshold(chars[i], gaps) or Layout.is_newline(
                 chars[i],
                 chars[i + 1],
             ):  # 词间距或换行
@@ -556,20 +600,21 @@ def _add_space_dummy_chars_to_list(chars: list[PdfCharacter]) -> None:
         return
 
     # 在需要的地方插入空格字符（阈值见 word_space_threshold）
+    gaps = letter_gaps(chars)
     i = 0
     while i < len(chars) - 1:
         curr_char = chars[i]
         next_char = chars[i + 1]
 
         distance = next_char.box.x - curr_char.box.x2
-        if distance >= word_space_threshold(curr_char) or Layout.is_newline(
+        if distance >= word_space_threshold(curr_char, gaps) or Layout.is_newline(
             curr_char, next_char
         ):
             # 创建一个 dummy 字符作为空格
             space_box = Box(
                 x=curr_char.box.x2,
                 y=curr_char.box.y,
-                x2=curr_char.box.x2 + word_space_width(curr_char, distance),
+                x2=curr_char.box.x2 + word_space_width(curr_char, distance, gaps),
                 y2=curr_char.box.y2,
             )
 
