@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from dataclasses import field
 
 from zotero_translate.algorithms import COMMENT_MARK
-from zotero_translate.algorithms import KEYWORD_PHRASES
+from zotero_translate.algorithms import PROMPT_KEYWORDS
 from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.algorithms import AlgorithmLine
 from zotero_translate.algorithms import AlgorithmUnit
@@ -57,7 +57,7 @@ ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudoc
 _KEEP_RULES = f"""\
 ## Keep exactly as in the source
 - Placeholders {{v1}}, {{v2}}, ...: each item's output has exactly the placeholders of its own source, each once, never one from another item. "keep" shows what each stands for: keywords, identifiers, function calls with their arguments, formulas, the algorithm number. Write the placeholder, never its content.
-- Keywords stay in English, never translated: {", ".join(KEYWORD_PHRASES)}. Most of them are inside placeholders; one written as plain text stays as it is.
+- Keywords stay in English, never translated: {", ".join(PROMPT_KEYWORDS)}. Most of them are inside placeholders; one written as plain text stays as it is.
 - Function calls: a function name and everything inside its parentheses are identifiers and stay in English, even words such as FILLBEZIERSHAPE(C, hair silhouette, brown gradient).
 - Numbers, variable names, code identifiers, model names: character for character.
 - Terminology: follow the glossary. A target term identical to its source term is a key concept of this paper: keep it in English exactly as written. No explanations or glosses in parentheses.

@@ -82,15 +82,19 @@ _NUMBER = re.compile(r"^(\d{1,3})(:$|\.(?!\d)|$)")
 _KEYWORD = re.compile(r"\b(for|return|Require)\b|←")
 _TITLE = re.compile(r"^(Algorithm\s*\d+|Procedure\b)")
 _HEADER = re.compile(r"^(Algorithm\s*\d+|Procedure\b|Require\b|Ensure\b|Input\b|Output\b)")
-# The algorithm keywords, as the translation prompt names them (they stay in
-# English). Their words, set in bold, keep their source text (``KEYWORDS``).
-KEYWORD_PHRASES = (
-    "for", "for each", "for all", "forall", "while", "do", "if", "then", "else", "else if",
-    "elseif", "elsif", "end", "end for", "end if", "end while", "repeat", "until", "return",
-    "to", "downto", "in", "and", "or", "not", "break", "continue", "loop", "parallel",
+# The keywords the translation prompt names: they stay in English, even as
+# plain text. Only these go into the prompt.
+PROMPT_KEYWORDS = (
+    "for", "for each", "for all", "while", "do", "if", "then", "else", "else if", "end",
+    "end for", "end if", "end while", "repeat", "until", "return", "to", "in",
     "Require", "Ensure", "Input", "Output", "function", "procedure",
 )
-KEYWORDS = frozenset(word.lower() for phrase in KEYWORD_PHRASES for word in phrase.split())
+# Words that keep their source text when set in bold: the prompt keywords'
+# words and words that are keywords only in bold ("and" in plain text is
+# natural language to translate).
+KEYWORDS = frozenset(word.lower() for phrase in PROMPT_KEYWORDS for word in phrase.split()) | {
+    "forall", "elseif", "elsif", "downto", "and", "or", "not", "break", "continue", "loop", "parallel",
+}
 _LABEL = re.compile(r"^(Algorithm\d+[:.]?|Procedure|Require:|Ensure:|Input:|Output:)")
 _MATH_FONT = re.compile(
     r"(?:^|\+)(?:CM[A-Z]{1,5}\d|MSBM|MSAM|EU[FRSX]M|RSFS|STIX\w*Math|LatinModernMath|CambriaMath|Symbol"
