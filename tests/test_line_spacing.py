@@ -63,12 +63,17 @@ def abstract_in_chinese(body: dict) -> str:
     return json.dumps(answer, ensure_ascii=False)
 
 
-def abstract_cjk_sizes(source: bytes, mono: bytes) -> collections.Counter:
-    """Font sizes of the CJK characters inside the source abstract box on page 1
-    (the scorecard's "abstract" rule: the largest source text block)."""
+def abstract_box(source: bytes) -> pymupdf.Rect:
+    """The abstract box on page 1 (the scorecard's "abstract" rule: the largest
+    source text block)."""
     with pymupdf.open(stream=source, filetype="pdf") as src:
         blocks = [b for b in src[0].get_text("blocks") if b[6] == 0]
-        box = pymupdf.Rect(max(blocks, key=lambda b: len(b[4]))[:4])
+        return pymupdf.Rect(max(blocks, key=lambda b: len(b[4]))[:4])
+
+
+def abstract_cjk_sizes(source: bytes, mono: bytes) -> collections.Counter:
+    """Font sizes of the CJK characters inside the source abstract box on page 1."""
+    box = abstract_box(source)
     sizes = collections.Counter()
     with pymupdf.open(stream=mono, filetype="pdf") as doc:
         page = doc[0].get_text("dict", clip=box)
