@@ -19,6 +19,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 import pymupdf
+import pytest
 from babeldoc.format.pdf.document_il import Box
 from babeldoc.format.pdf.document_il import Document
 from babeldoc.format.pdf.document_il import Page
@@ -29,6 +30,7 @@ from babeldoc.format.pdf.document_il import PdfParagraphComposition
 from babeldoc.format.pdf.document_il import PdfStyle
 from babeldoc.format.pdf.document_il import VisualBbox
 from babeldoc.format.pdf.document_il.midend.paragraph_finder import ParagraphFinder
+from babeldoc.format.pdf.document_il.midend.typesetting import MIN_SCALE
 
 from tests.conftest import FIXTURES
 from tests.test_line_spacing import bare_typesetting
@@ -112,30 +114,53 @@ def test_the_entries_and_urls_of_autoref_page_12(fake_model, start_service):
     check_entries(source, mono, name)
 
 
-def test_a_run_longer_than_the_line_breaks_at_the_right_edge():
-    # A URL has no break point: "/", "." and ":" do not break an English line
-    # in the engine, only spaces do. "中文 " ends at 23 and the URL is 80
-    # letters of 5 pt in a 100 pt line.
-    url = "https://proceedings.neurips.cc/paper/2025/file/40168e00bf87869c5d153e934d8a3602"
-    widths = {"中": 10, "文": 10, " ": 3} | dict.fromkeys(url, 5)
-    units = char_units("中文 " + url, widths)
-
-    laid_out, fits = bare_typesetting()._layout_typesetting_units(
-        units,
-        Box(x=0, y=0, x2=100, y2=1000),
-        1.0,
-        1.25,
-        SimpleNamespace(first_line_indent=False, hanging_indent=None),
+def set_paragraph(units, width: float) -> tuple[float, list[str]]:
+    """The scale and the lines of a paragraph set in a box ``width`` wide and
+    1000 pt high (the typesetter's scale search, as for a real paragraph)."""
+    paragraph = SimpleNamespace(
+        box=Box(x=0, y=0, x2=width, y2=1000),
+        debug_id="p",
+        first_line_indent=False,
+        hanging_indent=None,
+        scale=None,
+        pdf_paragraph_composition=[],
     )
-
-    assert fits
+    page = SimpleNamespace(pdf_curve=[], pdf_form=[])
+    scale, laid_out = bare_typesetting()._find_optimal_scale_and_layout(
+        paragraph, page, units, apply_layout=True
+    )
     lines = {}
     for unit in laid_out:
         lines.setdefault(round(unit.box.y, 3), []).append(unit.try_get_unicode())
-    texts = ["".join(line) for line in lines.values()]
+    return scale, ["".join(line) for line in lines.values()]
+
+
+def test_a_run_longer_than_the_line_at_the_scale_floor_breaks_at_the_right_edge():
+    # A URL has no break point: "/", "." and ":" do not break an English line
+    # in the engine, only spaces do. The URL is 80 letters of 5 pt: even at
+    # the scale floor (2.5 pt a letter, 200 pt) it is longer than the 101 pt
+    # line, so it breaks there at the right edge. "中文 " ends at 11.5.
+    url = "https://proceedings.neurips.cc/paper/2025/file/40168e00bf87869c5d153e934d8a3602"
+    widths = {"中": 10, "文": 10, " ": 3} | dict.fromkeys(url, 5)
+
+    scale, lines = set_paragraph(char_units("中文 " + url, widths), 101)
+
+    assert scale == pytest.approx(MIN_SCALE)
     # The URL starts after "中文 " and each line is filled to the right edge;
     # it was one letter per line.
-    assert texts == ["中文 " + url[:15], url[15:35], url[35:55], url[55:75], url[75:]]
+    assert lines == ["中文 " + url[:35], url[35:75], url[75:]]
+
+
+def test_a_word_longer_than_a_narrow_box_is_shrunk_whole():
+    # A figure label left in English ("Idea2Img" on AutoRef page 8) in a box
+    # narrower than the word: the paragraph is set smaller and the word stays
+    # whole, as before ticket 04 (it was set at 1.0 as "Idea2I" / "mg").
+    widths = dict.fromkeys("Idea2Img", 5)
+
+    scale, lines = set_paragraph(char_units("Idea2Img", widths), 31)
+
+    assert scale < 1
+    assert lines == ["Idea2Img"]
 
 
 def source_line(rows: list[tuple[str, float, float]]) -> PdfParagraphComposition:
