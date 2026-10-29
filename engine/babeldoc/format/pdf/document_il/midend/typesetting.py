@@ -28,6 +28,16 @@ from babeldoc.format.pdf.translation_config import WatermarkOutputMode
 
 logger = logging.getLogger(__name__)
 
+# Line advance of a CJK paragraph, as a multiple of its font size (upstream 1.5;
+# closure ticket 03).
+CJK_LINE_SKIP = 1.25
+# Smallest font scale the layout search tries before it sets the paragraph at
+# this scale past its box (upstream 0.1; closure ticket 03).
+MIN_SCALE = 0.5
+# Tolerance of the scale comparisons: the search steps by 0.05 and 0.1 in
+# floats and must not skip MIN_SCALE (or 0.1) itself.
+SCALE_EPSILON = 1e-9
+
 LINE_BREAK_REGEX = regex.compile(
     r"^["
     r"a-z"
@@ -965,44 +975,43 @@ class Typesetting:
 
         box = paragraph.box
         scale = initial_scale
-        line_skip = 1.50 if self.is_cjk else 1.3
-        min_scale = 0.1
+        # closure 03 (F1): a CJK line skip of 1.5 set the AutoRef abstract
+        # (source 10.1 pt on an 11.0 pt pitch) at 9.0 pt on a 13.5 pt pitch; the
+        # font shrank because the lines were far apart. 1.25 keeps the
+        # translation near the source size (1.3 set the AutoDesign and
+        # MaLiang abstracts at 9.0 pt).
+        line_skip = CJK_LINE_SKIP if self.is_cjk else 1.3
+        # closure 03: the upstream floor was 0.1, but the small table headers
+        # (T1, T4) never went below 0.5: "调用次数" at 3.0 pt is 0.5 x 6.05 pt.
+        # They are small because their cells are narrow (ticket 06). Below
+        # MIN_SCALE the paragraph is set at MIN_SCALE and may run past its box
+        # (see the end of this method).
+        min_scale = MIN_SCALE
         expand_space_flag = 0
         final_typeset_units = None
 
-        while scale >= min_scale:
-            try:
-                # 尝试布局排版单元
-                typeset_units, all_units_fit = self._layout_typesetting_units(
-                    typesetting_units,
-                    box,
-                    scale,
-                    line_skip,
-                    paragraph,
-                    use_english_line_break,
-                )
+        while scale >= min_scale - SCALE_EPSILON:
+            # 尝试布局排版单元（布局出错按放不下处理）
+            typeset_units, all_units_fit = self._try_layout(
+                typesetting_units,
+                box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+            )
 
-                # 如果所有单元都放得下
-                if all_units_fit:
+            # 如果所有单元都放得下
+            if all_units_fit:
+                try:
                     if apply_layout:
                         # 实际应用排版结果
-                        paragraph.scale = scale
-                        paragraph.pdf_paragraph_composition = []
-                        for unit in typeset_units:
-                            chars, curves, forms = unit.render()
-                            for char in chars:
-                                paragraph.pdf_paragraph_composition.append(
-                                    PdfParagraphComposition(pdf_character=char),
-                                )
-                            for curve in curves:
-                                page.pdf_curve.append(curve)
-                            for form in forms:
-                                page.pdf_form.append(form)
+                        self._apply_typeset_units(paragraph, page, typeset_units, scale)
                         final_typeset_units = typeset_units
                     return scale, final_typeset_units
-            except Exception:
-                # 如果布局检查出错，继续尝试下一个缩放因子
-                pass
+                except Exception:
+                    # 如果写入排版结果出错，继续尝试下一个缩放因子
+                    pass
 
             # 添加与原 retypeset 一致的逻辑检查
             if not hasattr(paragraph, "debug_id") or not paragraph.debug_id:
@@ -1072,8 +1081,84 @@ class Typesetting:
                 apply_layout=apply_layout,
             )
 
+        # Nothing fits at or above min_scale (closure 03): set the paragraph at
+        # min_scale and let it run past its box rather than shrink it further.
+        # Only when no unit can be placed at all (a unit wider than the box)
+        # does the scale go below min_scale, down to the old floor of 0.1, so
+        # the paragraph never comes out empty.
+        if apply_layout:
+            fallback_scale = min_scale
+            while fallback_scale >= 0.1 - SCALE_EPSILON:
+                typeset_units, _ = self._try_layout(
+                    typesetting_units,
+                    box,
+                    fallback_scale,
+                    line_skip,
+                    paragraph,
+                    use_english_line_break,
+                )
+                if typeset_units:
+                    self._apply_typeset_units(
+                        paragraph, page, typeset_units, fallback_scale
+                    )
+                    overflow = box.y - min(unit.box.y for unit in typeset_units)
+                    logger.warning(
+                        "paragraph %s does not fit its box at the scale floor: "
+                        "set at scale %.2f, %.1f pt past its box",
+                        getattr(paragraph, "debug_id", None),
+                        fallback_scale,
+                        max(overflow, 0.0),
+                    )
+                    return fallback_scale, typeset_units
+                fallback_scale -= 0.1
+
         # 最后返回最小缩放因子
         return min_scale, final_typeset_units
+
+    def _try_layout(
+        self,
+        typesetting_units: list[TypesettingUnit],
+        box: Box,
+        scale: float,
+        line_skip: float,
+        paragraph: il_version_1.PdfParagraph,
+        use_english_line_break: bool,
+    ) -> tuple[list[TypesettingUnit], bool]:
+        """`_layout_typesetting_units`, with a layout error read as "nothing
+        placed, does not fit" (the scale search then tries the next scale)."""
+        try:
+            return self._layout_typesetting_units(
+                typesetting_units,
+                box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+            )
+        except Exception:
+            return [], False
+
+    @staticmethod
+    def _apply_typeset_units(
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        typeset_units: list[TypesettingUnit],
+        scale: float,
+    ) -> None:
+        """Write laid-out units into the paragraph (characters) and the page
+        (curves, forms)."""
+        paragraph.scale = scale
+        paragraph.pdf_paragraph_composition = []
+        for unit in typeset_units:
+            chars, curves, forms = unit.render()
+            for char in chars:
+                paragraph.pdf_paragraph_composition.append(
+                    PdfParagraphComposition(pdf_character=char),
+                )
+            for curve in curves:
+                page.pdf_curve.append(curve)
+            for form in forms:
+                page.pdf_form.append(form)
 
     def _get_optimal_scale(
         self,
@@ -1455,8 +1540,12 @@ class Typesetting:
             if not unit.is_hung_punctuation and (
                 (current_x + unit_width > box.x2)
                 or (
+                    # The width up to the next break point already holds this
+                    # unit when it cannot break (it is 0 when it can); adding
+                    # unit_width again broke a fitting word before a wider
+                    # letter ("Seedrea" / "m", closure ticket 03).
                     use_english_line_break
-                    and current_x + unit_width + width_before_next_break_point > box.x2
+                    and current_x + width_before_next_break_point > box.x2
                 )
                 or (
                     unit.is_cannot_appear_in_line_end_punctuation
