@@ -120,21 +120,18 @@ def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
 
     cache_key = _set_coreml_cache_key(static_model)
     model_bytes = static_model.SerializeToString()
-    uncached = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    # Any failing step falls back to the session without a cache below; the
+    # warning names the step that failed.
+    step = f"create the cache directory {COREML_CACHE_DIR} or its lock file"
     try:
         COREML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        lock = (COREML_CACHE_DIR / "lock").open("a")
-    except OSError:
-        logger.warning(
-            "CoreML compile cache directory %s or its lock file cannot be "
-            "created; compiling in $TMPDIR for this process.",
-            COREML_CACHE_DIR,
-            exc_info=True,
-        )
-        return onnxruntime.InferenceSession(model_bytes, providers=uncached)
-    with lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
+        with (COREML_CACHE_DIR / "lock").open("a") as lock:
+            step = f"lock {COREML_CACHE_DIR / 'lock'}"
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            step = (
+                f"use the cache entry {COREML_CACHE_DIR / cache_key} "
+                "(deleting the entry rebuilds it)"
+            )
             return onnxruntime.InferenceSession(
                 model_bytes,
                 providers=[
@@ -145,14 +142,15 @@ def _coreml_session(static_model) -> "onnxruntime.InferenceSession":
                     "CPUExecutionProvider",
                 ],
             )
-        except Exception:
-            logger.warning(
-                "CoreML compile cache entry %s cannot be used; compiling in "
-                "$TMPDIR for this process. Deleting the entry rebuilds it.",
-                COREML_CACHE_DIR / cache_key,
-                exc_info=True,
-            )
-    return onnxruntime.InferenceSession(model_bytes, providers=uncached)
+    except Exception:
+        logger.warning(
+            "CoreML compile cache: cannot %s; compiling in $TMPDIR for this process.",
+            step,
+            exc_info=True,
+        )
+    return onnxruntime.InferenceSession(
+        model_bytes, providers=["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    )
 
 
 class OnnxModel(DocLayoutModel):
