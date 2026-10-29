@@ -45,12 +45,19 @@ the onnxruntime version without dots. Any change to the model file, the
 input size, the static rewrite or onnxruntime gives a new key and a new
 entry; old entries stay on disk until someone deletes them.
 
+The key covers only the static model and the onnxruntime version. It does
+not cover the other CoreML provider options or the macOS version. Whoever
+changes a CoreML provider option here must change the key generation in
+``_set_coreml_cache_key`` at the same time, or old compiled models are
+reused.
+
 Two processes compiling the same entry at the same time would race (the
 second one's move into the cache fails), so creating the session holds an
-exclusive ``flock`` on ``COREML_CACHE_DIR/lock``. If the cache directory or
-its lock file cannot be created, or the cached session cannot be created
-(for example a broken entry left by a killed process), the process logs a
-warning saying which and compiles in ``$TMPDIR`` as before.
+exclusive ``flock`` on ``COREML_CACHE_DIR/lock``. If any step fails (creating
+the cache directory or its lock file, taking the lock, or creating the cached
+session, for example from a broken entry left by a killed process), the
+process logs a warning naming the step and compiles in ``$TMPDIR`` as before,
+so the layout model still loads.
 """
 
 import ast
