@@ -119,6 +119,20 @@ def test_a_code_listing_under_a_ruled_title_is_no_algorithm():
     assert detect(*ruled(body=code, font="NimbusMonL-Regu")).units == []
 
 
+def test_a_big_parenthesis_set_apart_by_height_stays_with_its_formula():
+    """2412.16318 p7: the parentheses of "Õ(T)" sit 8 pt above "Play bad arms"; they must move with "Õ" and "T"."""
+    body = [(0, "Play bad arms"), (0, "for each arm do"), (1, "pull the arm"), (0, "end for")]
+    glyphs, rules = ruled(body=body)
+    x = LEFT + 2 + 13 * 4.5 + 3
+    glyphs += text_glyphs("O", x, 484, font="CMMI10")
+    glyphs += text_glyphs("(", x + 4.5, 492, font="CMEX10")
+    glyphs += text_glyphs("T", x + 9, 484, font="CMMI10")
+    glyphs += text_glyphs(")", x + 13.5, 492, font="CMEX10")
+    (unit,) = detect(glyphs, rules).units
+    lines = unit.fragments[0].lines
+    assert [line.text for line in lines] == [TITLE, "Play bad arms O(T)", "for each arm do", "pull the arm", "end for"]
+
+
 def test_a_reason_in_the_task_report_names_the_row_by_its_text():
     """Every row of such an algorithm has no line number: the reason says which row by its text."""
     (unit,) = detect(*ruled()).units

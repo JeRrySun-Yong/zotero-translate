@@ -23,7 +23,7 @@ Rules for numbered algorithms (M2 spec "算法识别", user decision D4 = 2 on
   numbered "1.", "2." is not an algorithm; a sentence that cites
   "Algorithm 1" does not start its row with it, so it is no title. ``N.``
   steps may be indented with a loop (up to 2 x the size). Drawn rules are
-  not used: the detector sees characters only.
+  not used for numbered algorithms: they are found by characters only.
 - The algorithm stays in the column of its line numbers, header rows
   included: the first x range right of the most indented numbered line, at
   least the numbers' size wide, that no glyph of the numbered rows crosses,
@@ -72,10 +72,15 @@ numbers or algorithm2e ruled floats):
   runs on to the next page) are not found.
 - Rows (``_unnumbered_lines``): the glyphs of text fonts (letters and
   digits, not math fonts, not smaller than ``_SCRIPT`` x the median size)
-  form the anchor rows; formulas, sub- and superscripts join the anchor row
-  nearest by height, by the distances of the numbered case (``_by_number``,
-  the pitch being the median distance between anchor rows); what is near no
-  anchor row forms rows of its own. Every row has no line number.
+  form the anchor rows, and so do glyphs of full size far from every text
+  row (rows of formulas only); formulas, sub- and superscripts join the
+  anchor row nearest by height, by the distances of the numbered case
+  (``_by_number``, the pitch being the median distance between text rows);
+  what is near no anchor row forms rows of its own. A part of a text row
+  right of it after a column gap without its anchor glyphs is not the row's
+  (``_strays``); a big delimiter or radical (math extension font) touching a
+  text row's formula sideways is (it must move with the formula). Every row
+  has no line number.
 
 For each line the detector records the line number, the x where the line
 text starts, the baseline and the glyph runs (font, size, bold, small caps),
@@ -131,6 +136,8 @@ _MATH_FONT = re.compile(
 _CODE_FONT = re.compile(
     r"Courier|Mono|NimbusMon|Typewriter|Inconsolata|(?:^|\+)(?:CMTT|SFTT)", re.IGNORECASE
 )
+# Fonts of big delimiters and radicals (TeX's math extension fonts).
+_DELIMITER_FONT = re.compile(r"CMEX|EUEX|Extension", re.IGNORECASE)
 COMMENT_MARK = "▷"
 _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 
@@ -524,6 +531,31 @@ def _unnumbered_lines(glyphs: list[Glyph], members: list[int]) -> list[Algorithm
         strays = _strays(glyphs, row, set(anchors[value]), _COLUMN_GAP * small)
         joined[value] = [i for i in row if i not in strays]
         rest += sorted(strays)
+    # A big delimiter or radical of a text row's formula, set apart by height
+    # (2412.16318 p7: the parentheses of "Õ(T^{2/3})" 8 pt above "Play bad
+    # arms"; 2409.08861 p11: the radical beside the "for" row above), joins
+    # that row when it touches the row's formula glyphs sideways, so that it
+    # moves with them.
+    loose = rest + [i for value, row in joined.items() if value >= len(anchors) for i in row]
+    loose = [i for i in loose if _DELIMITER_FONT.search(glyphs[i].font or "")]
+    text = set(text)
+    for i in loose:
+        g = glyphs[i]
+        near = [
+            value
+            for value in range(len(anchors))
+            if abs(g.yc - centres[value]) <= _NEAR_SCRIPT * pitch
+            and any(
+                j not in text and glyphs[j].x0 - 1 <= g.x1 and g.x0 <= glyphs[j].x1 + 1
+                for j in joined.get(value, [])
+            )
+        ]
+        if near:
+            value = min(near, key=lambda v: abs(g.yc - centres[v]))
+            for row in [rest, *joined.values()]:
+                if i in row:
+                    row.remove(i)
+            joined[value].append(i)
     placed = [
         (n.yc, _line(glyphs, None, None, joined[n.value], n.yc)) for n in band.numbers if n.value in joined
     ]
