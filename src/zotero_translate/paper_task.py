@@ -99,6 +99,7 @@ def run_paper_task(
     from zotero_translate.dossier import read_full_text
     from zotero_translate.dossier import request_dossier
     from zotero_translate.first_mention import FirstMentionPlan
+    from zotero_translate.first_mention import references_range
     from zotero_translate.model_client import ModelCallError
     from zotero_translate.model_client import PipelineModels
     from zotero_translate.review import BatchReviewer
@@ -178,6 +179,7 @@ def run_paper_task(
             algorithm_detector=algorithms.engine_page,
             algorithm_translator=algorithm_translator.start,
             algorithm_typesetter=AlgorithmLayout(algorithms, algorithm_translator),
+            reference_section=references_range,
             use_rich_pbar=False,
         )
         getattr(doc_layout_model, "init_font_mapper", lambda _config: None)(config)

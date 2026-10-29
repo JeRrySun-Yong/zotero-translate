@@ -1493,6 +1493,10 @@ class Typesetting:
         line_ys = [current_y]
         if paragraph.first_line_indent:
             current_x += space_width * 4
+        # Where the current line and the lines after the first start: a
+        # reference entry keeps its hanging indent (closure ticket 04, R2).
+        line_start_x = box.x
+        next_line_x = box.x + (paragraph.hanging_indent or 0)
         # 遍历所有排版单元
         for i, unit in enumerate(typesetting_units):
             # 计算当前单元在当前缩放下的尺寸
@@ -1500,7 +1504,7 @@ class Typesetting:
             unit_height = unit.height * scale
 
             # 跳过行首的空格
-            if current_x == box.x and unit.is_space:
+            if current_x == line_start_x and unit.is_space:
                 continue
 
             if (
@@ -1515,7 +1519,7 @@ class Typesetting:
                 )  # 在同一行，且有垂直重叠
                 and not last_unit.mixed_character_blacklist  # 不是混排空格黑名单字符
                 and not unit.mixed_character_blacklist  # 同上
-                and current_x > box.x  # 不是行首
+                and current_x > line_start_x  # 不是行首
                 and unit.try_get_unicode() != " "  # 不是空格
                 and last_unit.try_get_unicode() != " "  # 不是空格
                 and last_unit.try_get_unicode()
@@ -1529,12 +1533,25 @@ class Typesetting:
                 ]
             ):
                 current_x += space_width * 0.5
-            if use_english_line_break:
-                width_before_next_break_point = self._get_width_before_next_break_point(
+            # A run without a break point moves to the next line only from its
+            # first character, and only if it fits a whole line; checking it
+            # again at each character set a longer run one character per line
+            # (closure ticket 04, R3). A run longer than a whole line (a URL:
+            # "/" and "." do not break a line; a label like "Idea2Img" in a
+            # narrow box) does not fit above the scale floor, so the search
+            # tries a smaller scale; at the floor it is set where it is and
+            # breaks at the right edge.
+            width_before_next_break_point = 0
+            if use_english_line_break and (
+                i == 0 or typesetting_units[i - 1].can_break_line
+            ):
+                run_width = self._get_width_before_next_break_point(
                     typesetting_units[i:], scale
                 )
-            else:
-                width_before_next_break_point = 0
+                if run_width <= box.x2 - next_line_x:
+                    width_before_next_break_point = run_width
+                elif scale > MIN_SCALE + SCALE_EPSILON:
+                    return [], False
 
             # 如果当前行放不下这个元素，换行
             if not unit.is_hung_punctuation and (
@@ -1553,7 +1570,7 @@ class Typesetting:
                 )
             ):
                 # 换行
-                current_x = box.x
+                current_x = line_start_x = next_line_x
                 if not current_line_heights:
                     return [], False
                 max_height = max(current_line_heights)
