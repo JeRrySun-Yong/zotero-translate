@@ -200,19 +200,35 @@ def _signal_group(group: int, sig: signal.Signals) -> None:
 def _group_ended(group: int, timeout: float) -> bool:
     """Wait until no process of ``group`` runs; False if one still does after ``timeout``.
 
-    macOS answers a group whose processes have all exited but are not yet
-    reaped (zombies, e.g. a task subprocess whose service is gone) with
-    EPERM rather than ESRCH.
+    A process that has exited but is not yet reaped (a zombie, e.g. a task
+    subprocess whose service is gone) no longer runs. macOS answers
+    ``killpg(group, 0)`` with EPERM rather than ESRCH when no member of the
+    group can take a signal: when all are zombies, but also as soon as the
+    last live one has begun to exit, while ``ps`` still shows it (state
+    ``?E``) and heavy load can keep it so for a while. On EPERM the group has
+    ended only when ``ps`` shows every member as a zombie.
     """
     deadline = time.monotonic() + timeout
     while True:
         try:
             os.killpg(group, 0)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             return True
+        except PermissionError:
+            if all(state.startswith("Z") for state in _member_states(group)):
+                return True
         if time.monotonic() > deadline:
             return False
         time.sleep(0.05)
+
+
+def _member_states(group: int) -> list[str]:
+    """The ``ps`` state of every process in ``group``, zombies included."""
+    listing = subprocess.run(
+        ["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True, check=True
+    ).stdout
+    members = (line.split() for line in listing.splitlines())
+    return [state for pgid, state in members if int(pgid) == group]
 
 
 def pytest_configure(config) -> None:

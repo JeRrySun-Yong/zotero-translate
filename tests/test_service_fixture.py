@@ -101,7 +101,10 @@ def test_stopping_the_service_waits_for_a_task_subprocess_that_is_still_exiting(
     # enough for a test to see it running (closure ticket 09, follow-up). The
     # answer is simulated here for the member's 2-second exit.
     leader = subprocess.Popen(
-        [sys.executable, "-c", LEADER, SLOW_TO_EXIT], stdout=subprocess.PIPE, text=True, start_new_session=True
+        [sys.executable, "-c", LEADER, SLOW_TO_EXIT],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
     member = int(leader.stdout.readline())
     killpg = os.killpg
