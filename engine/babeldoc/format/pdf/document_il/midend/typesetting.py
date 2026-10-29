@@ -1509,8 +1509,12 @@ class Typesetting:
             if not unit.is_hung_punctuation and (
                 (current_x + unit_width > box.x2)
                 or (
+                    # The width up to the next break point already holds this
+                    # unit when it cannot break (it is 0 when it can); adding
+                    # unit_width again broke a fitting word before a wider
+                    # letter ("Seedrea" / "m", closure ticket 03).
                     use_english_line_break
-                    and current_x + unit_width + width_before_next_break_point > box.x2
+                    and current_x + width_before_next_break_point > box.x2
                 )
                 or (
                     unit.is_cannot_appear_in_line_end_punctuation
