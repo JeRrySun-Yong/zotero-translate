@@ -227,6 +227,9 @@ SPACE_REGEX = regex.compile(r"\s+", regex.UNICODE)
 # this fraction of the left character's font size, and at least 1 pt.
 WORD_SPACE_EM = 0.15
 WORD_SPACE_MIN_PT = 1.0
+# Moved down by a negative letter gap, the threshold stays at least this:
+# overlapping glyphs are never a word space.
+WORD_SPACE_FLOOR_PT = 0.0
 
 
 def word_space_threshold(char: PdfCharacter, letter_gaps: dict | None = None) -> float:
@@ -242,7 +245,7 @@ def word_space_threshold(char: PdfCharacter, letter_gaps: dict | None = None) ->
     boxes overlap.
     """
     base = max(WORD_SPACE_MIN_PT, WORD_SPACE_EM * _font_size(char))
-    return base + _letter_gap(char, letter_gaps)
+    return max(WORD_SPACE_FLOOR_PT, base + _letter_gap(char, letter_gaps))
 
 
 def letter_gaps(chars: list) -> dict:
