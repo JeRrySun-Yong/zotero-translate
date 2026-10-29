@@ -978,9 +978,11 @@ class Typesetting:
         # translation near the source size (1.3 set the AutoDesign and
         # MaLiang abstracts at 9.0 pt).
         line_skip = CJK_LINE_SKIP if self.is_cjk else 1.3
-        # closure 03 (T1, T4): table header cells shrank to 0.1 of their size
-        # (3.0 pt). Below MIN_SCALE the paragraph is set at MIN_SCALE and may
-        # run past its box (see the end of this method).
+        # closure 03: the upstream floor was 0.1, but the small table headers
+        # (T1, T4) never went below 0.5: "调用次数" at 3.0 pt is 0.5 x 6.05 pt.
+        # They are small because their cells are narrow (ticket 06). Below
+        # MIN_SCALE the paragraph is set at MIN_SCALE and may run past its box
+        # (see the end of this method).
         min_scale = MIN_SCALE
         expand_space_flag = 0
         final_typeset_units = None
