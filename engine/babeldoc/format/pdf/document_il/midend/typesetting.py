@@ -39,8 +39,15 @@ MIN_SCALE = 0.5
 SCALE_EPSILON = 1e-9
 # A one-line table cell whose translation does not fit its source cell widens
 # into the free space of its table row (closure ticket 06, T4); it keeps this
-# gap, in ems of its font size, to the nearest text on either side.
+# gap, in ems of its font size, to the nearest text on either side. A one-line
+# label in a figure's form XObject widens the same way within the form's box
+# (closure ticket 15).
 TABLE_CELL_GAP_EM = 0.5
+# A widened figure label is set no larger than this many times the height of
+# its source line (closure ticket 15): the legend label "w/ Qwen3-VL-32B" is
+# a 3.46 pt line of 3.71 pt text; set at the initial scale its translation
+# was 4.1 pt and, widened, ran into the line above it.
+WIDENED_LABEL_MAX_HEIGHT = 1.0
 # A paragraph box at most this many ems high is one source line.
 ONE_LINE_EM = 1.5
 # Two cells of a column share their left edge or their centre within these
@@ -1001,38 +1008,64 @@ class Typesetting:
         expand_space_flag = 0
         final_typeset_units = None
 
+        # closure 15: a paragraph in a form XObject (a figure label) is drawn
+        # into the form, and a PDF viewer clips the form to its box. Text set
+        # past that box is in the PDF but not on the page: AutoRef page 8's
+        # "搭配 Qwen3-VL-32B" wrapped to a second line below the plot, page 26's
+        # "MultiBanana（4张参考图）" ran past the plot's right edge, and both
+        # showed only their first part. Within such a form a layout fits only
+        # when every unit is inside the form's box, and the box grows (down,
+        # right) only up to the form's box.
+        clip = self._form_box(paragraph, page)
+
         # closure 06 (T4): a one-line table cell ("Calls" in a 12 pt cell) that
         # does not fit at the initial scale first widens into the free space
         # of its table row (centred cells to both sides, left-aligned cells to
-        # the right), and the search starts there. Only table cells: figure
-        # labels have the same layout label (fallback_line) and must not grow
-        # (ticket 03).
+        # the right), and the search starts there. closure 15: a one-line
+        # label in a form widens the same way within the form's box, before
+        # it shrinks (the legend label above fits at its initial scale once
+        # centred under its bar). The font never grows past the initial
+        # scale: restarting the search from a larger scale after the box grew
+        # set figure labels larger than their neighbours (ticket 03). A
+        # widened label also starts no larger than its source line
+        # (WIDENED_LABEL_MAX_HEIGHT); the font size of many figure labels is
+        # larger than their glyphs ("Vanilla" on page 8: about 9 pt for 3.7 pt
+        # glyphs), and those that cannot come down to their line at
+        # MIN_SCALE are not widened.
         source_box = box
-        cell_box, centred = self._widened_table_cell(paragraph, page, box)
+        cell_box, centred = self._widened_table_cell(paragraph, page, box, clip)
+        if cell_box is not None and clip is not None:
+            label_scale = self._label_scale(paragraph, source_box)
+            if label_scale < min_scale - SCALE_EPSILON:
+                cell_box = None
         if (
             cell_box is not None
-            and not self._try_layout(
+            and not self._fits(
                 typesetting_units,
                 box,
                 scale,
                 line_skip,
                 paragraph,
                 use_english_line_break,
+                clip,
             )[1]
         ):
             box = cell_box
+            if clip is not None:
+                scale = min(scale, label_scale)
         else:
             cell_box = None
 
         while scale >= min_scale - SCALE_EPSILON:
             # 尝试布局排版单元（布局出错按放不下处理）
-            typeset_units, all_units_fit = self._try_layout(
+            typeset_units, all_units_fit = self._fits(
                 typesetting_units,
                 box,
                 scale,
                 line_skip,
                 paragraph,
                 use_english_line_break,
+                clip,
             )
 
             # 如果所有单元都放得下
@@ -1077,6 +1110,8 @@ class Typesetting:
                     # 尝试向下扩展
                     try:
                         min_y = self.get_max_bottom_space(box, page) + 2
+                        if clip is not None:
+                            min_y = max(min_y, clip.y)
                         if min_y < box.y:
                             expanded_box = Box(x=box.x, y=min_y, x2=box.x2, y2=box.y2)
                             box = expanded_box
@@ -1096,6 +1131,8 @@ class Typesetting:
                     # 尝试向右扩展
                     try:
                         max_x = self.get_max_right_space(box, page) - 5
+                        if clip is not None:
+                            max_x = min(max_x, clip.x2)
                         if max_x > box.x2:
                             expanded_box = Box(x=box.x, y=box.y, x2=max_x, y2=box.y2)
                             box = expanded_box
@@ -1132,7 +1169,12 @@ class Typesetting:
         # min_scale and let it run past its box rather than shrink it further.
         # Only when no unit can be placed at all (a unit wider than the box)
         # does the scale go below min_scale, down to the old floor of 0.1, so
-        # the paragraph never comes out empty.
+        # the paragraph never comes out empty. closure 15: a figure label (in
+        # a form) keeps its source text instead: past the form's box its text
+        # would not be on the page, and past its own box it runs into the
+        # figure's other labels.
+        if apply_layout and clip is not None and self._keep_source(paragraph, page):
+            return 1.0, None
         if apply_layout:
             fallback_scale = min_scale
             while fallback_scale >= 0.1 - SCALE_EPSILON:
@@ -1185,6 +1227,123 @@ class Typesetting:
         except Exception:
             return [], False
 
+    def _fits(
+        self,
+        typesetting_units: list[TypesettingUnit],
+        box: Box,
+        scale: float,
+        line_skip: float,
+        paragraph: il_version_1.PdfParagraph,
+        use_english_line_break: bool,
+        clip: Box | None,
+    ) -> tuple[list[TypesettingUnit], bool]:
+        """`_try_layout`, where a layout in a form fits only inside the form's
+        box ``clip`` (closure ticket 15)."""
+        typeset_units, fit = self._try_layout(
+            typesetting_units,
+            box,
+            scale,
+            line_skip,
+            paragraph,
+            use_english_line_break,
+        )
+        return typeset_units, fit and self._inside(typeset_units, clip)
+
+    @staticmethod
+    def _form_box(
+        paragraph: il_version_1.PdfParagraph, page: il_version_1.Page
+    ) -> Box | None:
+        """The box of the form XObject the paragraph is drawn into (closure
+        ticket 15): a PDF viewer clips the form's content to it. None for a
+        paragraph drawn on the page itself, and for one whose source box has
+        its centre outside the form's box: the source PDF hides that text
+        itself (a figure cropped from a larger one), and its translation is
+        set as before."""
+        xobj_id = getattr(paragraph, "xobj_id", None)
+        if not xobj_id or not paragraph.box:
+            return None
+        form = next(
+            (
+                xobj.box
+                for xobj in getattr(page, "pdf_xobject", ())
+                if xobj.xobj_id == xobj_id and xobj.box
+            ),
+            None,
+        )
+        if form is None:
+            return None
+        form = Box(
+            x=min(form.x, form.x2),
+            y=min(form.y, form.y2),
+            x2=max(form.x, form.x2),
+            y2=max(form.y, form.y2),
+        )
+        box = paragraph.box
+        if not Typesetting._centre_inside(box, form):
+            return None
+        return form
+
+    @staticmethod
+    def _label_scale(paragraph: il_version_1.PdfParagraph, source_box: Box) -> float:
+        """The largest scale of a widened figure label: its font size is at
+        most WIDENED_LABEL_MAX_HEIGHT times its source line's height."""
+        size = paragraph.pdf_style.font_size
+        return WIDENED_LABEL_MAX_HEIGHT * (source_box.y2 - source_box.y) / size
+
+    @staticmethod
+    def _centre_inside(box: Box, clip: Box) -> bool:
+        centre_x, centre_y = (box.x + box.x2) / 2, (box.y + box.y2) / 2
+        return clip.x <= centre_x <= clip.x2 and clip.y <= centre_y <= clip.y2
+
+    @staticmethod
+    def _inside(typeset_units: list[TypesettingUnit], clip: Box | None) -> bool:
+        """Whether every laid-out unit is on the page: the centre of its box
+        is inside the form's box ``clip`` (a glyph of the first line may reach
+        a little past the box, as its source glyph did; one whose centre is
+        outside is cut off or, past its whole height, gone). True outside a
+        form (``clip`` None)."""
+        if clip is None:
+            return True
+        return all(Typesetting._centre_inside(unit.box, clip) for unit in typeset_units)
+
+    def _keep_source(
+        self, paragraph: il_version_1.PdfParagraph, page: il_version_1.Page
+    ) -> bool:
+        """Set the paragraph's source text where it was, as the answer was
+        not translated, and report it (closure ticket 15: a figure label whose
+        translation does not fit inside the figure even at MIN_SCALE). False
+        when the paragraph has no source composition."""
+        if not paragraph.source_composition:
+            return False
+        translation = paragraph.pdf_paragraph_composition
+        paragraph.pdf_paragraph_composition = paragraph.source_composition
+        try:
+            # Source characters need no font lookup.
+            units = self.create_typesetting_units(paragraph, {})
+        except KeyError:
+            units = []
+        if not units or not all(unit.can_passthrough for unit in units):
+            paragraph.pdf_paragraph_composition = translation
+            return False
+        paragraph.scale = 1.0
+        paragraph.pdf_paragraph_composition = self.create_passthrough_composition(units)
+        source = "".join(unit.try_get_unicode() or "" for unit in units)
+        logger.warning(
+            "paragraph %s does not fit inside its figure at the scale floor: "
+            "kept its source text %r",
+            getattr(paragraph, "debug_id", None),
+            source,
+        )
+        on_source_kept = getattr(self.translation_config, "on_source_kept", None)
+        if on_source_kept is not None:
+            page_number = getattr(page, "page_number", None)
+            on_source_kept(
+                None if page_number is None else page_number + 1,
+                source,
+                "排版放不下：译文在图的范围内缩到下限仍放不下",
+            )
+        return True
+
     @staticmethod
     def _apply_typeset_units(
         paragraph: il_version_1.PdfParagraph,
@@ -1212,9 +1371,13 @@ class Typesetting:
         paragraph: il_version_1.PdfParagraph,
         page: il_version_1.Page,
         box: Box,
+        clip: Box | None = None,
     ) -> tuple[Box | None, bool]:
         """The box a one-line table cell may use (closure ticket 06), and
-        whether the cell is centred.
+        whether the cell is centred. A one-line label in a figure's form
+        XObject (``clip``, the form's box) is such a cell too, and the form's
+        box is its table (closure ticket 15: the legend labels of AutoRef
+        page 8 are centred under their bars).
 
         The source box widens as far as the nearest text, form, curve (a
         table rule, a shaded cell) or figure on its row, less
@@ -1234,7 +1397,8 @@ class Typesetting:
         and is centred over them. Otherwise, with no evidence either way too,
         it is left-aligned: the cells of a text column share their left edge
         and differ in width. (None, False) when the paragraph is not a
-        one-line cell in a "table" layout region or has no room to grow."""
+        one-line cell in a "table" layout region or a form, or has no room to
+        grow."""
         # getattr: the synthetic layout tests pass bare paragraph and page
         # stand-ins without these fields.
         style = getattr(paragraph, "pdf_style", None)
@@ -1254,6 +1418,15 @@ class Typesetting:
             ),
             None,
         )
+        if table is None:
+            table = clip
+        elif clip is not None:
+            table = Box(
+                x=max(table.x, clip.x),
+                y=max(table.y, clip.y),
+                x2=min(table.x2, clip.x2),
+                y2=min(table.y2, clip.y2),
+            )
         if table is None:
             return None, False
         paragraphs = [p.box for p in page.pdf_paragraph if p is not paragraph and p.box]
