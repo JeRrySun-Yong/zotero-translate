@@ -225,6 +225,10 @@ class TranslationConfig:
         ]
         | None = None,
         first_mention_recorder: Callable[[dict[int, str]], None] | None = None,
+        key_concept_headings: Callable[
+            [list[tuple[int, str | None, str]]], dict[int, str]
+        ]
+        | None = None,
         batch_reviewer: Callable[
             [list[dict], list[tuple[str, str]]], dict[int, str | None]
         ]
@@ -409,11 +413,16 @@ class TranslationConfig:
         # Called once after translation with paragraph index -> final text
         # for the paragraphs that asked for first-mention glosses.
         self.first_mention_recorder = first_mention_recorder
+        # Given the same paragraphs as the planner, returns paragraph index ->
+        # key concept spelling for each heading that is a key concept's full
+        # name; the batch asks for those headings in Chinese only.
+        self.key_concept_headings = key_concept_headings
         # Reviews an LLM batch after its draft translation. Given the items
         # ({"id", "source", "draft", "page"} and the first-mention glosses
-        # field if any) and the batch's glossary entries, returns id -> the
-        # final text, or None to keep that paragraph's source text (the
-        # reviewer records it). None skips the review.
+        # and key concept heading fields if any) and the batch's glossary
+        # entries, returns id -> the final text, or None to keep that
+        # paragraph's source text (the reviewer records it). None skips the
+        # review.
         self.batch_reviewer = batch_reviewer
         # Called with (1-based page, source text, reason) for a paragraph
         # that keeps its source text because its translation failed.

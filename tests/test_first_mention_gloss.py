@@ -99,7 +99,8 @@ MALIANG_TERMS = [
     key_concept(["MaLiang-Harness"], "本文的可编程视觉生成框架"),
     key_concept(["MLLMs", "MLLM"], "多模态大语言模型"),
     key_concept(["inspection"], "检查渲染结果"),
-    key_concept(["programmable"], "以程序表达生成过程的"),
+    # Not ending with 的: such a gloss is written again (closure ticket 17).
+    key_concept(["programmable"], "以程序表达生成过程的特性"),
     # A gloss ending in a full stop: "（…。）" reads badly, the stop is dropped.
     key_concept(["direct visual synthesis"], "直接合成像素的生成方式。"),
     key_concept(["flow-based models"], "基于流的生成模型"),
@@ -118,7 +119,7 @@ def test_each_key_concept_is_glossed_once_in_the_abstract_and_once_in_the_body(m
     markers = [MALIANG_ABSTRACT, MALIANG_INTRO_1, MALIANG_INTRO_2]
 
     # In the abstract and in the introduction.
-    assert where(found["以程序表达生成过程的"], markers) == [MALIANG_ABSTRACT, MALIANG_INTRO_2]
+    assert where(found["以程序表达生成过程的特性"], markers) == [MALIANG_ABSTRACT, MALIANG_INTRO_2]
     # Only in the abstract: the introduction has "(MLLMs)" only inside
     # parentheses (ticket 15), capitals, and a word broken at a line end.
     assert where(found["多模态大语言模型"], markers) == [MALIANG_ABSTRACT]
@@ -163,7 +164,7 @@ AUTODESIGN_TERMS = [
     key_concept(["AutoDesign"], "本文提出的自动设计框架"),
     key_concept(["DesignHarness"], "学到的设计框架"),
     key_concept(["PosterBench"], "本文的海报评测基准"),
-    key_concept(["long-horizon"], "需要长步骤持续执行的"),
+    key_concept(["long-horizon"], "需要长步骤持续执行的特性"),
     # Only in figure captions on page 1.
     key_concept(["design harness"], "生成设计的框架"),
     # "harness" inside "meta-harness" is not a mention of "harness".
@@ -187,7 +188,7 @@ def test_without_an_abstract_heading_the_long_paragraph_after_the_title_is_the_a
     assert where(found["本文提出的自动设计框架"], markers) == markers
     assert where(found["学到的设计框架"], markers) == markers
     assert where(found["本文的海报评测基准"], markers) == markers
-    assert where(found["需要长步骤持续执行的"], markers) == [AUTODESIGN_ABSTRACT]
+    assert where(found["需要长步骤持续执行的特性"], markers) == [AUTODESIGN_ABSTRACT]
     assert where(found["优化框架本身的外层框架"], markers) == [AUTODESIGN_ABSTRACT]
     assert where(found["包裹模型的执行框架"], markers) == [AUTODESIGN_ABSTRACT]
 

@@ -37,6 +37,10 @@ way. ``placements`` then records this per concept and range, and
 ``written`` lists the planned glosses that were not written: the model may
 leave a gloss out where the source explains the concept right there. This
 is only recorded; nothing is translated again.
+
+The plan also finds the headings that are a key concept's full name
+(``key_concept_headings``): the engine asks for those in Chinese only
+(closure ticket 17).
 """
 
 from __future__ import annotations
@@ -57,6 +61,10 @@ _ABSTRACT_INLINE = re.compile(r"^\W*abstract\s*[—–\-.:]", re.IGNORECASE)
 _REFERENCES_HEADING = re.compile(
     r"^\W*(?:[0-9IVX]+\.?\s*)?(?:references|bibliography)\W*$", re.IGNORECASE
 )
+# A section number in front of a heading: digits ("5.1 ", "6 ", "3. "), a
+# letter with digits ("G.2 "), or a Roman numeral or letter with a full stop
+# ("IV. ", "B. "). A letter alone ("A Survey of …") is a word, not a number.
+_SECTION_NUMBER = re.compile(r"^(?:\d+(?:\.\d+)*\.?|[A-Z](?:\.\d+)+\.?|(?:[IVX]+|[A-Z])\.)\s+")
 
 # Sentence punctuation at the end of a gloss, dropped: "（…。）" reads badly.
 _GLOSS_END = "。．.；;，,！!"
@@ -158,6 +166,40 @@ class FirstMentionPlan:
             "written": len(self._planned) - len(not_written),
             "not_written": not_written,
         }
+
+    def key_concept_headings(self, paragraphs: list[Paragraph]) -> dict[int, str]:
+        """Paragraph index -> spelling, for each heading that is a key concept's full name.
+
+        The engine's ``key_concept_headings`` hook (closure ticket 17): such
+        a heading is translated into Chinese, in Chinese only, although
+        requirement 1 keeps key concepts in English (user, 2026-10-29). A
+        heading is a key concept's full name when its text, without a
+        section number in front ("5.1", "G.2", "IV.") and a full stop or
+        colon at the end, is one of the concept's spellings as a whole
+        (matched like a first mention), and has at least two words: a name
+        of one word ("AutoRef", "MaLiang-Harness") has no Chinese full name.
+        The spelling is the concept's first one that matches.
+        """
+        found = {}
+        for index, (_, label, text) in enumerate(paragraphs):
+            if not _is_heading(label, text):
+                continue
+            name = _SECTION_NUMBER.sub("", _squeeze(unicodedata.normalize("NFKC", text)))
+            name = name.rstrip(".:").strip()
+            if len(name.split()) < 2:
+                continue
+            spelling = next(
+                (
+                    spelling
+                    for concept in self._concepts
+                    for spelling, pattern in concept.patterns
+                    if pattern.fullmatch(name)
+                ),
+                None,
+            )
+            if spelling is not None:
+                found[index] = spelling
+        return found
 
     def _mentions(self, text: str) -> list[tuple[int, str]]:
         """``(concept number, spelling)`` for each concept that occurs in ``text``."""

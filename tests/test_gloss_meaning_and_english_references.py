@@ -11,7 +11,10 @@ Chinese name is gone. A gloss that mentions another key concept writes that
 concept's English spelling, at most one; a basic term whose spelling
 contains a key concept keeps that spelling in its rendering. After the term
 list is final, the paper task writes three checks into ``terms.gloss_checks``
-of the task report, and nothing is retried, rewritten or cut:
+of the task report, and the term list is not resent (since closure ticket
+17, a gloss over 15 Chinese characters is written again in a gloss rewrite
+request first, see ``test_gloss_rewrite.py``; here that request never gets
+a shorter gloss, so the long one is kept whole and checked):
 
 - (a) ``latin_not_key_concept``: a Latin string in a gloss that is no key
   concept's spelling (case ignored);
@@ -34,6 +37,7 @@ from tests.conftest import FIXTURES
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FakeModel
+from tests.fake_model import gloss_rewrite_request
 from tests.test_term_list import glossary_rows
 from tests.test_term_list import term
 
@@ -82,9 +86,17 @@ MALIANG_TERMS = {
 }
 
 
+def keep_old_glosses(body: dict) -> str:
+    """A gloss rewrite answer that returns every listed gloss unchanged."""
+    listed = gloss_rewrite_request(body)["rewrite"]
+    glosses = [{"english": r["english"][0], "gloss_zh": r["gloss_zh"]} for r in listed]
+    return json.dumps({"glosses": glosses}, ensure_ascii=False)
+
+
 def run_task(tmp_path_factory, terms: dict, pdf=None) -> dict:
     with FakeModel() as model:
         model.respond("term_list", lambda body: json.dumps(terms, ensure_ascii=False))
+        model.respond("gloss_rewrite", keep_old_glosses)
         service = launch_service(model, tmp_path_factory.mktemp("glosses"))
         try:
             task_id = service.submit(pdf) if pdf else service.submit()
@@ -141,7 +153,7 @@ def test_the_term_list_has_no_chinese_name(autodesign):
     assert all("name_zh" not in t for t in autodesign["terms"])
 
 
-def test_checks_are_reported_and_not_retried(autodesign):
+def test_checks_are_reported_and_the_term_list_is_not_resent(autodesign):
     assert len(autodesign["model"].requests_of("term_list")) == 1
     assert autodesign["model"].requests_of("promoted_glosses") == []
     assert set(autodesign["checks"]) == {
@@ -169,6 +181,11 @@ def test_a_basic_term_whose_rendering_lacks_the_contained_key_concept_is_reporte
 
 
 def test_a_gloss_over_15_chinese_characters_is_reported_and_kept_whole(autodesign):
+    # The rewrite was asked for and never got a shorter gloss.
+    assert len(autodesign["model"].requests_of("gloss_rewrite")) == 4
+    assert autodesign["report"]["terms"]["gloss_rewrite"]["kept"] == [
+        {"english": ["AutoDesign"], "gloss_zh": LONG_GLOSS, "problems": ["23 Chinese characters, more than 15"]}
+    ]
     assert autodesign["checks"]["long_glosses"] == [
         {"english": ["AutoDesign"], "gloss_zh": LONG_GLOSS, "characters": 23}
     ]
