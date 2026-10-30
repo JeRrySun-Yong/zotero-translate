@@ -176,6 +176,7 @@ def run_paper_task(
             batch_context_builder=BatchContext(dossier),
             first_mention_planner=first_mentions,
             first_mention_recorder=first_mentions.record_translations,
+            key_concept_headings=first_mentions.key_concept_headings,
             batch_reviewer=reviewer,
             on_source_kept=kept.record,
             algorithm_detector=algorithms.engine_page,

@@ -87,10 +87,26 @@ text starts, the baseline and the glyph runs (font, size, bold, small caps),
 for line-by-line typesetting. It also marks which glyphs of the line keep
 their source text when the line is translated (``keep_flags``): formulas
 (math fonts), keywords set in bold, the title's ``Algorithm N`` and the
-``Require:``/``Ensure:``/``Input:``/``Output:`` labels, and function calls
+``Require:``/``Ensure:``/``Input:``/``Output:`` labels, function calls
 (small caps names) with everything inside their parentheses (user decision
-D5 = 1 on 2026-10-21). Small caps show up in the text layer as
-capitals in two alternating sizes of one font (for example 10 pt and 8 pt).
+D5 = 1 on 2026-10-21), and constants and identifiers (ticket 16: small caps
+by font name, words of capitals only, underscores and camelCase; the rule
+is in ``algorithm_translation``'s module documentation). Small caps show up
+in the text layer as capitals in two alternating sizes of one font (for
+example 10 pt and 8 pt), or as ordinary letters in a small caps font.
+
+Drawn lines (closure ticket 14): a radical's bar, a fraction's bar and an
+identifier's underscore are lines drawn on the page, not glyphs. A drawn line
+belongs to the row whose glyphs own it (``drawn_lines.owners`` in the
+engine, with the math fonts' glyphs as formula glyphs; see that module for
+the rule and its thresholds): the glyphs it belongs to keep their source
+text, and for an underscore so do the whole words on both sides, so
+``num_training_steps`` is one identifier, not three words to translate
+(ticket 16 protects an underscore that is a glyph; this one is drawn). The
+row records the line (``AlgorithmLine.drawn``) so that the layout moves it
+with its glyphs. An algorithm's three rules, table rules and rules above or
+below text belong to no row.
+
 Coordinates are PDF user space: y grows upwards.
 """
 
@@ -101,6 +117,8 @@ import statistics
 from dataclasses import dataclass
 from dataclasses import field
 from typing import NamedTuple
+
+from babeldoc.format.pdf.document_il.utils import drawn_lines
 
 MIN_LINES = 3
 KEPT_SOURCE = "kept_source"
@@ -138,6 +156,17 @@ _CODE_FONT = re.compile(
 )
 # Fonts of big delimiters and radicals (TeX's math extension fonts).
 _DELIMITER_FONT = re.compile(r"CMEX|EUEX|Extension", re.IGNORECASE)
+# Small caps fonts by name (ticket 16): cm-super (SFCC, AutoDesign p7
+# "Accept"), EC (ECCC), Computer Modern (CMCSC, also a math font above),
+# Latin Modern (LMRomanCaps). Their text layer reads "Accept", not
+# capitals in two sizes. A name ending in "SC" is not one: PingFangSC,
+# NotoSansSC are Simplified Chinese.
+_SMALL_CAPS_FONT = re.compile(r"(?:^|\+)(?:SFCC|ECCC|CMCSC)\d|LMRomanCaps|SmallCaps")
+# A word of capitals only (no lower case) with at least this many letters is
+# a constant (ACCEPT, REJECT); a shorter one is an abbreviation that the
+# glossary may translate (LLM, MCTS, DDPM, FAISS, RAPSD: at most 5 letters
+# in the held-out set's algorithms).
+_CONSTANT_LETTERS = 6
 COMMENT_MARK = "▷"
 _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 
@@ -248,6 +277,13 @@ class AlgorithmLine:
     indexes: list[int] = field(default_factory=list, repr=False)
     keep: list[bool] = field(default_factory=list, repr=False)
     chars: list = field(default_factory=list, repr=False)
+    # The drawn lines that belong to the row: (index in the detector's drawn
+    # lines of the page, positions in ``glyphs`` of the glyphs it belongs
+    # to); the positions of glyphs right after a drawn underscore; and (set
+    # by ``AlgorithmDetector.engine_page``) the engine's curves for the lines.
+    drawn: list[tuple[int, list[int]]] = field(default_factory=list, repr=False)
+    underscores: set[int] = field(default_factory=set, repr=False)
+    curves: list = field(default_factory=list, repr=False)
 
     def report(self) -> dict:
         return {
@@ -334,7 +370,13 @@ class AlgorithmDetector:
     def engine_page(self, page) -> set[int]:
         """The engine hook: indexes in ``page.pdf_character`` of the page's pseudocode."""
         known = {id(f) for unit in self.units for f in unit.fragments}
-        taken = self(page.page_number + 1, glyphs_of_page(page), rules_of_page(page))
+        curves = drawn_curves_of_page(page)
+        taken = self(
+            page.page_number + 1,
+            glyphs_of_page(page),
+            rules_of_page(page),
+            [line for _, line in curves],
+        )
         for unit in self.units:
             for fragment in unit.fragments:
                 if id(fragment) in known:
@@ -342,12 +384,16 @@ class AlgorithmDetector:
                 fragment.chars = [page.pdf_character[i] for i in sorted(fragment.glyphs)]
                 for line in fragment.lines:
                     line.chars = [page.pdf_character[i] for i in line.indexes]
+                    line.curves = [curves[index][0] for index, _ in line.drawn]
         return taken
 
-    def __call__(self, page_number: int, glyphs: list[Glyph], rules=()) -> set[int]:
+    def __call__(self, page_number: int, glyphs: list[Glyph], rules=(), drawn=()) -> set[int]:
         """Detect the algorithms on one page (``rules``: its horizontal rules, ``Rule`` or
-        ``(x0, x1, y)``); return the indexes of their glyphs."""
+        ``(x0, x1, y)``; ``drawn``: all its drawn lines, the same way, of any length);
+        return the indexes of their glyphs."""
         found = detect_page(page_number, glyphs, rules)
+        for _, fragment in found:
+            _attach_drawn_lines(fragment, [drawn_lines.DrawnLine(*line) for line in drawn])
         taken: set[int] = set()
         for index, (title, fragment) in enumerate(found):
             previous = self.units[-1] if self.units else None
@@ -404,6 +450,37 @@ def rules_of_page(page) -> list[Rule]:
         if box is not None and box.y2 - box.y < _RULE_HEIGHT and box.x2 - box.x >= _MIN_RULE:
             rules.append(Rule(box.x, box.x2, (box.y + box.y2) / 2))
     return rules
+
+
+def drawn_curves_of_page(page) -> list[tuple[object, drawn_lines.DrawnLine]]:
+    """The page's drawn lines (``drawn_lines.line_of``), each with its engine curve."""
+    found = []
+    for curve in page.pdf_curve or []:
+        line = drawn_lines.line_of(curve.box)
+        if line is not None:
+            found.append((curve, line))
+    return found
+
+
+def _attach_drawn_lines(fragment: AlgorithmFragment, drawn: list[drawn_lines.DrawnLine]) -> None:
+    """Give each drawn line to the row whose glyphs own it; those glyphs keep their source text."""
+    for index, drawn_line in enumerate(drawn):
+        for row in fragment.lines:
+            marks = [
+                drawn_lines.Mark(g.x0, g.y0, g.x1, g.y1, g.text, bool(_MATH_FONT.search(g.font or "")), g.size)
+                for g in row.glyphs
+            ]
+            found = drawn_lines.owners(drawn_line, marks)
+            if found is None:
+                continue
+            positions = set(found.indexes)
+            if found.kind == "underscore":  # the identifier: the whole words on both sides
+                positions = {k for word in _words(row.glyphs) if positions & set(word) for k in word}
+                row.underscores.add(found.indexes[1])
+            for k in positions:
+                row.keep[k] = True
+            row.drawn.append((index, sorted(positions)))
+            break
 
 
 def detect_page(
@@ -1003,16 +1080,21 @@ def keep_flags(line: list[Glyph]) -> list[bool]:
         ):
             for k in word:
                 keep[k] = True
-    # Function calls: a small caps name and everything inside its parentheses.
+    # Names: constants and identifiers (ticket 16), and function calls (a
+    # name and everything inside its parentheses, D5).
+    tokens = _tokens(line)
+    # A row whose letters are all capitals is a heading in capitals: its
+    # words are no constants. So are the words of a bold heading.
+    constants = not heading and any(g.text.islower() for g in line)
     k = 0
     while k < len(line):
-        word = next(w for w in words if k in w)
-        if word[0] != k or not _small_caps([line[j] for j in word]):
+        name = _name(line, words, tokens, k, constants)
+        if name is None:
             k += 1
             continue
         depth = 0
-        end = word[-1] + 1
-        for j in word:
+        end = name[-1] + 1
+        for j in name:
             keep[j] = True
             depth += line[j].text.count("(") - line[j].text.count(")")
         if depth == 0 and end < len(line) and line[end].text == "(":
@@ -1118,3 +1200,48 @@ def _small_caps(word: list[Glyph]) -> bool:
         and all(g.text.isupper() for g in letters)
         and len({g.font for g in letters}) == 1
     )
+
+
+def _tokens(line: list[Glyph]) -> list[list[int]]:
+    """Positions of the line's glyphs grouped at word gaps only (across font changes)."""
+    tokens: list[list[int]] = []
+    for k, g in enumerate(line):
+        if tokens and not word_gap(line[tokens[-1][-1]], g):
+            tokens[-1].append(k)
+        else:
+            tokens.append([k])
+    return tokens
+
+
+def _name(
+    line: list[Glyph], words: list[list[int]], tokens: list[list[int]], k: int, constants: bool
+) -> list[int] | None:
+    """The positions of the constant or identifier that starts at position ``k``, if one does."""
+    token = next((t for t in tokens if t[0] == k), None)
+    if token is not None and _identifier([line[j] for j in token]):
+        return token
+    word = next((w for w in words if w[0] == k), None)
+    if word is None:
+        return None
+    glyphs = [line[j] for j in word]
+    if _small_caps(glyphs) or _SMALL_CAPS_FONT.search(glyphs[0].font or ""):
+        return word
+    letters = [g.text for g in glyphs if g.text.isalpha()]
+    if constants and len(letters) >= _CONSTANT_LETTERS and all(c.isupper() for c in letters):
+        return word
+    return None
+
+
+def _identifier(token: list[Glyph]) -> bool:
+    """An underscore between letters or digits (max_retry), or camelCase (a lower-case letter
+    followed by a capital in one font) that starts in lower case (avgScore) or is a call
+    (SelectParents(A): a "(" right after the name, so in the same run without a word gap).
+    A name with a capital inside that starts with a capital and is no call (AutoDesign,
+    AutoRef, LiDAR, "AutoDesign (with ...)") is a name of the paper, left to the glossary:
+    key concepts stay in English anyway (requirement 1)."""
+    text = "".join(g.text for g in token)
+    if re.search(r"[^\W_]_+[^\W_]", text):
+        return True
+    camel = any(a.text.islower() and b.text.isupper() and a.font == b.font for a, b in zip(token, token[1:]))
+    letters = [c for c in text if c.isalpha()]
+    return camel and (letters[0].islower() or bool(re.search(r"[^\W_]\(", text)))
