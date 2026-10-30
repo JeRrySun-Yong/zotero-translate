@@ -93,7 +93,10 @@ def chars_at(text: str, x: float, y: float) -> list[PdfCharacter]:
         box = Box(x=x + 5 * k, y=y, x2=x + 5 * k + 5, y2=y + 9)
         chars.append(
             PdfCharacter(
-                char_unicode=c, box=box, visual_bbox=VisualBbox(box=box), pdf_style=PdfStyle(font_id="F", font_size=9)
+                char_unicode=c,
+                box=box,
+                visual_bbox=VisualBbox(box=box),
+                pdf_style=PdfStyle(font_id="F", font_size=9),
             )
         )
     return chars

@@ -820,7 +820,15 @@ class ParagraphFinder:
         when its last character is on ``char``'s text line (the same
         ``fallback_line`` box) and ``char`` starts right of that character's
         start. Otherwise ``char`` starts a new paragraph, as before.
+
+        Not in a ``fallback_line`` box (a text line that no text box holds,
+        mostly labels inside a figure): a paragraph there holds one line and
+        cannot cover another, and labels that share the line are separate
+        ("VLM rubric" and "hard constraint" 51 pt apart under two images on
+        AutoDesign page 10, the icons of MaLiang's table 1 header).
         """
+        if layout.name == "fallback_line":
+            return None
         for paragraph in reversed(paragraphs):
             if (
                 paragraph.layout_id != layout.id
