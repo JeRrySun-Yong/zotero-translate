@@ -193,7 +193,7 @@ def body(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("body")
     pdf = tmp / "body.pdf"
     body_pdf(pdf)
-    report, mono, model = run(tmp, pdf)
+    _, mono, model = run(tmp, pdf)
     return pdf.read_bytes(), mono, model
 
 
@@ -240,6 +240,32 @@ def test_an_identifier_with_drawn_underscores_keeps_its_source(body):
             underscore = line_at(lines, left["bbox"][2] + 0.6)
             assert abs(underscore[1] - right["bbox"][0]) <= 1.0, (left, right, underscore)
             assert abs(underscore[2] - left["origin"][1]) <= 0.5
+
+
+def il_char(text: str, x: float, formula_font: bool = False):
+    from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfStyle, VisualBbox
+
+    box = Box(x, 100.0, x + 5.0, 110.0)
+    return PdfCharacter(
+        char_unicode=text, box=box, visual_bbox=VisualBbox(box=Box(x, 100.0, x + 5.0, 108.0)),
+        pdf_style=PdfStyle(font_id="F2" if formula_font else "F1", font_size=10.0),
+    )
+
+
+def test_a_line_over_compositions_the_rule_does_not_know_is_left_alone():
+    """Only formulas and text lines are merged: a range that holds another kind of
+    composition is not one formula, and nothing of the paragraph is dropped."""
+    from babeldoc.format.pdf.document_il import PdfFormula, PdfLine, PdfParagraph, PdfParagraphComposition
+    from babeldoc.format.pdf.document_il.midend.styles_and_formulas import StylesAndFormulas
+    from babeldoc.format.pdf.document_il.utils.drawn_lines import DrawnLine
+
+    sign = PdfParagraphComposition(pdf_formula=PdfFormula(pdf_character=[il_char("√", 100, True)]))
+    other = PdfParagraphComposition(pdf_character=il_char("m", 105))
+    rest = PdfParagraphComposition(pdf_line=PdfLine(pdf_character=[il_char("x", 110, True), il_char(")", 115)]))
+    paragraph = PdfParagraph(pdf_paragraph_composition=[sign, other, rest])
+    stage = StylesAndFormulas.__new__(StylesAndFormulas)
+    assert stage._formula_of_drawn_line(paragraph, DrawnLine(105.0, 120.0, 108.0)) is None
+    assert paragraph.pdf_paragraph_composition == [sign, other, rest]
 
 
 def test_maliang_p18_radical_bars_stay_on_their_radical_signs(tmp_path):
@@ -441,5 +467,7 @@ def test_drawn_lines_move_with_their_kept_glyphs_in_an_algorithm(algorithm):
     assert abs(before["bbox"][0] - after["bbox"][0]) > 5
     # The algorithm's three rules stay where they were.
     with pymupdf.open(stream=source, filetype="pdf") as a, pymupdf.open(stream=mono, filetype="pdf") as b:
-        rules = lambda doc: sorted(round(d["rect"].y0, 1) for d in doc[0].get_drawings() if d["rect"].width > 200)  # noqa: E731
+        def rules(doc):
+            return sorted(round(d["rect"].y0, 1) for d in doc[0].get_drawings() if d["rect"].width > 200)
+
         assert rules(a) == rules(b)

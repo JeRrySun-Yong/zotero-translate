@@ -440,6 +440,11 @@ class StylesAndFormulas:
             first_k = 0
         if compositions[last_ci].pdf_formula:
             last_k = len(compositions[last_ci].pdf_formula.pdf_character) - 1
+        if any(
+            not (c.pdf_formula or c.pdf_line)
+            for c in compositions[first_ci : last_ci + 1]
+        ):
+            return None  # only formulas and text lines are merged; nothing is dropped
         taken = [
             char
             for ci, k, char in flat
