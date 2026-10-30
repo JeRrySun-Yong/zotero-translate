@@ -198,6 +198,8 @@ def test_constants_and_identifiers_keep_their_source_text():
     run = row(("Run ", TEXT, False, 10), ("H", MATH, False, 10), ("0 ", "CMR7", False, 7), ("on the AutoDesign harness", TEXT, False, 10))
     assert kept_words(run) == ["H0"]
     assert kept_words(row(("Diffusion Rejection Sampling (DiffRS)", TEXT, False, 10))) == []
+    # A call needs the "(" right after the name; after a word gap it opens ordinary text.
+    assert kept_words(row(("Run AutoDesign (with the default settings)", TEXT, False, 10))) == []
 
 
 def test_words_that_look_like_constants_but_are_not_stay_translatable():
