@@ -1325,10 +1325,10 @@ class Typesetting:
         the top of its box, lower than the source baseline of a Latin label
         (AutoRef page 8's legend, the x-axis titles of pages 1 and 20), so
         the descenders of a label on the form's bottom edge are cut off. A
-        layout whose glyphs reach below the form's box is laid out again
-        that much higher, and fits when it is then inside the form's box and
-        its glyphs overlap no other text near it (``page``) that the layout
-        box did not already overlap."""
+        layout whose glyphs reach below the form's box (or only above it) is
+        laid out again that much higher (lower), and fits when it is then
+        inside the form's box and its glyphs overlap no other text near it
+        (``page``) that the layout box did not already overlap."""
         typeset_units, fit = self._try_layout(
             typesetting_units,
             box,
@@ -1339,12 +1339,16 @@ class Typesetting:
         )
         if not fit or clip is None or self._inside(typeset_units, clip):
             return typeset_units, fit
-        below = clip.y - min(
-            self._glyph_box(unit).y for unit in typeset_units if not unit.is_space
-        )
-        if below <= 0 or page is None:
+        glyphs = [self._glyph_box(unit) for unit in typeset_units if not unit.is_space]
+        below = clip.y - min(g.y for g in glyphs)
+        # A first line in a larger font than the paragraph's usual size
+        # (a step title over its quote, AutoRef page 22) reaches above the
+        # box by the difference; such a layout is lowered the same way.
+        above = max(g.y2 for g in glyphs) - clip.y2
+        if page is None or (below > 0) == (above > 0):
             return typeset_units, False
-        raised_box = Box(x=box.x, y=box.y + below, x2=box.x2, y2=box.y2 + below)
+        shift = below if below > 0 else -above
+        raised_box = Box(x=box.x, y=box.y + shift, x2=box.x2, y2=box.y2 + shift)
         raised, fit = self._try_layout(
             typesetting_units,
             raised_box,
