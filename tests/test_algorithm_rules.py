@@ -191,9 +191,13 @@ def test_constants_and_identifiers_keep_their_source_text():
     assert kept_words(retry) == ["while", "retry<max_retry"]
     call = row(("P ", MATH, False, 10), ("← ", "CMSY10", False, 10), ("SelectParents(archive, k) from the archive", TEXT, False, 10))
     assert kept_words(call) == ["P", "←", "SelectParents(archive,", "k)"]
-    # Natural language around them is translated as before.
+    score = row(("avgScore ", TEXT, False, 10), ("← ", "CMSY10", False, 10), ("the mean of all scores", TEXT, False, 10))
+    assert kept_words(score) == ["avgScore", "←"]
+    # A name with a capital inside that is no call (AutoDesign, AutoRef: key concepts) is left to
+    # the glossary; the natural language around it is translated as before.
     run = row(("Run ", TEXT, False, 10), ("H", MATH, False, 10), ("0 ", "CMR7", False, 7), ("on the AutoDesign harness", TEXT, False, 10))
-    assert kept_words(run) == ["H0", "AutoDesign"]
+    assert kept_words(run) == ["H0"]
+    assert kept_words(row(("Diffusion Rejection Sampling (DiffRS)", TEXT, False, 10))) == []
 
 
 def test_words_that_look_like_constants_but_are_not_stay_translatable():

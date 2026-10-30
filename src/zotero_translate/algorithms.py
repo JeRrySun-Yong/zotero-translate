@@ -1155,8 +1155,10 @@ def _name(
 ) -> list[int] | None:
     """The positions of the constant or identifier that starts at position ``k``, if one does."""
     token = next((t for t in tokens if t[0] == k), None)
-    if token is not None and _identifier([line[j] for j in token]):
-        return token
+    if token is not None:
+        called = token[-1] + 1 < len(line) and line[token[-1] + 1].text == "("
+        if _identifier([line[j] for j in token], called):
+            return token
     word = next((w for w in words if w[0] == k), None)
     if word is None:
         return None
@@ -1169,9 +1171,15 @@ def _name(
     return None
 
 
-def _identifier(token: list[Glyph]) -> bool:
-    """An underscore between letters or digits (max_retry), or camelCase in one font (SelectParents)."""
+def _identifier(token: list[Glyph], called: bool) -> bool:
+    """An underscore between letters or digits (max_retry), or camelCase (a lower-case letter
+    followed by a capital in one font) that starts in lower case (avgScore) or is a call
+    (SelectParents(A); ``called``: the next glyph is "("). A name with a capital inside that
+    starts with a capital and is no call (AutoDesign, AutoRef, LiDAR) is a name of the paper,
+    left to the glossary: key concepts stay in English anyway (requirement 1)."""
     text = "".join(g.text for g in token)
-    return bool(re.search(r"[^\W_]_+[^\W_]", text)) or any(
-        a.text.islower() and b.text.isupper() and a.font == b.font for a, b in zip(token, token[1:])
-    )
+    if re.search(r"[^\W_]_+[^\W_]", text):
+        return True
+    camel = any(a.text.islower() and b.text.isupper() and a.font == b.font for a, b in zip(token, token[1:]))
+    letters = [c for c in text if c.isalpha()]
+    return camel and (letters[0].islower() or called or bool(re.search(r"[^\W_]\(", text)))
