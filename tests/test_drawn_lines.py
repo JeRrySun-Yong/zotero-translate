@@ -296,7 +296,16 @@ def ruled_with_drawn_lines():
     fraction = x
     row += text_glyphs("a", x, 476, 6.3, "CMMI7") + text_glyphs("b", x, 470, 6.3, "CMMI7")
     drawn.append((fraction, fraction + 3.15, 474.5))
-    more, x = glyph_run([(" then stop", text)], fraction + 3.15, 473)
+    more, x = glyph_run([(" with ", text)], fraction + 3.15, 473)
+    row += more
+    # A fraction whose denominator ends in a 4.5 pt subscript: the bar ends 2 pt above
+    # the subscript's box (2405.17880 p3, line 4: L_t over M_t L_{t+1}).
+    fraction = x
+    row += text_glyphs("c", x + 1, 476, 6.3, "CMMI7") + text_glyphs("d", x, 470, 6.3, "CMMI7")
+    row += text_glyphs("t+1", x + 3.15, 468.9, 4.5, "CMR5")
+    end = x + 3.15 + 3 * 2.25
+    drawn.append((fraction, end, 474.5))
+    more, x = glyph_run([(" then stop", text)], end, 473)
     glyphs += row + more
     glyphs += text_glyphs("end for", LEFT + 2, 462, font="NimbusRomNo9L-Medi")
     glyphs += text_glyphs("return the model", LEFT + 2, 451)
@@ -325,7 +334,7 @@ def test_a_radical_bar_and_a_fraction_bar_belong_to_their_row_and_the_rules_to_n
     lines = unit.fragments[0].lines
     owned = {index: line.text for line in lines for index, _ in line.drawn}
     assert owned == {
-        3: lines[1].text, 4: lines[1].text, 5: lines[2].text, 6: lines[2].text
+        3: lines[1].text, 4: lines[1].text, 5: lines[2].text, 6: lines[2].text, 7: lines[2].text
     }, owned  # the three rules (0, 1, 2) belong to no row
     for line in lines:
         for _, positions in line.drawn:

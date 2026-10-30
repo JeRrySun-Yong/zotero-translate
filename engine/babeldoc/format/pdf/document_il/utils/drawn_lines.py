@@ -12,7 +12,9 @@ which glyphs of a text line a drawn line belongs to.
 A drawn line (``line_of``) is a stroke or filled box at most ``LINE_HEIGHT``
 pt high and wider than it is high. It belongs to glyphs of one text line when
 both of its ends touch a glyph (the end is within ``TOUCH`` pt of the glyph's
-box sideways, and the line within ``TOUCH`` pt of it in height) and
+box sideways, and the line within ``TOUCH`` pt of it in height; for a
+formula's line, within ``TOUCH`` + ``END_REACH`` x the size of a formula
+glyph) and
 
 - it is a formula's line: a glyph at one of its ends or under or over it
   (the glyph's centre between the line's ends) is a formula glyph, and the
@@ -46,6 +48,10 @@ LINE_HEIGHT = 2.0
 # starts where its sign ends; TeX's underscore starts 0.06 em (0.6 pt at
 # 10 pt) right of the letter before it.
 TOUCH = 1.0
+# At an end of a formula's line, a formula glyph may be this x its size
+# further away in height (2405.17880 p3: a fraction's bar ends 1.9 pt above
+# the box of the 5 pt subscript "t+1" that ends its denominator).
+END_REACH = 0.3
 # Letters in a row, outside formulas, under or over a line that make it a
 # rule over or under text ("min" in a radical is 3).
 WORD_LETTERS = 4
@@ -111,17 +117,29 @@ def owners(line: DrawnLine, marks: list[Mark]) -> Owners | None:
     ]
     left = [i for i in near if marks[i].x0 - TOUCH <= line.x0 <= marks[i].x1 + TOUCH]
     right = [i for i in near if marks[i].x0 - TOUCH <= line.x1 <= marks[i].x1 + TOUCH]
-    if not left or not right:
-        return None
     under = sorted(
         (i for i in near if line.x0 < marks[i].xc < line.x1), key=lambda i: marks[i].x0
     )
     if not under:
-        return _underscore(line, marks, left, right)
+        return _underscore(line, marks, left, right) if left and right else None
+    if not (_reached(line, marks, line.x0) and _reached(line, marks, line.x1)):
+        return None
     if not any(marks[i].formula for i in under + left + right) or _spells_word(marks, under):
         return None
     ends = [i for i in left + right if marks[i].formula and i not in under]
     return Owners("formula", sorted(set(under + ends)))
+
+
+def _reached(line: DrawnLine, marks: list[Mark], x: float) -> bool:
+    """Does an end of a formula's line (at ``x``) touch a glyph? A formula glyph may be
+    ``END_REACH`` x its size further away in height (a subscript ending a denominator)."""
+    for m in marks:
+        if not m.text.strip() or not m.x0 - TOUCH <= x <= m.x1 + TOUCH:
+            continue
+        reach = TOUCH + (END_REACH * m.size if m.formula else 0.0)
+        if m.y0 - reach <= line.y <= m.y1 + reach:
+            return True
+    return False
 
 
 def _underscore(line: DrawnLine, marks: list[Mark], left: list[int], right: list[int]):
