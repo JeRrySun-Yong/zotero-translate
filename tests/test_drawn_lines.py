@@ -242,14 +242,47 @@ def test_an_identifier_with_drawn_underscores_keeps_its_source(body):
             assert abs(underscore[2] - left["origin"][1]) <= 0.5
 
 
-def il_char(text: str, x: float, formula_font: bool = False):
+def il_char(text: str, x: float, formula_font: bool = False, base: float = 100.0, size: float = 10.0):
+    """An engine character: its box from the baseline up by the size, as the engine's are."""
     from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfStyle, VisualBbox
 
-    box = Box(x, 100.0, x + 5.0, 110.0)
+    box = Box(x, base, x + 0.5 * size, base + size)
     return PdfCharacter(
-        char_unicode=text, box=box, visual_bbox=VisualBbox(box=Box(x, 100.0, x + 5.0, 108.0)),
-        pdf_style=PdfStyle(font_id="F2" if formula_font else "F1", font_size=10.0),
+        char_unicode=text, box=box, visual_bbox=VisualBbox(box=Box(x, base, x + 0.5 * size, base + 0.8 * size)),
+        pdf_style=PdfStyle(font_id="F2" if formula_font else "F1", font_size=size),
     )
+
+
+def il_text(text: str, x: float, base: float = 100.0):
+    """A text line composition, one 5 pt wide character per letter from x."""
+    from babeldoc.format.pdf.document_il import PdfLine, PdfParagraphComposition
+
+    return PdfParagraphComposition(
+        pdf_line=PdfLine(pdf_character=[il_char(ch, x + 5.0 * k, base=base) for k, ch in enumerate(text)])
+    )
+
+
+def test_a_line_under_a_formula_never_joins_the_next_text_line():
+    """2412.16318 p6: the underline of y_a(t) lies 3.4 pt below the baseline, inside the
+    boxes of the next text line's letters (an engine box reaches a whole size above the
+    baseline). It must not make one formula from the rest of its line and the start of
+    the next one: a line's characters are on one text line."""
+    from babeldoc.format.pdf.document_il import PdfFormula, PdfParagraph, PdfParagraphComposition
+    from babeldoc.format.pdf.document_il.midend.styles_and_formulas import StylesAndFormulas
+    from babeldoc.format.pdf.document_il.utils.drawn_lines import DrawnLine
+
+    y = il_char("y", 120.0, True)
+    a = il_char("a", 125.0, True, base=95.5, size=7.0)
+    compositions = [
+        il_text("range ", 90.0),
+        PdfParagraphComposition(pdf_formula=PdfFormula(pdf_character=[y, a])),
+        il_text(" by testing whether", 128.5),
+        il_text("fered incentive entice", 55.0, base=88.0),  # the next text line, 12 pt lower
+    ]
+    paragraph = PdfParagraph(pdf_paragraph_composition=list(compositions))
+    stage = StylesAndFormulas.__new__(StylesAndFormulas)
+    assert stage._formula_of_drawn_line(paragraph, DrawnLine(120.0, 125.2, 96.6)) is None
+    assert paragraph.pdf_paragraph_composition == compositions
 
 
 def test_a_line_over_compositions_the_rule_does_not_know_is_left_alone():
