@@ -980,6 +980,7 @@ class Typesetting:
         initial_scale: float = 1.0,
         use_english_line_break: bool = True,
         apply_layout: bool = False,
+        widen_labels: bool = True,
     ) -> tuple[float, list[TypesettingUnit] | None]:
         """查找最优缩放因子并可选择性地执行布局
 
@@ -990,6 +991,9 @@ class Typesetting:
             initial_scale: 初始缩放因子
             use_english_line_break: 是否使用英文换行规则
             apply_layout: 是否应用布局到 paragraph（True 时执行实际排版）
+            widen_labels: whether a one-line figure label may be tried in a
+                widened box (closure ticket 15); False for the comparison
+                search without it
 
         Returns:
             tuple[float, list[TypesettingUnit] | None]: (最终缩放因子，排版后的单元列表或 None)
@@ -1045,7 +1049,12 @@ class Typesetting:
                 clip,
             )[1]
         )
-        if cell_box is not None and clip is not None and not fits_unwidened:
+        if (
+            widen_labels
+            and cell_box is not None
+            and clip is not None
+            and not fits_unwidened
+        ):
             # closure 15: a one-line figure label (in a form) widens the same
             # way within the form's box before it shrinks: the legend label
             # "搭配 Qwen3-VL-32B" fits whole once centred under its bar. Unlike
@@ -1055,8 +1064,11 @@ class Typesetting:
             # pt for 3.7 pt glyphs); so the widened label is tried on its
             # own, from no larger than its source line
             # (WIDENED_LABEL_MAX_HEIGHT) down to MIN_SCALE, and only where it
-            # touches no other text. Otherwise it is laid out in its own box
-            # as before.
+            # touches no other text. It is used unless the search in its own
+            # box, which may go down into free lines below, keeps a larger
+            # font that is still within that limit (AutoDesign page 3:
+            # "Init." as "初始化" on two lines at 3.2 pt, not one at 2.5 pt).
+            # Otherwise it is laid out in its own box as before.
             widened = self._widened_label_layout(
                 typesetting_units,
                 cell_box,
@@ -1069,7 +1081,15 @@ class Typesetting:
                 use_english_line_break,
                 clip,
             )
-            if widened is not None:
+            if widened is not None and not self._own_box_keeps_larger_font(
+                widened[0],
+                paragraph,
+                page,
+                typesetting_units,
+                initial_scale,
+                use_english_line_break,
+                source_box,
+            ):
                 label_scale, typeset_units = widened
                 if apply_layout:
                     self._apply_typeset_units(
@@ -1191,6 +1211,7 @@ class Typesetting:
                 initial_scale,
                 use_english_line_break=False,
                 apply_layout=apply_layout,
+                widen_labels=widen_labels,
             )
 
         # Nothing fits at or above min_scale (closure 03): set the paragraph at
@@ -1365,6 +1386,33 @@ class Typesetting:
                 return scale, typeset_units
             scale -= 0.05 if scale > 0.6 else 0.1
         return None
+
+    def _own_box_keeps_larger_font(
+        self,
+        widened_scale: float,
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        typesetting_units: list[TypesettingUnit],
+        initial_scale: float,
+        use_english_line_break: bool,
+        source_box: Box,
+    ) -> bool:
+        """Whether the search in the label's own box (without widening, not
+        applied) ends at a larger scale than ``widened_scale`` that is still
+        within the widened label's limit (closure ticket 15). A scale above
+        the limit is the search growing a label past its source line (it
+        restarts at 1.0 when it cannot expand), not free space."""
+        own_scale, _ = self._find_optimal_scale_and_layout(
+            paragraph,
+            page,
+            typesetting_units,
+            initial_scale,
+            use_english_line_break,
+            apply_layout=False,
+            widen_labels=False,
+        )
+        limit = self._label_scale(paragraph, source_box)
+        return widened_scale + SCALE_EPSILON < own_scale <= limit + SCALE_EPSILON
 
     @staticmethod
     def _other_text_near(
