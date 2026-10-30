@@ -777,13 +777,17 @@ class ParagraphFinder:
 
             if is_new_paragraph:
                 current_layout = char_layout
-                current_paragraph = PdfParagraph(
-                    pdf_paragraph_composition=[],
-                    layout_id=current_layout.id,
-                    debug_id=generate_base58_id(),
-                    layout_label=current_layout.name,
+                current_paragraph = self._interrupted_paragraph(
+                    char, char_layout, paragraphs, layout_index, layout_map
                 )
-                paragraphs.append(current_paragraph)
+                if current_paragraph is None:
+                    current_paragraph = PdfParagraph(
+                        pdf_paragraph_composition=[],
+                        layout_id=current_layout.id,
+                        debug_id=generate_base58_id(),
+                        layout_label=current_layout.name,
+                    )
+                    paragraphs.append(current_paragraph)
 
             current_paragraph.pdf_paragraph_composition.append(
                 PdfParagraphComposition(pdf_character=char)
@@ -793,6 +797,48 @@ class ParagraphFinder:
         for para in paragraphs:
             self.update_paragraph_data(para)
         return paragraphs
+
+    def _interrupted_paragraph(
+        self,
+        char: PdfCharacter,
+        layout: Layout,
+        paragraphs: list[PdfParagraph],
+        layout_index,
+        layout_map,
+    ) -> PdfParagraph | None:
+        """The paragraph that ``char`` continues although characters of
+        another layout box or form came between them (closure ticket 18, O1).
+
+        The characters of a page come in the order of the engine's character
+        list, which is not always the reading order: on AutoDesign page 1 the
+        40 characters of the arXiv watermark (another box, drawn in its own
+        form) come between the figure title "... the artifacts." and
+        "(a) Score of the poster ...", which follows it on the same line. Two
+        paragraphs that share a source line are laid out from the top of
+        their boxes, so the second covered the first. The paragraph found is
+        the last one of ``layout`` and ``char``'s form; ``char`` continues it
+        when its last character is on ``char``'s text line (the same
+        ``fallback_line`` box) and ``char`` starts right of that character's
+        start. Otherwise ``char`` starts a new paragraph, as before.
+        """
+        for paragraph in reversed(paragraphs):
+            if (
+                paragraph.layout_id != layout.id
+                or not paragraph.pdf_paragraph_composition
+            ):
+                continue
+            last = paragraph.pdf_paragraph_composition[-1].pdf_character
+            if last is None or last.xobj_id != char.xobj_id:
+                continue
+            line = self._text_line(char, layout_index, layout_map)
+            if (
+                line is not None
+                and self._text_line(last, layout_index, layout_map) == line
+                and char.box.x >= last.box.x
+            ):
+                return paragraph
+            return None
+        return None
 
     def _line_layouts(
         self,
