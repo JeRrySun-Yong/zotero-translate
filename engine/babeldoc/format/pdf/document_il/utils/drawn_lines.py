@@ -49,9 +49,11 @@ LINE_HEIGHT = 2.0
 # 10 pt) right of the letter before it.
 TOUCH = 1.0
 # At an end of a formula's line, a formula glyph may be this x its size
-# further away in height (2405.17880 p3: a fraction's bar ends 1.9 pt above
-# the box of the 5 pt subscript "t+1" that ends its denominator).
-END_REACH = 0.3
+# further away in height: the numerator or denominator that is as wide as
+# the bar sits off it (2409.08861 p51: a 6 pt numerator 2.8 pt above the
+# bar; 2405.17880 p3: the bar ends 1.9 pt above the box of the 5 pt
+# subscript "t+1" that ends its denominator).
+END_REACH = 0.6
 # Letters in a row, outside formulas, under or over a line that make it a
 # rule over or under text ("min" in a radical is 3).
 WORD_LETTERS = 4
