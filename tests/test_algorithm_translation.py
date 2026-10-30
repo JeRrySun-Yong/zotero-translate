@@ -337,6 +337,71 @@ def test_kept_words_keep_their_small_caps_and_typewriter_glyphs(autodesign):
     assert "SFVT1000" in word_fonts(source, rect, "AutoDesign")
 
 
+# -- ticket 16: constants stay as they are, by placeholders ----------------------
+
+CONSTANTS = {"Accept": "接受", "Reject": "拒绝"}  # AutoDesign p7 lines 8 and 11, small caps
+
+
+@pytest.fixture(scope="module")
+def autodesign_translated(tmp_path_factory):
+    """AutoDesign p7 with a model that translates every row with natural language."""
+    with FakeModel() as model:
+        result = run_tasks(model, tmp_path_factory.mktemp("constants"), [AUTODESIGN])[AUTODESIGN]
+        result["requests"] = model.requests_of("algorithm")
+    return result
+
+
+def holds(row: dict, word: str) -> bool:
+    return word in row["source"] or any(word in value for value in row["keep"].values())
+
+
+def test_constants_are_placeholders_in_the_request(autodesign_translated):
+    result = autodesign_translated
+    assert result["report"]["algorithms"][0]["result"] == "translated"
+    rows = algorithm_rows(result["requests"][0].body)
+    for word in CONSTANTS:
+        row = next(r for r in rows if holds(r, word))
+        assert word not in row["source"], row  # no word for the model to translate
+        assert any(word in value for value in row["keep"].values()), row
+        assert word_fonts(result["mono"], algorithm_rect(result), word) == {"SFCC1000"}
+
+
+def translate_the_constants(body):
+    """A model that translates Accept and Reject anyway: it writes the placeholder's
+    content, translated, instead of the placeholder."""
+    answer = json.loads(pseudo_translate_algorithm(body))
+    rows = {r["id"]: r for r in algorithm_rows(body)}
+    for item in answer:
+        row = rows[item["id"]]
+        if not any(holds(row, word) for word in CONSTANTS):
+            continue
+        output = row["source"]
+        for name, value in row["keep"].items():
+            if any(word in value for word in CONSTANTS):
+                output = output.replace(name, value)
+        for word, chinese in CONSTANTS.items():
+            output = output.replace(word, chinese)
+        item["output"] = output
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def test_an_answer_that_translates_a_constant_is_resent_then_keeps_the_source(tmp_path):
+    with FakeModel() as model:
+        model.respond("algorithm", translate_the_constants)
+        result = run_tasks(model, tmp_path, [AUTODESIGN])[AUTODESIGN]
+        requests = model.requests_of("algorithm")
+    assert result["status"]["state"] == "succeeded"
+    algorithm = result["report"]["algorithms"][0]
+    assert algorithm["result"] == "kept_source"
+    assert "占位符与原文同一行不同" in algorithm["reason"]
+    # Resent within the client's retries (ADR 0002), the same request each time.
+    assert len(requests) > 1 and len({r.prompt for r in requests}) == 1
+    rect = algorithm_rect(result)
+    for word in CONSTANTS:
+        assert word_fonts(result["mono"], rect, word) == {"SFCC1000"}
+    assert PSEUDO_PREFIX in page_text(result["mono"])
+
+
 # -- review round 1: review, mechanical checks and layout fallback ------------
 
 

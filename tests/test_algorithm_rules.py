@@ -152,3 +152,53 @@ def test_keywords_formulas_and_calls_keep_their_source_text():
     assert set(kept(heading)) == {"_"}
     title = row(("Algorithm 2 ", BOLD, True, 10), ("Procedural generation", TEXT, False, 10))
     assert kept(title).startswith("Algorithm2_")
+
+
+ITALIC = "NimbusRomNo9L-ReguItal"
+
+
+def kept_words(glyphs: list[Glyph]) -> list[str]:
+    """The row's words (split at word gaps, not at font changes) whose glyphs all keep their source text."""
+    keep = keep_flags(glyphs)
+    words: list[list[int]] = []
+    for k, g in enumerate(glyphs):
+        if words and g.x0 - glyphs[words[-1][-1]].x1 <= 0.2 * g.size:
+            words[-1].append(k)
+        else:
+            words.append([k])
+    return ["".join(glyphs[k].text for k in word) for word in words if all(keep[k] for k in word)]
+
+
+def test_constants_and_identifiers_keep_their_source_text():
+    """Ticket 16: constants and identifiers become placeholders, so a model cannot translate them."""
+    # AutoDesign p7 line 8: "Accept" is set in a small caps font whose text layer reads "Accept".
+    accept = row(
+        ("d", MATH, False, 10), ("t ", "CMMI7", False, 7), ("← ", "CMSY10", False, 10),
+        ("Accept", "JICVUE+SFCC1000", False, 10),
+    )
+    assert kept_words(accept) == ["dt", "←", "Accept"]
+    assert kept_words(row(("set ", TEXT, False, 10), ("Done", "LMRomanCaps10-Regular", False, 10))) == ["Done"]
+    # Capitals: a word of _CONSTANT_LETTERS letters or more is a constant; a shorter one is an abbreviation.
+    capitals = row(("return ACCEPT if the LLM and FAISS agree on IDs", TEXT, False, 10))
+    assert kept_words(capitals) == ["ACCEPT"]
+    # Identifiers: an underscore inside a word (across font changes), or camelCase; a call keeps its arguments.
+    valid = row(("if ", BOLD, True, 10), ("c.is_valid() ", ITALIC, False, 10), ("then", BOLD, True, 10))
+    assert kept_words(valid) == ["if", "c.is_valid()", "then"]
+    retry = row(
+        ("while ", BOLD, True, 10), ("retry<max", MATH, False, 10), ("_", TEXT, False, 10),
+        ("retry ", MATH, False, 10), ("and children remain", TEXT, False, 10),
+    )
+    assert kept_words(retry) == ["while", "retry<max_retry"]
+    call = row(("P ", MATH, False, 10), ("← ", "CMSY10", False, 10), ("SelectParents(archive, k) from the archive", TEXT, False, 10))
+    assert kept_words(call) == ["P", "←", "SelectParents(archive,", "k)"]
+    # Natural language around them is translated as before.
+    run = row(("Run ", TEXT, False, 10), ("H", MATH, False, 10), ("0 ", "CMR7", False, 7), ("on the AutoDesign harness", TEXT, False, 10))
+    assert kept_words(run) == ["H0", "AutoDesign"]
+
+
+def test_words_that_look_like_constants_but_are_not_stay_translatable():
+    """Ticket 16 exceptions: a Chinese font's "SC" (Simplified Chinese), headings in capitals."""
+    assert kept_words(row(("Accept", "PingFangSC-Regular", False, 10))) == []
+    assert kept_words(row(("TRAINING SCHEDULE", TEXT, False, 10))) == []
+    assert kept_words(row(("Training SCHEDULE", BOLD, True, 10))) == []
+    assert kept_words(row(("STAGE 2: SDE Integration", BOLD, True, 9))) == []
