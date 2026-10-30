@@ -58,7 +58,7 @@ PROMPT_TEMPLATE = Template(
 - Numbers (decimals, percentages, values with units), URLs, code identifiers, model names and dataset names: keep them exactly as in the input.
 - JSON keys or structure.
 
-$glossary_usage_rules_block$first_mention_rules_block
+$glossary_usage_rules_block$first_mention_rules_block$key_concept_heading_rules_block
 ## Output Format
 Return a JSON array of the same length.  
 For each item:
@@ -110,6 +110,16 @@ Some input items have "{FIRST_MENTION_FIELD}": key concepts of this paper that o
 - Skip an occurrence inside the input's own parentheses: in "… Adaptive Query Router (AQR) module. The AQR module …", the gloss goes after the second AQR, never inside "(AQR)".
 {GLOSS_PLACEMENT_RULES}
 - Add each gloss at most once. Add no gloss anywhere else, and do not output the "{FIRST_MENTION_FIELD}" field.
+
+"""
+
+KEY_CONCEPT_HEADING_FIELD = "key_concept_heading"
+
+# A section heading that is a key concept's full name is translated into
+# Chinese only, although the glossary keeps key concepts in English
+# (requirement 1; user's decision of 2026-10-29, closure ticket 17).
+KEY_CONCEPT_HEADING_RULES = f"""## Section Headings That Are Key Concepts
+Some input items have "{KEY_CONCEPT_HEADING_FIELD}": the item is a section heading that is the full name of a key concept of this paper. Translate such a heading into Chinese, the key concept included, and write it in Chinese only: no English words, no gloss and no parentheses; keep its section number. This overrides, for these items only, the glossary rule that keeps key concepts in English. Do not output the "{KEY_CONCEPT_HEADING_FIELD}" field.
 
 """
 
@@ -313,6 +323,8 @@ class ILTranslatorLLMOnly:
                 paragraphs.append((page.page_number, paragraph.layout_label, text))
         planner = self.translation_config.first_mention_planner
         self._first_mention_glosses = planner(paragraphs) if planner else {}
+        headings = self.translation_config.key_concept_headings
+        self._key_concept_headings = headings(paragraphs) if headings else {}
 
     def _start_algorithm_translation(self, docs: Document) -> None:
         """Hand every paragraph's page, box and section title to the algorithm translator."""
@@ -346,6 +358,10 @@ class ILTranslatorLLMOnly:
     def _first_mention_glosses_of(self, paragraph: PdfParagraph) -> list[dict]:
         position = self._reading_order.get(id(paragraph))
         return self._first_mention_glosses.get(position, [])
+
+    def _key_concept_heading_of(self, paragraph: PdfParagraph) -> str | None:
+        position = self._reading_order.get(id(paragraph))
+        return self._key_concept_headings.get(position)
 
     def _paper_context_block(self, paragraphs: list[PdfParagraph]) -> str | None:
         """The paper context of a batch, or None without a context builder.
@@ -808,6 +824,9 @@ class ILTranslatorLLMOnly:
                 glosses = self._first_mention_glosses_of(input_text[2])
                 if glosses:
                     obj[FIRST_MENTION_FIELD] = glosses
+                heading = self._key_concept_heading_of(input_text[2])
+                if heading:
+                    obj[KEY_CONCEPT_HEADING_FIELD] = heading
                 json_format_input.append(obj)
 
             json_format_input_str = json.dumps(
@@ -828,6 +847,9 @@ class ILTranslatorLLMOnly:
                 ),
                 has_first_mention_glosses=any(
                     FIRST_MENTION_FIELD in obj for obj in json_format_input
+                ),
+                has_key_concept_headings=any(
+                    KEY_CONCEPT_HEADING_FIELD in obj for obj in json_format_input
                 ),
             )
 
@@ -1056,8 +1078,9 @@ class ILTranslatorLLMOnly:
                 "draft": draft,
                 "page": page.page_number + 1,
             }
-            if FIRST_MENTION_FIELD in obj:
-                item[FIRST_MENTION_FIELD] = obj[FIRST_MENTION_FIELD]
+            for field in (FIRST_MENTION_FIELD, KEY_CONCEPT_HEADING_FIELD):
+                if field in obj:
+                    item[field] = obj[field]
             items.append(item)
         if not items:
             return translation_results
@@ -1080,6 +1103,7 @@ class ILTranslatorLLMOnly:
         batch_text_for_glossary_matching: str,
         paper_context_block: str | None = None,
         has_first_mention_glosses: bool = False,
+        has_key_concept_headings: bool = False,
     ) -> str:
         """Build LLM prompt using a single template for easier maintenance.
 
@@ -1177,6 +1201,9 @@ class ILTranslatorLLMOnly:
             glossary_usage_rules_block=glossary_usage_rules_block,
             first_mention_rules_block=FIRST_MENTION_RULES
             if has_first_mention_glosses
+            else "",
+            key_concept_heading_rules_block=KEY_CONCEPT_HEADING_RULES
+            if has_key_concept_headings
             else "",
             contextual_hints_block=contextual_hints_block,
             json_input_str=json_input_str,
