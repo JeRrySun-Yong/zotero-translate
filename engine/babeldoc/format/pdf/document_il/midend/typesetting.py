@@ -44,10 +44,16 @@ SCALE_EPSILON = 1e-9
 # (closure ticket 15).
 TABLE_CELL_GAP_EM = 0.5
 # A widened figure label is set no larger than this many times the height of
-# its source line (closure ticket 15): the legend label "w/ Qwen3-VL-32B" is
-# a 3.46 pt line of 3.71 pt text; set at the initial scale its translation
-# was 4.1 pt and, widened, ran into the line above it.
-WIDENED_LABEL_MAX_HEIGHT = 1.0
+# its source line (closure ticket 15). The engine's font size of many figure
+# labels is larger than their glyphs, and the initial scale set them larger
+# than the source ("Vanilla" on AutoRef page 8: 3.7 pt glyphs, about 9 pt in
+# the engine); a source line's box spans about 0.8-0.95 of its font size
+# ("Prompt" on MaLiang page 4: 4.94 pt text), so 1.2 keeps a widened label
+# near its source size.
+WIDENED_LABEL_MAX_HEIGHT = 1.2
+# pt: a widened figure label may touch, but not overlap by more than this,
+# the box of other text on the page (closure ticket 15).
+LABEL_TOUCH_TOLERANCE = 0.1
 # A paragraph box at most this many ems high is one source line.
 ONE_LINE_EM = 1.5
 # Two cells of a column share their left edge or their centre within these
@@ -1021,26 +1027,15 @@ class Typesetting:
         # closure 06 (T4): a one-line table cell ("Calls" in a 12 pt cell) that
         # does not fit at the initial scale first widens into the free space
         # of its table row (centred cells to both sides, left-aligned cells to
-        # the right), and the search starts there. closure 15: a one-line
-        # label in a form widens the same way within the form's box, before
-        # it shrinks (the legend label above fits at its initial scale once
-        # centred under its bar). The font never grows past the initial
-        # scale: restarting the search from a larger scale after the box grew
-        # set figure labels larger than their neighbours (ticket 03). A
-        # widened label also starts no larger than its source line
-        # (WIDENED_LABEL_MAX_HEIGHT); the font size of many figure labels is
-        # larger than their glyphs ("Vanilla" on page 8: about 9 pt for 3.7 pt
-        # glyphs), and those that cannot come down to their line at
-        # MIN_SCALE are not widened.
+        # the right), and the search starts there. The font never grows past
+        # the initial scale: restarting the search from a larger scale after
+        # the box grew set figure labels larger than their neighbours (ticket
+        # 03).
         source_box = box
         cell_box, centred = self._widened_table_cell(paragraph, page, box, clip)
-        if cell_box is not None and clip is not None:
-            label_scale = self._label_scale(paragraph, source_box)
-            if label_scale < min_scale - SCALE_EPSILON:
-                cell_box = None
-        if (
+        fits_unwidened = (
             cell_box is not None
-            and not self._fits(
+            and self._fits(
                 typesetting_units,
                 box,
                 scale,
@@ -1049,10 +1044,43 @@ class Typesetting:
                 use_english_line_break,
                 clip,
             )[1]
-        ):
+        )
+        if cell_box is not None and clip is not None and not fits_unwidened:
+            # closure 15: a one-line figure label (in a form) widens the same
+            # way within the form's box before it shrinks: the legend label
+            # "搭配 Qwen3-VL-32B" fits whole once centred under its bar. Unlike
+            # a table cell, its row's neighbours above and below are close
+            # (two-line labels), and the font size of many figure labels is
+            # larger than their glyphs ("Vanilla" on AutoRef page 8: about 9
+            # pt for 3.7 pt glyphs); so the widened label is tried on its
+            # own, from no larger than its source line
+            # (WIDENED_LABEL_MAX_HEIGHT) down to MIN_SCALE, and only where it
+            # touches no other text. Otherwise it is laid out in its own box
+            # as before.
+            widened = self._widened_label_layout(
+                typesetting_units,
+                cell_box,
+                source_box,
+                centred,
+                min(scale, self._label_scale(paragraph, source_box)),
+                line_skip,
+                paragraph,
+                page,
+                use_english_line_break,
+                clip,
+            )
+            if widened is not None:
+                label_scale, typeset_units = widened
+                if apply_layout:
+                    self._apply_typeset_units(
+                        paragraph, page, typeset_units, label_scale
+                    )
+                    paragraph.box = self._text_extent(typeset_units, source_box)
+                    return label_scale, typeset_units
+                return label_scale, None
+            cell_box = None
+        if cell_box is not None and clip is None and not fits_unwidened:
             box = cell_box
-            if clip is not None:
-                scale = min(scale, label_scale)
         else:
             cell_box = None
 
@@ -1282,6 +1310,94 @@ class Typesetting:
         if not Typesetting._centre_inside(box, form):
             return None
         return form
+
+    def _widened_label_layout(
+        self,
+        typesetting_units: list[TypesettingUnit],
+        cell_box: Box,
+        source_box: Box,
+        centred: bool,
+        start_scale: float,
+        line_skip: float,
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        use_english_line_break: bool,
+        clip: Box,
+    ) -> tuple[float, list[TypesettingUnit]] | None:
+        """(scale, laid-out units) of a figure label in its widened box
+        (closure ticket 15): the largest scale from ``start_scale`` down to
+        MIN_SCALE, in the search's steps, at which it fits the widened box
+        inside the form's box and touches no other text; centred on its
+        source box when its column is centred. None when there is none."""
+        others = self._other_text_near(paragraph, page, cell_box, source_box)
+        scale = start_scale
+        while scale >= MIN_SCALE - SCALE_EPSILON:
+            typeset_units, fit = self._fits(
+                typesetting_units,
+                cell_box,
+                scale,
+                line_skip,
+                paragraph,
+                use_english_line_break,
+                clip,
+            )
+            if fit and centred:
+                typeset_units = self._centre_cell_line(
+                    typesetting_units,
+                    typeset_units,
+                    cell_box,
+                    source_box,
+                    scale,
+                    line_skip,
+                    paragraph,
+                    use_english_line_break,
+                )
+            if (
+                fit
+                and self._inside(typeset_units, clip)
+                and not any(
+                    self._overlap(unit.box, other)
+                    for unit in typeset_units
+                    if not unit.is_space
+                    for other in others
+                )
+            ):
+                return scale, typeset_units
+            scale -= 0.05 if scale > 0.6 else 0.1
+        return None
+
+    @staticmethod
+    def _other_text_near(
+        paragraph: il_version_1.PdfParagraph,
+        page: il_version_1.Page,
+        cell_box: Box,
+        source_box: Box,
+    ) -> list[Box]:
+        """The boxes of other paragraphs and of characters left on the page
+        that a widened label in ``cell_box`` could reach (its row and one row
+        height above and below; closure ticket 15). Boxes that already
+        overlap the paragraph's source box do not count: the source PDF set
+        them there."""
+        height = cell_box.y2 - cell_box.y
+        reach = Box(
+            x=cell_box.x, y=cell_box.y - height, x2=cell_box.x2, y2=cell_box.y2 + height
+        )
+        boxes = [p.box for p in page.pdf_paragraph if p is not paragraph and p.box]
+        boxes += [char.box for char in page.pdf_character if char.box]
+        return [
+            b
+            for b in boxes
+            if Typesetting._overlap(b, reach)
+            and not Typesetting._overlap(b, source_box)
+        ]
+
+    @staticmethod
+    def _overlap(a: Box, b: Box) -> bool:
+        """Whether two boxes overlap by more than LABEL_TOUCH_TOLERANCE both ways."""
+        return (
+            min(a.x2, b.x2) - max(a.x, b.x) > LABEL_TOUCH_TOLERANCE
+            and min(a.y2, b.y2) - max(a.y, b.y) > LABEL_TOUCH_TOLERANCE
+        )
 
     @staticmethod
     def _label_scale(paragraph: il_version_1.PdfParagraph, source_box: Box) -> float:
