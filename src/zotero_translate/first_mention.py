@@ -61,8 +61,10 @@ _ABSTRACT_INLINE = re.compile(r"^\W*abstract\s*[—–\-.:]", re.IGNORECASE)
 _REFERENCES_HEADING = re.compile(
     r"^\W*(?:[0-9IVX]+\.?\s*)?(?:references|bibliography)\W*$", re.IGNORECASE
 )
-# A section number in front of a heading: "5.1 ", "6 ", "G.2 ", "A ", "IV. ".
-_SECTION_NUMBER = re.compile(r"^(?:\d+(?:\.\d+)*\.?|[A-Z](?:\.\d+)*\.?|[IVX]+\.)\s+")
+# A section number in front of a heading: digits ("5.1 ", "6 ", "3. "), a
+# letter with digits ("G.2 "), or a Roman numeral or letter with a full stop
+# ("IV. ", "B. "). A letter alone ("A Survey of …") is a word, not a number.
+_SECTION_NUMBER = re.compile(r"^(?:\d+(?:\.\d+)*\.?|[A-Z](?:\.\d+)+\.?|(?:[IVX]+|[A-Z])\.)\s+")
 
 # Sentence punctuation at the end of a gloss, dropped: "（…。）" reads badly.
 _GLOSS_END = "。．.；;，,！!"

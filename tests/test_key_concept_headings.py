@@ -172,3 +172,26 @@ def test_only_a_heading_that_is_a_key_concept_of_several_words_counts():
         1: "Traceable Generation Process",
         7: "reference-grounded prompting",
     }
+
+
+def test_a_section_number_has_a_digit_or_a_full_stop():
+    plan = FirstMentionPlan(
+        [
+            key_concept(["reference-grounded prompting"], "提示机制"),
+            key_concept(["survey of harness optimization"], "外围程序优化综述"),
+        ]
+    )
+    paragraphs = [
+        # "A" is an article here, not a section number.
+        (0, "title", "A Survey of Harness Optimization"),
+        (0, "title", "G.2 Reference-Grounded Prompting"),
+        (0, "title", "IV. Reference-Grounded Prompting"),
+        (0, "title", "B. Reference-Grounded Prompting"),
+        (0, "title", "3. Reference-Grounded Prompting"),
+    ]
+    assert plan.key_concept_headings(paragraphs) == {
+        1: "reference-grounded prompting",
+        2: "reference-grounded prompting",
+        3: "reference-grounded prompting",
+        4: "reference-grounded prompting",
+    }
