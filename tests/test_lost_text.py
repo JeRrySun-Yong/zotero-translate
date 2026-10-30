@@ -11,6 +11,7 @@ scorecard call the same function.
 import pymupdf
 
 from zotero_translate.lost_text import lost_text
+from zotero_translate.lost_text import report_lost_text
 
 INSIDE = "Visible label"
 OUTSIDE = "Clipped tail"
@@ -48,6 +49,19 @@ def test_text_whose_lower_part_the_form_cuts_is_listed(tmp_path):
     with pymupdf.open(mono) as doc:
         assert OUTSIDE.replace(" ", "") in doc[0].get_text().replace(" ", "")
     assert lost_text(source, mono) == [{"page": 1, "text": OUTSIDE.replace(" ", "")}]
+
+
+def test_an_error_of_the_check_is_one_report_entry_not_a_failed_task(tmp_path):
+    """Review round 1: the task calls the check after both PDFs are written;
+    an error of the check becomes one entry of the report's ``lost_text``."""
+    source, mono = tmp_path / "source.pdf", tmp_path / "mono.pdf"
+    figure_pdf(source, clip_bottom=100)
+    mono.write_bytes(b"not a pdf")
+    entries = report_lost_text(source, mono)
+    assert len(entries) == 1
+    assert entries[0]["page"] is None and entries[0]["text"] is None
+    assert entries[0]["error"].startswith("检查出错：")
+    assert report_lost_text(source, source) == []
 
 
 def test_text_the_source_hides_at_the_same_place_is_not_listed(tmp_path):

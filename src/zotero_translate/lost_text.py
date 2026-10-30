@@ -81,6 +81,8 @@ FORM_EDGE_TOLERANCE = 0.05
 CUT_SHARE = 0.3
 # Depth of nested forms followed in the content stream.
 _FORM_DEPTH = 6
+# Characters of an error message kept in the task report.
+_ERROR_CHARS = 200
 _TOKEN = re.compile(
     rb"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|/[^\s/\[\]()<>{}%]+"
     rb"|[-+]?(?:\d+\.?\d*|\.\d+)|[A-Za-z'\"*]+|\[|\]|<<|>>"
@@ -100,6 +102,19 @@ def lost_text(source_pdf: Path, mono_pdf: Path) -> list[dict]:
             for piece in _lost_pieces(page, hidden):
                 lost.append({"page": index + 1, "text": piece})
     return lost
+
+
+def report_lost_text(source_pdf: Path, mono_pdf: Path) -> list[dict]:
+    """`lost_text` for the task report: the PDFs are already written, so an
+    error of the check does not fail the task (review round 1); it becomes
+    one entry ``{"page": None, "text": None, "error": "检查出错：..."}`` with
+    the exception's type and the first ``_ERROR_CHARS`` characters of its
+    message."""
+    try:
+        return lost_text(source_pdf, mono_pdf)
+    except Exception as e:  # noqa: BLE001 - any error of the check is reported, not raised
+        message = f"检查出错：{type(e).__name__}: {str(e)[:_ERROR_CHARS]}"
+        return [{"page": None, "text": None, "error": message}]
 
 
 def _lost_pieces(page: pymupdf.Page, source_hidden: list[Glyph]) -> list[str]:

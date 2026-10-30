@@ -101,7 +101,7 @@ def run_paper_task(
     from zotero_translate.first_mention import FirstMentionPlan
     from zotero_translate.first_mention import front_matter_range
     from zotero_translate.first_mention import references_range
-    from zotero_translate.lost_text import lost_text
+    from zotero_translate.lost_text import report_lost_text
     from zotero_translate.model_client import ModelCallError
     from zotero_translate.model_client import PipelineModels
     from zotero_translate.review import BatchReviewer
@@ -196,7 +196,7 @@ def run_paper_task(
         shutil.move(result.mono_pdf_path, mono)
         shutil.move(result.dual_pdf_path, dual)
         shutil.rmtree(engine_output, ignore_errors=True)
-        report.lost_text = lost_text(source_pdf, mono)
+        report.lost_text = report_lost_text(source_pdf, mono)
         return PaperTaskResult(
             mono_pdf=mono,
             dual_pdf=dual,
