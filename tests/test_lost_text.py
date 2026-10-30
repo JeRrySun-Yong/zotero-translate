@@ -38,6 +38,18 @@ def test_text_outside_its_form_is_listed_with_its_page(tmp_path):
     assert lost_text(source, mono) == [{"page": 1, "text": OUTSIDE.replace(" ", "")}]
 
 
+def test_text_whose_lower_part_the_form_cuts_is_listed(tmp_path):
+    """Review round 1: ``get_text`` keeps a glyph that the form's box cuts
+    only partly (the second line's baseline at y 70, its glyph boxes 62.2 to
+    72.2, the form ending at 68)."""
+    source, mono = tmp_path / "source.pdf", tmp_path / "mono.pdf"
+    figure_pdf(source, clip_bottom=100)
+    figure_pdf(mono, clip_bottom=68)
+    with pymupdf.open(mono) as doc:
+        assert OUTSIDE.replace(" ", "") in doc[0].get_text().replace(" ", "")
+    assert lost_text(source, mono) == [{"page": 1, "text": OUTSIDE.replace(" ", "")}]
+
+
 def test_text_the_source_hides_at_the_same_place_is_not_listed(tmp_path):
     source, mono = tmp_path / "source.pdf", tmp_path / "mono.pdf"
     figure_pdf(source, clip_bottom=50)
