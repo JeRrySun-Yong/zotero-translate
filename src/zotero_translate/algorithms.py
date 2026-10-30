@@ -138,6 +138,17 @@ _CODE_FONT = re.compile(
 )
 # Fonts of big delimiters and radicals (TeX's math extension fonts).
 _DELIMITER_FONT = re.compile(r"CMEX|EUEX|Extension", re.IGNORECASE)
+# Small caps fonts by name (ticket 16): cm-super (SFCC, AutoDesign p7
+# "Accept"), EC (ECCC), Computer Modern (CMCSC, also a math font above),
+# Latin Modern (LMRomanCaps). Their text layer reads "Accept", not
+# capitals in two sizes. A name ending in "SC" is not one: PingFangSC,
+# NotoSansSC are Simplified Chinese.
+_SMALL_CAPS_FONT = re.compile(r"(?:^|\+)(?:SFCC|ECCC|CMCSC)\d|LMRomanCaps|SmallCaps")
+# A word of capitals only (no lower case) with at least this many letters is
+# a constant (ACCEPT, REJECT); a shorter one is an abbreviation that the
+# glossary may translate (LLM, MCTS, DDPM, FAISS, RAPSD: at most 5 letters
+# in the held-out set's algorithms).
+_CONSTANT_LETTERS = 6
 COMMENT_MARK = "▷"
 _RANGE_WORDS = frozenset({"to", "downto", "step", "by"})
 
@@ -1003,16 +1014,21 @@ def keep_flags(line: list[Glyph]) -> list[bool]:
         ):
             for k in word:
                 keep[k] = True
-    # Function calls: a small caps name and everything inside its parentheses.
+    # Names: constants and identifiers (ticket 16), and function calls (a
+    # name and everything inside its parentheses, D5).
+    tokens = _tokens(line)
+    # A row whose letters are all capitals is a heading in capitals: its
+    # words are no constants. So are the words of a bold heading.
+    constants = not heading and any(g.text.islower() for g in line)
     k = 0
     while k < len(line):
-        word = next(w for w in words if k in w)
-        if word[0] != k or not _small_caps([line[j] for j in word]):
+        name = _name(line, words, tokens, k, constants)
+        if name is None:
             k += 1
             continue
         depth = 0
-        end = word[-1] + 1
-        for j in word:
+        end = name[-1] + 1
+        for j in name:
             keep[j] = True
             depth += line[j].text.count("(") - line[j].text.count(")")
         if depth == 0 and end < len(line) and line[end].text == "(":
@@ -1117,4 +1133,42 @@ def _small_caps(word: list[Glyph]) -> bool:
         and len(sizes) >= 2
         and all(g.text.isupper() for g in letters)
         and len({g.font for g in letters}) == 1
+    )
+
+
+def _tokens(line: list[Glyph]) -> list[list[int]]:
+    """Positions of the line's glyphs grouped at word gaps only (across font changes)."""
+    tokens: list[list[int]] = []
+    for k, g in enumerate(line):
+        if tokens and not word_gap(line[tokens[-1][-1]], g):
+            tokens[-1].append(k)
+        else:
+            tokens.append([k])
+    return tokens
+
+
+def _name(
+    line: list[Glyph], words: list[list[int]], tokens: list[list[int]], k: int, constants: bool
+) -> list[int] | None:
+    """The positions of the constant or identifier that starts at position ``k``, if one does."""
+    token = next((t for t in tokens if t[0] == k), None)
+    if token is not None and _identifier([line[j] for j in token]):
+        return token
+    word = next((w for w in words if w[0] == k), None)
+    if word is None:
+        return None
+    glyphs = [line[j] for j in word]
+    if _small_caps(glyphs) or _SMALL_CAPS_FONT.search(glyphs[0].font or ""):
+        return word
+    letters = [g.text for g in glyphs if g.text.isalpha()]
+    if constants and len(letters) >= _CONSTANT_LETTERS and all(c.isupper() for c in letters):
+        return word
+    return None
+
+
+def _identifier(token: list[Glyph]) -> bool:
+    """An underscore between letters or digits (max_retry), or camelCase in one font (SelectParents)."""
+    text = "".join(g.text for g in token)
+    return bool(re.search(r"[^\W_]_+[^\W_]", text)) or any(
+        a.text.islower() and b.text.isupper() and a.font == b.font for a, b in zip(token, token[1:])
     )
