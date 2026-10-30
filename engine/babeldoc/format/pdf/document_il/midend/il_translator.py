@@ -1036,6 +1036,9 @@ class ILTranslator:
                 llm_translate_tracker.set_placeholder_full_match()
             return False
         paragraph.unicode = translated_text
+        # The typesetter keeps the source text of a figure label whose
+        # translation does not fit inside the figure (closure ticket 15).
+        paragraph.source_composition = paragraph.pdf_paragraph_composition
         paragraph.pdf_paragraph_composition = self.parse_translate_output(
             translate_input,
             translated_text,

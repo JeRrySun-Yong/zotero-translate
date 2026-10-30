@@ -338,6 +338,21 @@
       <zeroOrMore>
         <ref name="PDFParagraphComposition"/>
       </zeroOrMore>
+      <zeroOrMore>
+        <ref name="SourceComposition"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- The composition before translation (zotero-translate closure ticket 15). -->
+  <define name="SourceComposition">
+    <element name="sourceComposition">
+      <choice>
+        <ref name="PDFLine"/>
+        <ref name="PDFFormula"/>
+        <ref name="PDFSameStyleCharacters"/>
+        <ref name="PDFCharacter"/>
+        <ref name="PDFSameStyleUnicodeCharacters"/>
+      </choice>
     </element>
   </define>
   <define name="PDFParagraphComposition">

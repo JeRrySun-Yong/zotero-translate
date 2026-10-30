@@ -1214,6 +1214,16 @@ class PdfParagraph:
             "type": "Attribute",
         },
     )
+    # The composition before translation: the typesetter sets it again where
+    # it was when the translation does not fit inside the figure (form
+    # XObject) it is drawn into (zotero-translate closure ticket 15).
+    source_composition: list[PdfParagraphComposition] = field(
+        default_factory=list,
+        metadata={
+            "name": "sourceComposition",
+            "type": "Element",
+        },
+    )
     # Lines after the first start this many points right of the box: a
     # reference entry's hanging indent (zotero-translate closure ticket 04).
     hanging_indent: float | None = field(

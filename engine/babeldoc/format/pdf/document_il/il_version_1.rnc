@@ -113,7 +113,17 @@ PDFParagraph =
     attribute renderOrder { xsd:int }?,
     Box,
     PDFStyle,
-    PDFParagraphComposition*
+    PDFParagraphComposition*,
+    SourceComposition*
+  }
+# The composition before translation (zotero-translate closure ticket 15).
+SourceComposition =
+  element sourceComposition {
+    PDFLine
+    | PDFFormula
+    | PDFSameStyleCharacters
+    | PDFCharacter
+    | PDFSameStyleUnicodeCharacters
   }
 PDFParagraphComposition =
   element pdfParagraphComposition {
