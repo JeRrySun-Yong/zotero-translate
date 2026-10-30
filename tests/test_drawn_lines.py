@@ -374,6 +374,28 @@ def test_a_radical_bar_and_a_fraction_bar_belong_to_their_row_and_the_rules_to_n
             assert all(line.keep[k] for k in positions), line.text
 
 
+def test_a_drawn_line_whose_glyphs_move_apart_keeps_the_algorithm():
+    """The layout moves a row's drawn line by the dx of its glyphs; glyphs moved by
+    different amounts, or a line no longer on the page, are a layout failure (the
+    whole algorithm keeps its source)."""
+    from zotero_translate.algorithm_layout import LayoutError
+    from zotero_translate.algorithm_layout import _drawn_line_shifts
+    from zotero_translate.algorithm_translation import Part
+    from zotero_translate.algorithms import AlgorithmLine
+
+    curve = object()
+    line = AlgorithmLine(number=3, text="a b", x=0.0, y=0.0, drawn=[(0, [0, 1])], curves=[curve])
+    part = Part(0, 0, line, "line", [0, 1], "{v1}{v2}")
+    assert _drawn_line_shifts(part, {0: -4.0, 1: -4.0}, {id(curve)}) == [(curve, -4.0)]
+    assert _drawn_line_shifts(part, {}, {id(curve)}) == []  # the row was not laid out again
+    with pytest.raises(LayoutError, match="被拆开"):
+        _drawn_line_shifts(part, {0: -4.0, 1: 2.0}, {id(curve)})
+    with pytest.raises(LayoutError, match="被拆开"):
+        _drawn_line_shifts(part, {0: -4.0}, {id(curve)})
+    with pytest.raises(LayoutError, match="不在页面上"):
+        _drawn_line_shifts(part, {0: -4.0, 1: -4.0}, set())
+
+
 # Algorithms through the service: a synthetic ruled algorithm.
 
 TOP = 200.0  # top rule, pymupdf coordinates (y down)
