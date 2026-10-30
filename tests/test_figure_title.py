@@ -12,6 +12,17 @@ title.
 """
 
 import pymupdf
+from babeldoc.format.pdf.document_il import Box
+from babeldoc.format.pdf.document_il import Page
+from babeldoc.format.pdf.document_il import PageLayout
+from babeldoc.format.pdf.document_il import PdfCharacter
+from babeldoc.format.pdf.document_il import PdfParagraph
+from babeldoc.format.pdf.document_il import PdfParagraphComposition
+from babeldoc.format.pdf.document_il import PdfStyle
+from babeldoc.format.pdf.document_il import VisualBbox
+from babeldoc.format.pdf.document_il.midend.paragraph_finder import ParagraphFinder
+from babeldoc.format.pdf.document_il.utils.layout_helper import Layout
+from babeldoc.format.pdf.document_il.utils.layout_helper import build_layout_index
 
 from tests.conftest import FIXTURES
 
@@ -73,3 +84,57 @@ def test_the_figure_title_and_the_subfigure_caption_do_not_overlap(fake_model, s
     title, subfigure = text.find("Figure1AutoDesign"), text.find("(a)Scoreoftheposter")
     assert 0 <= title < subfigure, text
     assert overlapping_pairs(lines) == []
+
+
+def chars_at(text: str, x: float, y: float) -> list[PdfCharacter]:
+    """The characters of ``text`` in 9 pt, 5 pt a letter, from ``x``."""
+    chars = []
+    for k, c in enumerate(text):
+        box = Box(x=x + 5 * k, y=y, x2=x + 5 * k + 5, y2=y + 9)
+        chars.append(
+            PdfCharacter(
+                char_unicode=c, box=box, visual_bbox=VisualBbox(box=box), pdf_style=PdfStyle(font_id="F", font_size=9)
+            )
+        )
+    return chars
+
+
+def continued(box_class: str, before: str, after: str, gap: float) -> bool:
+    """Whether the first character of ``after``, ``gap`` pt right of ``before``
+    on one text line, continues ``before``'s paragraph in a box of
+    ``box_class`` once characters of another box came between them."""
+    first = chars_at(before, 100, 500)
+    second = chars_at(after, first[-1].box.x2 + gap, 500)
+    line = Box(x=100, y=500, x2=second[-1].box.x2, y2=509)
+    layouts = [PageLayout(id=1, box=line, conf=1, class_name="fallback_line")]
+    if box_class != "fallback_line":
+        layouts.append(PageLayout(id=2, box=Box(x=90, y=450, x2=560, y2=512), conf=1, class_name=box_class))
+    layout = Layout(layouts[-1].id, box_class)
+    page = Page(page_number=0, pdf_character=first + second, page_layout=layouts)
+    paragraph = PdfParagraph(
+        pdf_paragraph_composition=[PdfParagraphComposition(pdf_character=c) for c in first],
+        layout_id=layout.id,
+        layout_label=box_class,
+    )
+    finder = object.__new__(ParagraphFinder)
+    finder.translation_config = None
+    found = finder._interrupted_paragraph(second[0], layout, [paragraph], *build_layout_index(page))
+    return found is paragraph
+
+
+def test_the_caption_part_after_the_interruption_continues_the_title():
+    # AutoDesign page 1 (above, end to end): "(a)" starts 5.8 pt right of
+    # "artifacts." in the caption box.
+    assert continued("figure_caption", "the artifacts.", "(a) Score", 5.8)
+
+
+def test_labels_that_share_a_line_outside_every_text_box_stay_apart():
+    # AutoDesign page 10, figure 7: the labels "VLM rubric" and "hard
+    # constraint" sit under two images, 51 pt apart, on one text line that
+    # no text box holds (its own fallback_line box). Characters of other
+    # labels come between them. A paragraph in such a box holds one line and
+    # cannot cover another; the labels are two paragraphs, as before ticket 18
+    # (also: the "57%" / "58%" bar labels on page 14, the icons of MaLiang's
+    # table 1 header on page 3).
+    assert not continued("fallback_line", "VLM rubric", "hard constraint", 51.4)
+    assert not continued("fallback_line", "57%", "58%", 12.2)
