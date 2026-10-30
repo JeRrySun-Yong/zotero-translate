@@ -22,8 +22,11 @@ check below. ``algorithms.keep_flags`` decides which words they are:
   the glossary. Not in a row whose letters are all capitals or in a bold
   heading row: those are headings;
 - identifiers, in a run of glyphs without a word gap (across font
-  changes): an underscore between letters or digits (``max_retry``), or a
-  lower-case letter followed by a capital in one font (``SelectParents``).
+  changes): an underscore between letters or digits (``max_retry``), or
+  camelCase (a lower-case letter followed by a capital in one font) that
+  starts in lower case (``avgScore``) or is a call (``SelectParents(A)``).
+  A name that starts with a capital and is no call (AutoDesign, AutoRef,
+  LiDAR) is left to the glossary: key concepts stay in English anyway.
 
 A name of any of these kinds followed by ``(`` keeps everything up to its
 closing parenthesis, like a function call (D5).
