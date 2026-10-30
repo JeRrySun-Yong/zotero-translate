@@ -67,3 +67,85 @@ def test_every_character_of_a_figure_label_is_on_the_page(fake_model, start_serv
     # and the task report says so with the same judgment.
     assert lost_text(source, mono) == []
     assert service.report(task_id)["lost_text"] == []
+
+
+# The left plot of AutoRef page 8 is a form whose box ends at y 444.03 (page
+# coordinates from the top; the engine's IL pdf_xobject.box). The legend
+# labels sit on that edge: the source baseline is at 442.6.
+P8_LEGEND = pymupdf.Rect(150, 438, 213, 452)
+P8_FORM_BOTTOM = 444.03
+# A glyph box may reach this far past the form's edge (pt; rounding).
+EDGE_TOLERANCE = 0.05
+
+
+def test_legend_glyphs_stay_whole_inside_the_plot(fake_model, start_service, tmp_path):
+    """Review round 1: with only the centre of each glyph inside the form,
+    the legend's baseline came 0.34 pt below the form's edge and about 30 %
+    of each glyph box (descender included) was cut off."""
+    fake_model.respond("translate_batch", label_answers)
+    service = start_service(fake_model)
+    task_id = service.submit(FIXTURES / "autoref-p8.pdf")
+    final = service.wait(task_id)
+    assert final["state"] == "succeeded", final["error"]
+
+    mono = tmp_path / "mono.pdf"
+    mono.write_bytes(service.download(task_id, "mono"))
+    with pymupdf.open(mono) as doc:
+        glyphs = [
+            (chr(code), bbox)
+            for span in doc[0].get_texttrace()
+            for code, _glyph, _origin, bbox in span["chars"]
+            if code > 32 and P8_LEGEND.contains(pymupdf.Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2))
+        ]
+    text = "".join(c for c, _ in glyphs)
+    assert norm("搭配 Qwen3-VL-32B") in text and norm("搭配 GPT-5.5") in text, text
+    below = [(c, round(b[3], 2)) for c, b in glyphs if b[3] > P8_FORM_BOTTOM + EDGE_TOLERANCE]
+    assert below == [], below
+
+
+# AutoRef page 1, figure 1 (b): the y-axis labels "3 Refs.", "4 Refs.",
+# "5 Refs." are right-aligned at x 265.1, with 23.9 pt free to their left up
+# to the form's edge; the C-10 answers.
+AXIS_ANSWERS = {
+    "3 Refs.": "3张参考图",
+    "4 Refs.": "4张参考图",
+    "5 Refs.": "5 张参考图",
+    "(unseen)": "（未见）",
+    "(searched)": "（已搜索）",
+}
+
+
+def axis_answers(body: dict) -> str:
+    answer = []
+    for item in batch_items(body["messages"][-1]["content"]) or []:
+        text = item["input"].strip()
+        answer.append({"id": item["id"], "output": AXIS_ANSWERS.get(text, ANSWERS.get(text, PSEUDO_PREFIX + text))})
+    return json.dumps(answer, ensure_ascii=False)
+
+
+def test_a_right_aligned_axis_label_widens_to_the_left(fake_model, start_service, tmp_path):
+    """Review round 1: "3 Refs." kept its source text although 23.9 pt were
+    free on its left; widening knew only "centred: both sides" and "left
+    aligned: to the right"."""
+    fake_model.respond("translate_batch", axis_answers)
+    service = start_service(fake_model)
+    task_id = service.submit(FIXTURES / "autoref-p1.pdf")
+    final = service.wait(task_id)
+    assert final["state"] == "succeeded", final["error"]
+
+    kept = [k["source"] for k in service.report(task_id)["kept_source_paragraphs"]]
+    assert not any("Refs" in source for source in kept), kept
+    mono = tmp_path / "mono.pdf"
+    mono.write_bytes(service.download(task_id, "mono"))
+    with pymupdf.open(mono) as doc:
+        lines = [
+            (norm("".join(s["text"] for s in line["spans"])), line["bbox"])
+            for block in doc[0].get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+        ]
+    labels = {text: bbox for text, bbox in lines if text in {"3张参考图", "4张参考图", "5张参考图"}}
+    assert set(labels) == {"3张参考图", "4张参考图", "5张参考图"}, [t for t, _ in lines if "参考" in t]
+    # Right-aligned like the source labels, so they stay clear of the bars
+    # that start right of x 265.1.
+    for text, bbox in labels.items():
+        assert bbox[2] <= 265.1 + 1.0, (text, bbox)
