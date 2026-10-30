@@ -65,6 +65,11 @@ UNDERSCORE_HEIGHT = 0.3
 # centred at most this x the size from the line in height (a fraction's
 # numerator and denominator are; the next text line, 12 pt away, is not).
 SAME_LINE = 1.0
+# ... and the text (not formula) characters among them share a baseline
+# within this x the size, and the formulas among them are of one text line:
+# a line under a formula lies inside the boxes of the next line's letters,
+# which must not join it (2412.16318 p6).
+SAME_BASELINE = 0.3
 # Two glyphs further apart than this x the size are two words.
 WORD_GAP = 0.2
 

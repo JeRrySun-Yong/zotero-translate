@@ -456,6 +456,26 @@ class StylesAndFormulas:
             for char in taken
         ):
             return None  # not one text line
+        # Text characters on two baselines, or formulas of two text lines: the
+        # range runs into the next text line (2412.16318 p6: the underline of
+        # y_a(t) lies in the boxes of the next line's letters).
+        baselines = [
+            char.box.y
+            for ci, k, char in flat
+            if (first_ci, first_k) <= (ci, k) <= (last_ci, last_k)
+            and compositions[ci].pdf_line
+            and (char.char_unicode or "").strip()
+        ]
+        line_ids = {
+            c.pdf_formula.line_id
+            for c in compositions[first_ci : last_ci + 1]
+            if c.pdf_formula and c.pdf_formula.line_id is not None
+        }
+        if len(line_ids) > 1 or (
+            baselines
+            and max(baselines) - min(baselines) > drawn_lines.SAME_BASELINE * size
+        ):
+            return None
 
         def characters(ci):
             composition = compositions[ci]
