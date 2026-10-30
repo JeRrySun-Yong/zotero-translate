@@ -15,7 +15,9 @@ with draft and reviewed text; paragraphs that fell back to their draft) and
 the paragraphs that kept their source text, with page and reason, and the
 algorithms (pseudocode) found: pages, numbered lines, result ("translated" or
 "kept_source") and the reason for keeping the source, each translated row's
-source and final text, and each line's number, start x and glyphs.
+source and final text, and each line's number, start x and glyphs, and the
+translated text the mono PDF draws but does not show (``lost_text``: page
+and text of each piece; see ``zotero_translate.lost_text``).
 """
 
 from __future__ import annotations
@@ -50,6 +52,10 @@ class TaskReport:
         self.terms: dict | None = None
         self.first_mentions: list[dict] | None = None
         self.first_mention_glosses: dict | None = None
+        # Pieces of translated text the mono PDF draws but does not show, with
+        # their pages (closure ticket 15, ``zotero_translate.lost_text``); None
+        # until the mono PDF is written.
+        self.lost_text: list[dict] | None = None
 
     def enter_stage(self, stage: str) -> None:
         if self._stages and self._stages[-1][0] == stage:
@@ -112,6 +118,7 @@ class TaskReport:
             "kept_source_paragraphs": list(self.kept.paragraphs),
             "kept_source_algorithms": self.algorithms.kept_source,
             "algorithms": self.algorithms.report(),
+            "lost_text": self.lost_text,
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
