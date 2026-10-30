@@ -11,6 +11,7 @@ from babeldoc.format.pdf.document_il.il_version_1 import PdfLine
 from babeldoc.format.pdf.document_il.il_version_1 import PdfParagraphComposition
 from babeldoc.format.pdf.document_il.il_version_1 import PdfSameStyleCharacters
 from babeldoc.format.pdf.document_il.il_version_1 import PdfStyle
+from babeldoc.format.pdf.document_il.utils import drawn_lines
 from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper
 from babeldoc.format.pdf.document_il.utils.formular_helper import (
     collect_page_formula_font_ids,
@@ -360,6 +361,126 @@ class StylesAndFormulas:
             if form in page.pdf_form:
                 page.pdf_form.remove(form)
 
+    def merge_formulas_with_drawn_lines(self, page: Page):
+        """A drawn line that belongs to a formula or an identifier joins it (closure ticket 14).
+
+        For every drawn line on the page (``drawn_lines.line_of``) the
+        paragraph whose characters own it (``drawn_lines.owners``; formula
+        characters are those of formula compositions) gets the characters
+        from the first to the last owner, with whole formulas and, for an
+        underscore, the whole words on both sides, as one formula on one text
+        line; the line moves from the page into that formula. The typesetter
+        then keeps the formula on one line and moves the line with it
+        (``TypesettingUnit.relocate``). ``collect_contained_elements`` misses
+        these lines: a stroke's box has no height, so it is never "contained",
+        and a radical whose radicand has text-font characters (MaLiang p18:
+        ``√`` | ``min(`` | ``|x/b − 1|`` | ``, 1)``) is several compositions.
+        """
+        if not page.pdf_paragraph:
+            return
+        for curve in list(page.pdf_curve):
+            line = drawn_lines.line_of(curve.box)
+            if line is None:
+                continue
+            for paragraph in page.pdf_paragraph:
+                if paragraph.xobj_id is not None and curve.xobj_id != paragraph.xobj_id:
+                    continue
+                box = paragraph.box
+                if box is not None and not (
+                    box.x - drawn_lines.TOUCH <= line.x0
+                    and line.x1 <= box.x2 + drawn_lines.TOUCH
+                    and box.y - drawn_lines.TOUCH <= line.y <= box.y2 + drawn_lines.TOUCH
+                ):
+                    continue
+                formula = self._formula_of_drawn_line(paragraph, line)
+                if formula is not None:
+                    formula.pdf_curve.append(curve)
+                    page.pdf_curve.remove(curve)
+                    break
+
+    def _formula_of_drawn_line(self, paragraph, line) -> PdfFormula | None:
+        """The paragraph's formula that owns ``line``, made from its owners; or None."""
+        compositions = paragraph.pdf_paragraph_composition
+        flat = []  # (composition index, character index, character) in reading order
+        for ci, composition in enumerate(compositions):
+            if composition.pdf_formula:
+                characters = composition.pdf_formula.pdf_character
+            elif composition.pdf_line:
+                characters = composition.pdf_line.pdf_character
+            else:
+                continue
+            flat += [(ci, k, char) for k, char in enumerate(characters)]
+        marks = [
+            drawn_lines.Mark(
+                char.box.x,
+                char.box.y,
+                char.box.x2,
+                char.box.y2,
+                char.char_unicode or "",
+                compositions[ci].pdf_formula is not None,
+                char.pdf_style.font_size if char.pdf_style else 10.0,
+            )
+            for ci, _, char in flat
+            if char.box is not None
+        ]
+        if len(marks) != len(flat):
+            return None
+        found = drawn_lines.owners(line, marks)
+        if found is None:
+            return None
+        first, last = min(found.indexes), max(found.indexes)
+        if found.kind == "underscore":  # the identifier: the whole words on both sides
+            while first > 0 and drawn_lines.same_word(marks[first - 1], marks[first]):
+                first -= 1
+            while last + 1 < len(marks) and drawn_lines.same_word(marks[last], marks[last + 1]):
+                last += 1
+        first_ci, first_k = flat[first][0], flat[first][1]
+        last_ci, last_k = flat[last][0], flat[last][1]
+        if compositions[first_ci].pdf_formula:
+            first_k = 0
+        if compositions[last_ci].pdf_formula:
+            last_k = len(compositions[last_ci].pdf_formula.pdf_character) - 1
+        taken = [
+            char
+            for ci, k, char in flat
+            if (first_ci, first_k) <= (ci, k) <= (last_ci, last_k)
+        ]
+        size = max(marks[i].size for i in found.indexes)
+        if any(
+            abs((char.box.y + char.box.y2) / 2 - line.y) > drawn_lines.SAME_LINE * size
+            for char in taken
+        ):
+            return None  # not one text line
+
+        def characters(ci):
+            composition = compositions[ci]
+            return (composition.pdf_formula or composition.pdf_line).pdf_character
+
+        head = characters(first_ci)[:first_k]
+        tail = characters(last_ci)[last_k + 1 :]
+        line_id = next(
+            (
+                c.pdf_formula.line_id
+                for c in compositions[first_ci : last_ci + 1]
+                if c.pdf_formula
+            ),
+            None,
+        )
+        formula = PdfFormula(pdf_character=taken, line_id=line_id)
+        for c in compositions[first_ci : last_ci + 1]:
+            if c.pdf_formula:  # lines and forms an earlier line's formula took
+                formula.pdf_curve += c.pdf_formula.pdf_curve
+                formula.pdf_form += c.pdf_formula.pdf_form
+        self.update_formula_data(formula)
+        merged = []
+        if head:
+            merged.append(self.create_composition(head, False, line_id))
+        merged.append(PdfParagraphComposition(pdf_formula=formula))
+        if tail:
+            merged.append(self.create_composition(tail, False, line_id))
+        compositions[first_ci : last_ci + 1] = merged
+        return formula
+
     def process_page(self, page: Page):
         """处理页面，包括公式识别和偏移量计算"""
         self.process_page_formulas(page)
@@ -371,6 +492,7 @@ class StylesAndFormulas:
         self.process_translatable_formulas(page)
         self.update_all_formula_data(page)
         if not self.translation_config.ocr_workaround:
+            self.merge_formulas_with_drawn_lines(page)
             self.collect_contained_elements(page)
 
         # Process remaining non-formula lines after formula assignment is complete
