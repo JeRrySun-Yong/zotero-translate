@@ -87,10 +87,13 @@ text starts, the baseline and the glyph runs (font, size, bold, small caps),
 for line-by-line typesetting. It also marks which glyphs of the line keep
 their source text when the line is translated (``keep_flags``): formulas
 (math fonts), keywords set in bold, the title's ``Algorithm N`` and the
-``Require:``/``Ensure:``/``Input:``/``Output:`` labels, and function calls
+``Require:``/``Ensure:``/``Input:``/``Output:`` labels, function calls
 (small caps names) with everything inside their parentheses (user decision
-D5 = 1 on 2026-10-21). Small caps show up in the text layer as
-capitals in two alternating sizes of one font (for example 10 pt and 8 pt).
+D5 = 1 on 2026-10-21), and constants and identifiers (ticket 16: small caps
+by font name, words of capitals only, underscores and camelCase; the rule
+is in ``algorithm_translation``'s module documentation). Small caps show up
+in the text layer as capitals in two alternating sizes of one font (for
+example 10 pt and 8 pt), or as ordinary letters in a small caps font.
 Coordinates are PDF user space: y grows upwards.
 """
 
