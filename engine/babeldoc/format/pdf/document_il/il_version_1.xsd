@@ -151,6 +151,17 @@
         <xs:element ref="box"/>
         <xs:element ref="pdfStyle"/>
         <xs:element minOccurs="0" maxOccurs="unbounded" ref="pdfParagraphComposition"/>
+        <xs:element minOccurs="0" maxOccurs="unbounded" name="sourceComposition">
+          <xs:complexType>
+            <xs:choice>
+              <xs:element ref="pdfLine"/>
+              <xs:element ref="pdfFormula"/>
+              <xs:element ref="pdfSameStyleCharacters"/>
+              <xs:element ref="pdfCharacter"/>
+              <xs:element ref="pdfSameStyleUnicodeCharacters"/>
+            </xs:choice>
+          </xs:complexType>
+        </xs:element>
       </xs:sequence>
       <xs:attribute name="xobjId" type="xs:int"/>
       <xs:attribute name="unicode" use="required" type="xs:string"/>

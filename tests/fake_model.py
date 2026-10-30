@@ -25,6 +25,9 @@ Request kinds are recognised from the message content:
 - ``promoted_glosses``: the promoted glosses request, recognised by
   ``PROMOTED_GLOSSES_MARKER`` in its instructions. The default answer gives
   every promoted term the gloss ``FAKE_PROMOTED_GLOSS`` and rewrites nothing.
+- ``gloss_rewrite``: the gloss rewrite request, recognised by
+  ``GLOSS_REWRITE_MARKER`` in its instructions. The default answer gives
+  every listed key concept the gloss ``FAKE_REWRITTEN_GLOSS``.
 - ``translate_batch``: an engine paragraph batch, i.e. the prompt ends with a
   JSON array of ``{"id", "input", ...}`` objects. The default answer is a
   deterministic pseudo-translation: ``PSEUDO_PREFIX`` + the input, so
@@ -94,6 +97,11 @@ FAKE_TERM_LIST = {
 PROMOTED_GLOSSES_MARKER = "Write the glosses of the promoted key concepts"
 
 FAKE_PROMOTED_GLOSS = "假补写释义：升级的关键概念"
+
+# A phrase of the gloss rewrite request's instructions.
+GLOSS_REWRITE_MARKER = "Rewrite the gloss of each key concept listed under"
+
+FAKE_REWRITTEN_GLOSS = "假重写释义：更短的说明"
 
 # A phrase of the review request's instructions.
 REVIEW_MARKER = "Review the draft translation"
@@ -167,6 +175,7 @@ class FakeModel:
             "dossier": lambda body: json.dumps(FAKE_DOSSIER, ensure_ascii=False),
             "term_list": lambda body: json.dumps(FAKE_TERM_LIST, ensure_ascii=False),
             "promoted_glosses": gloss_promoted_terms,
+            "gloss_rewrite": rewrite_glosses,
             "translate_batch": pseudo_translate_batch,
             "review": keep_drafts,
             "algorithm": pseudo_translate_algorithm,
@@ -326,6 +335,8 @@ def classify(body: dict) -> str:
         return "term_list"
     if any(PROMOTED_GLOSSES_MARKER in text for text in instructions):
         return "promoted_glosses"
+    if any(GLOSS_REWRITE_MARKER in text for text in instructions):
+        return "gloss_rewrite"
     if any(DOSSIER_MARKER in text for text in instructions):
         return "dossier"
     return "other"
@@ -369,6 +380,17 @@ def gloss_promoted_terms(body: dict) -> str:
     promoted = promoted_glosses_request(body)["promoted"]
     glosses = [{"english": p["english"][0], "gloss_zh": FAKE_PROMOTED_GLOSS} for p in promoted]
     return json.dumps({"glosses": glosses, "renderings": []}, ensure_ascii=False)
+
+
+def gloss_rewrite_request(body: dict) -> dict:
+    """The term list object (``{"rewrite", "key_concepts"}``) sent with a gloss rewrite request."""
+    return json.loads(_last_user_content(body).split("Term list:\n", 1)[1])
+
+
+def rewrite_glosses(body: dict) -> str:
+    listed = gloss_rewrite_request(body)["rewrite"]
+    glosses = [{"english": r["english"][0], "gloss_zh": FAKE_REWRITTEN_GLOSS} for r in listed]
+    return json.dumps({"glosses": glosses}, ensure_ascii=False)
 
 
 def pseudo_translate_batch(body: dict) -> str:
