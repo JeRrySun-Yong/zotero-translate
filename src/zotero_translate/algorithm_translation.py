@@ -19,8 +19,9 @@ check below. ``algorithms.keep_flags`` decides which words they are:
   not a name ending in "SC", which in PingFangSC means Simplified Chinese);
 - capitals only, at least ``_CONSTANT_LETTERS`` (6) letters: ACCEPT,
   REJECT. Shorter ones are abbreviations (LLM, FAISS) left to the model and
-  the glossary. Not in a row whose letters are all capitals or in a bold
-  heading row: those are headings;
+  the glossary. Not in a row without any lower-case letter, formula glyphs
+  included (the d, t of "d_t ← ACCEPT" are lower case, so that row is not
+  one), or in a bold heading row: those are headings;
 - identifiers, in a run of glyphs without a word gap (across font
   changes): an underscore between letters or digits (``max_retry``), or
   camelCase (a lower-case letter followed by a capital in one font) that
