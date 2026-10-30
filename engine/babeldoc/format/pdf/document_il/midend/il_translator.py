@@ -13,9 +13,7 @@ from tqdm import tqdm
 import babeldoc.format.pdf.document_il.il_version_1 as il_version_1
 from babeldoc.babeldoc_exception.BabelDOCException import ContentFilterError
 from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
-from babeldoc.babeldoc_exception.BabelDOCException import (
-    TranslationRequestsFailedError,
-)
+from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestsFailedError
 from babeldoc.format.pdf.document_il import Document
 from babeldoc.format.pdf.document_il import GraphicState
 from babeldoc.format.pdf.document_il import Page
@@ -400,7 +398,9 @@ class ILTranslator:
 
     def record_request_error(self, error: TranslationRequestError, page: Page | None):
         page_number = getattr(page, "page_number", None)
-        logger.error(f"Translation request failed for good on page index {page_number}: {error}")
+        logger.error(
+            f"Translation request failed for good on page index {page_number}: {error}"
+        )
         with self._request_errors_lock:
             self._request_errors.append(
                 TranslationRequestError(
@@ -1027,7 +1027,11 @@ class ILTranslator:
     ):
         """Post-translation processing: update paragraph with translated text."""
         tracker.set_output(translated_text)
-        if translated_text == translate_input:
+        # An answer that repeats the input (a model name in a table cell, an
+        # author line) keeps the source glyphs, font and size. `translate_input`
+        # is the TranslateInput object, so compare its text (upstream compared
+        # the object, which never equals a string); whitespace does not count.
+        if "".join(translated_text.split()) == "".join(translate_input.unicode.split()):
             if llm_translate_tracker := tracker.last_llm_translate_tracker():
                 llm_translate_tracker.set_placeholder_full_match()
             return False
@@ -1284,7 +1288,8 @@ class ILTranslator:
                     translated_text = self.translate_engine.llm_translate(
                         llm_prompt,
                         rate_limit_params={
-                            "paragraph_token_count": paragraph_token_count
+                            "paragraph_token_count": paragraph_token_count,
+                            "page_number": _one_based_page(page),
                         },
                     )
                     llm_translate_tracker.set_output(translated_text)
@@ -1292,7 +1297,8 @@ class ILTranslator:
                     translated_text = self.translate_engine.translate(
                         text,
                         rate_limit_params={
-                            "paragraph_token_count": paragraph_token_count
+                            "paragraph_token_count": paragraph_token_count,
+                            "page_number": _one_based_page(page),
                         },
                     )
                 translated_text = re.sub(r"[. 。…，]{20,}", ".", translated_text)
@@ -1328,3 +1334,9 @@ class ILTranslator:
                 get_paragraph_unicode(paragraph),
                 reason,
             )
+
+
+def _one_based_page(page: Page | None) -> int | None:
+    """The 1-based page number the translator gets with a request, if known."""
+    page_number = getattr(page, "page_number", None)
+    return None if page_number is None else page_number + 1

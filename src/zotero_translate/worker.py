@@ -1,10 +1,10 @@
 """Subprocess entry point: run one paper task in its task directory.
 
-Usage: python -m zotero_translate.worker TASK_DIR --env-file FILE --concurrency N
-[--cache-dir DIR]
+Usage: python -m zotero_translate.worker TASK_DIR --env-file FILE
+--argon-env-file FILE --concurrency N [--cache-dir DIR]
 
 Progress, the final state and any failure reason go to the task's status
-file. The API key never reaches the status file or the log.
+file. Neither API key reaches the status file or the log.
 
 The subprocess ends itself as soon as the translation service that started
 it is gone, and never writes the status file after that: a restarted service
@@ -25,13 +25,14 @@ from zotero_translate import task_dir as td
 from zotero_translate.paper_task import PaperTaskError
 from zotero_translate.paper_task import run_paper_task
 from zotero_translate.settings import SettingsError
-from zotero_translate.settings import load_model_settings
+from zotero_translate.settings import load_pipeline_settings
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="zotero_translate.worker")
     parser.add_argument("task_dir", type=Path)
     parser.add_argument("--env-file", type=Path, required=True)
+    parser.add_argument("--argon-env-file", type=Path, required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--cache-dir", type=Path, default=None)
     args = parser.parse_args(argv)
@@ -47,7 +48,9 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     try:
-        settings = load_model_settings(args.env_file, args.concurrency, args.cache_dir)
+        settings = load_pipeline_settings(
+            args.env_file, args.argon_env_file, args.concurrency, args.cache_dir
+        )
         result = run_paper_task(
             directory / td.SOURCE_PDF,
             directory,
@@ -62,10 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         write_status(state="failed", error=f"论文任务出错：{type(e).__name__}: {e}")
         return 1
     logging.info(
-        "paper task finished in %.1fs; model requests=%d, max in flight=%d",
+        "paper task finished in %.1fs; model requests=%d, max in flight: flash=%d, argon=%d; "
+        "forwarded to argon=%d",
         time.monotonic() - started,
         result.model_requests,
         result.max_in_flight,
+        result.argon_max_in_flight,
+        result.forwarded_requests,
     )
     write_status(
         state="succeeded",

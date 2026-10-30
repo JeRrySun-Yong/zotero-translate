@@ -3,7 +3,8 @@
 Ticket 18 (spec 5 "本篇术语清单的条目字段"): the term list instructions ask
 for a gloss that says what kind of thing the concept is and what it does in
 this paper, not a literal rendering, with 15 Chinese characters as a hard
-limit.
+limit (closure-01: the instructions state 12, because argon goes over the
+stated limit; the check (c) stays at 15).
 
 Ticket 20 (spec 5, 2026-10-20 second set of decisions): the ticket 18
 Chinese name is gone. A gloss that mentions another key concept writes that
@@ -121,7 +122,7 @@ def test_instructions_ask_for_a_gloss_that_says_what_the_concept_is(autodesign):
     assert "what it does or what role it plays in this paper" in text
     assert "It is not a literal, word-for-word rendering of the English term" in text
     assert "a dictionary equivalent of one or two words is not a gloss" in text
-    assert "15 Chinese characters is a hard limit" in text
+    assert "12 Chinese characters is a hard limit" in text
     assert "delete modifiers and keep the head noun" in text
     assert "never ends with 的" in text
 

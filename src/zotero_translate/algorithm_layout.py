@@ -38,7 +38,6 @@ from zotero_translate.algorithm_translation import PLACEHOLDER
 from zotero_translate.algorithm_translation import AlgorithmTranslator
 from zotero_translate.algorithm_translation import Part
 from zotero_translate.algorithm_translation import where
-from zotero_translate.algorithms import TRANSLATED
 from zotero_translate.algorithms import AlgorithmDetector
 from zotero_translate.algorithms import AlgorithmUnit
 
@@ -82,8 +81,7 @@ class AlgorithmLayout:
                 continue
             for page, removed, added in changes:
                 page.pdf_character = [c for c in page.pdf_character if id(c) not in removed] + added
-            unit.result = TRANSLATED
-            unit.reason = None
+            unit.mark_translated()
 
 
 def _layout_fragment(page, unit: AlgorithmUnit, f: int, parts: list[Part], texts: dict[int, str], new_char):

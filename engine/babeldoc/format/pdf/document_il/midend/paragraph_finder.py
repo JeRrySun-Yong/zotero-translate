@@ -1,6 +1,8 @@
 import logging
 import random
 import re
+import statistics
+import unicodedata
 
 import numpy as np
 
@@ -23,6 +25,7 @@ from babeldoc.format.pdf.document_il.utils.layout_helper import (
 from babeldoc.format.pdf.document_il.utils.layout_helper import SPACE_REGEX
 from babeldoc.format.pdf.document_il.utils.layout_helper import Layout
 from babeldoc.format.pdf.document_il.utils.layout_helper import add_space_dummy_chars
+from babeldoc.format.pdf.document_il.utils.layout_helper import box_to_tuple
 from babeldoc.format.pdf.document_il.utils.layout_helper import build_layout_index
 from babeldoc.format.pdf.document_il.utils.layout_helper import calculate_iou_for_boxes
 from babeldoc.format.pdf.document_il.utils.layout_helper import get_char_unicode_string
@@ -38,6 +41,18 @@ from babeldoc.format.pdf.document_il.utils.style_helper import WHITE
 from babeldoc.format.pdf.translation_config import TranslationConfig
 
 logger = logging.getLogger(__name__)
+
+# A line of a reference list starts an entry when it starts less than this
+# many ems right of the list's leftmost line, and continues one (hanging
+# indent) when it starts at least HANGING_INDENT_EM right of it. The source
+# hanging indent is about 1 em (closure ticket 04).
+ENTRY_START_EM = 0.3
+HANGING_INDENT_EM = 0.5
+
+# Two layout boxes hold the same text when their overlap is more than this
+# share of the smaller box (AutoRef page 17: a table caption box inside
+# another; closure ticket 07).
+BOX_OVERLAP_SHARE = 0.5
 
 # Base58 alphabet (Bitcoin style, without numbers 0, O, I, l)
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -205,6 +220,9 @@ class ParagraphFinder:
                 self.process_page(page)
                 pbar.advance()
 
+            self._split_reference_entries(document)
+            self._split_front_matter_lines(document)
+
             total_paragraph_count = 0
             for page in document.page:
                 total_paragraph_count += len(page.pdf_paragraph)
@@ -213,6 +231,250 @@ class ParagraphFinder:
 
             if self.check_cid_paragraph(document):
                 raise ExtractTextError("The document contains too many CID paragraphs.")
+
+    def _split_reference_entries(self, document: Document) -> None:
+        """Make each entry of the reference list a paragraph of its own and
+        give it the source's hanging indent (closure ticket 04, R2).
+
+        The paragraphs follow the layout boxes, and one box can cover several
+        entries; the text rows of a paragraph tell the entries apart: an
+        entry's first row starts at the left, its other rows about 1 em right.
+        """
+        section = self.translation_config.reference_section
+        if section is None:
+            return
+        located = [
+            (page, paragraph)
+            for page in document.page
+            for paragraph in page.pdf_paragraph
+        ]
+        indexes = section(
+            [
+                (page.page_number, p.layout_label, (p.unicode or "").strip())
+                for page, p in located
+            ]
+        )
+        paragraphs = [located[i][1] for i in indexes]
+        # A one-row paragraph shows no indent of its own: it gets the list's.
+        indents = []
+        for paragraph in paragraphs:
+            if shape := self._row_starts(paragraph):
+                rows, em = shape
+                left = min(x for line in rows for x in line)
+                indents += [
+                    (x - left) / em
+                    for line in rows
+                    for x in line
+                    if x - left >= HANGING_INDENT_EM * em
+                ]
+        list_indent = statistics.median(indents) if indents else None
+        entries = {
+            id(paragraph): self._reference_entries(paragraph, list_indent)
+            for paragraph in paragraphs
+        }
+        for page in document.page:
+            if any(len(entries.get(id(p), ())) > 1 for p in page.pdf_paragraph):
+                page.pdf_paragraph = [
+                    entry
+                    for paragraph in page.pdf_paragraph
+                    for entry in entries.get(id(paragraph), [paragraph])
+                ]
+                self._set_paragraph_render_order(page)
+
+    @staticmethod
+    def _row_starts(paragraph: PdfParagraph) -> tuple[list[list[float]], float] | None:
+        """Where each text row of each line of ``paragraph`` starts, top row
+        first, and its median font size; None unless it is made of lines.
+
+        The line finder can keep several rows in one line (in the whole
+        AutoDesign paper it made one line of each reference entry), so the
+        rows come from the characters: a row is the characters whose bottom
+        lies within half a font size of the row's first (topmost) character.
+        """
+        lines = [c.pdf_line for c in paragraph.pdf_paragraph_composition]
+        if not lines or any(line is None for line in lines):
+            return None
+        sizes = [
+            char.pdf_style.font_size
+            for line in lines
+            for char in line.pdf_character
+            if char.pdf_style and char.pdf_style.font_size
+        ]
+        if not sizes:
+            return None
+        em = statistics.median(sizes)
+        starts = []
+        for line in lines:
+            rows: list[list[float]] = []  # [bottom y, left x]
+            chars = [c for c in line.pdf_character if (c.char_unicode or "").strip()]
+            for char in sorted(chars, key=lambda c: -c.visual_bbox.box.y):
+                box = char.visual_bbox.box
+                if rows and rows[-1][0] - box.y < em / 2:
+                    rows[-1][1] = min(rows[-1][1], box.x)
+                else:
+                    rows.append([box.y, box.x])
+            if not rows:
+                return None
+            starts.append([x for _, x in rows])
+        return starts, em
+
+    def _reference_entries(
+        self, paragraph: PdfParagraph, list_indent: float | None
+    ) -> list[PdfParagraph]:
+        """``paragraph`` cut before each line whose top row starts an entry;
+        each part that starts an entry gets the hanging indent of its rows.
+
+        ``list_indent`` is the list's hanging indent in ems, for a one-row
+        paragraph. A paragraph without indented rows is left as it is.
+        """
+        shape = self._row_starts(paragraph)
+        if shape is None:
+            return [paragraph]
+        rows, em = shape
+        left = min(x for line in rows for x in line)
+        indents = [x - left for line in rows for x in line]
+        hanging = [o for o in indents if o >= HANGING_INDENT_EM * em]
+        if not hanging:
+            if len(indents) == 1 and list_indent is not None:
+                paragraph.hanging_indent = list_indent * em
+            return [paragraph]
+        hanging_indent = statistics.median(hanging)
+        offsets = [line[0] - left for line in rows]
+        cuts = [0]
+        cuts += [j for j, o in enumerate(offsets) if j and o < ENTRY_START_EM * em]
+        cuts.append(len(offsets))
+        if len(cuts) == 2:
+            if offsets[0] < ENTRY_START_EM * em:
+                paragraph.hanging_indent = hanging_indent
+            return [paragraph]
+        entries = []
+        for start, stop in zip(cuts, cuts[1:], strict=False):
+            entry = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=paragraph.pdf_paragraph_composition[
+                    start:stop
+                ],
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+                hanging_indent=(
+                    hanging_indent if offsets[start] < ENTRY_START_EM * em else None
+                ),
+            )
+            self.update_paragraph_data(entry, update_unicode=True)
+            entries.append(entry)
+        return entries
+
+    def _split_front_matter_lines(self, document: Document) -> None:
+        """Make each line of the front matter (the authors, their
+        affiliations and the notes under them) a paragraph of its own
+        (closure ticket 05, A1-A3).
+
+        One layout box can hold author lines and an affiliation line
+        (MaLiang page 1), or two affiliation lines and a note (AutoDesign
+        page 1). As one paragraph, the translation was set as running text:
+        the affiliations followed the last author name and a line broke
+        inside an institution name. A paragraph of punctuation only, such as
+        the comma that ends an author line outside the authors' layout box
+        (AutoDesign page 1), joins the line it sits on; alone it kept its
+        source place while the translated line before it got shorter.
+        """
+        front_matter = self.translation_config.front_matter
+        if front_matter is None:
+            return
+        located = [
+            (page, paragraph)
+            for page in document.page
+            for paragraph in page.pdf_paragraph
+        ]
+        indexes = front_matter(
+            [
+                (page.page_number, p.layout_label, (p.unicode or "").strip())
+                for page, p in located
+            ]
+        )
+        front = [located[i] for i in indexes]
+        joined = {
+            id(paragraph)
+            for page, paragraph in front
+            if self._is_punctuation(paragraph)
+            and self._join_to_its_line(
+                paragraph,
+                [p for q, p in front if q is page and not self._is_punctuation(p)],
+            )
+        }
+        parts = {
+            id(paragraph): self._line_paragraphs(paragraph)
+            for _, paragraph in front
+            if id(paragraph) not in joined
+        }
+        for page in {id(page): page for page, _ in front}.values():
+            page.pdf_paragraph = [
+                part
+                for paragraph in page.pdf_paragraph
+                if id(paragraph) not in joined
+                for part in parts.get(id(paragraph), [paragraph])
+            ]
+            self._set_paragraph_render_order(page)
+
+    @staticmethod
+    def _is_punctuation(paragraph: PdfParagraph) -> bool:
+        text = (paragraph.unicode or "").strip()
+        return bool(text) and all(unicodedata.category(c).startswith("P") for c in text)
+
+    def _join_to_its_line(
+        self, paragraph: PdfParagraph, others: list[PdfParagraph]
+    ) -> bool:
+        """Append the characters of ``paragraph`` to the line of ``others``
+        that ends left of it and shares the most height with it. Returns
+        whether there was such a line."""
+        box = paragraph.box
+        best, best_overlap = None, 0.0
+        for other in others:
+            for composition in other.pdf_paragraph_composition:
+                line = composition.pdf_line
+                if line is None or line.box.x2 > box.x:
+                    continue
+                overlap = min(line.box.y2, box.y2) - max(line.box.y, box.y)
+                if overlap > best_overlap:
+                    best, best_overlap = (other, line), overlap
+        if best is None:
+            return False
+        other, line = best
+        line.pdf_character.extend(
+            char
+            for composition in paragraph.pdf_paragraph_composition
+            if composition.pdf_line
+            for char in composition.pdf_line.pdf_character
+        )
+        self.update_line_data(line)
+        self.update_paragraph_data(other, update_unicode=True)
+        return True
+
+    def _line_paragraphs(self, paragraph: PdfParagraph) -> list[PdfParagraph]:
+        """One paragraph per line of a horizontal paragraph made of lines;
+        any other paragraph as it is."""
+        compositions = paragraph.pdf_paragraph_composition
+        if (
+            paragraph.vertical
+            or len(compositions) < 2
+            or any(c.pdf_line is None for c in compositions)
+        ):
+            return [paragraph]
+        lines = []
+        for composition in compositions:
+            line = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=[composition],
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+            )
+            self.update_paragraph_data(line, update_unicode=True)
+            lines.append(line)
+        return lines
 
     def check_cid_paragraph(self, doc: Document):
         cid_para_count = 0
@@ -429,7 +691,11 @@ class ParagraphFinder:
         return {id(page.pdf_character[i]) for i in detector(page)}
 
     def _group_characters_into_paragraphs(
-        self, page: Page, layout_index, layout_map, algorithm_chars: set[int] = frozenset()
+        self,
+        page: Page,
+        layout_index,
+        layout_map,
+        algorithm_chars: set[int] = frozenset(),
     ) -> list[PdfParagraph]:
         paragraphs: list[PdfParagraph] = []
         if page.pdf_paragraph:
@@ -455,8 +721,10 @@ class ParagraphFinder:
         current_layout: Layout | None = None
         skip_chars = []
 
-        for char in page.pdf_character:
-            char_layout = get_character_layout(char, layout_index, layout_map)
+        char_layouts = self._line_layouts(
+            page, layout_index, layout_map, algorithm_chars
+        )
+        for char, char_layout in zip(page.pdf_character, char_layouts, strict=True):
             # Check if character is in any formula layout and set formula_layout_id
             char.formula_layout_id = is_character_in_formula_layout(
                 char, page, layout_index, layout_map
@@ -525,6 +793,120 @@ class ParagraphFinder:
         for para in paragraphs:
             self.update_paragraph_data(para)
         return paragraphs
+
+    def _line_layouts(
+        self,
+        page: Page,
+        layout_index,
+        layout_map,
+        algorithm_chars: set[int] = frozenset(),
+    ) -> list[Layout | None]:
+        """The layout box of each character of ``page``: the box its text
+        line goes to (closure ticket 07, G2).
+
+        ``get_character_layout`` takes the box each character lies in. A box
+        narrower than its text, or two boxes that overlap, cut a source line
+        into pieces, and a piece shorter than ``min_text_length`` was not
+        translated: it stayed as source glyphs beside the translation ("Figu"
+        / "e" / "back" on AutoRef page 30). The layout parser adds a
+        ``fallback_line`` box around each text line of the page. A line with
+        characters in a text box goes to the text box that holds most of
+        them, if that box holds more than lie outside every text box, or if
+        the box holds the line from top to bottom (a caption line
+        that starts far left of its box); otherwise it goes to its own box (a
+        box edge that clips a line above or below). A character of the line
+        moves to the line's box from the line's own box (it lay outside every
+        text box), or from another text box that it shares with the line's
+        box (a title box that reaches into the line below), or that mostly
+        overlaps it (a caption box inside another). Characters left out of
+        the paragraphs (pseudocode, isolated formulas, non-text boxes)
+        neither vote nor move.
+        """
+        boxes = {layout.id: layout for layout in page.page_layout}
+        # (character, its own layout, its line's id; None for a character
+        # left out of the paragraphs)
+        rows = []
+        for char in page.pdf_character:
+            layout = get_character_layout(char, layout_index, layout_map)
+            kept = (
+                id(char) not in algorithm_chars
+                and is_text_layout(layout)
+                and not self.is_isolated_formula(char)
+            )
+            line = self._text_line(char, layout_index, layout_map) if kept else None
+            rows.append((char, layout, line))
+        votes: dict[int, dict[int, int]] = {}
+        for char, layout, line in rows:
+            if line is not None and (char.char_unicode or "").strip():
+                count = votes.setdefault(line, {})
+                count[layout.id] = count.get(layout.id, 0) + 1
+        owners = {}
+        for line, count in votes.items():
+            inside = {
+                k: n for k, n in count.items() if boxes[k].class_name != "fallback_line"
+            }
+            if not inside:
+                continue
+            owner = boxes[max(inside, key=inside.get)]
+            outside = sum(count.values()) - sum(inside.values())
+            if inside[owner.id] > outside or self._holds_line(owner, boxes[line]):
+                owners[line] = owner
+            else:
+                owners[line] = boxes[line]
+        result = []
+        for char, layout, line in rows:
+            owner = owners.get(line)
+            if (
+                owner is not None
+                and layout.id != owner.id
+                and self._joins_line_box(char, boxes[layout.id], owner)
+            ):
+                layout = Layout(owner.id, owner.class_name)
+            result.append(layout)
+        return result
+
+    @staticmethod
+    def _text_line(char: PdfCharacter, layout_index, layout_map) -> int | None:
+        """The id of the ``fallback_line`` box of ``char``'s text line: the one
+        that holds most of the character, then the one whose middle is
+        nearest the character's."""
+        box = char.visual_bbox.box
+        middle = (box.y + box.y2) / 2
+        best, best_key = None, None
+        for i in layout_index.intersection(box_to_tuple(box)):
+            line = layout_map[i]
+            if line.class_name != "fallback_line":
+                continue
+            key = (
+                -calculate_iou_for_boxes(box, line.box),
+                abs((line.box.y + line.box.y2) / 2 - middle),
+            )
+            if best_key is None or key < best_key:
+                best, best_key = line.id, key
+        return best
+
+    @staticmethod
+    def _holds_line(box, line) -> bool:
+        """Whether the layout ``box`` holds the text line ``line`` from top to
+        bottom: more than half of the line's height lies in it."""
+        height = line.box.y2 - line.box.y
+        shared = min(box.box.y2, line.box.y2) - max(box.box.y, line.box.y)
+        return height > 0 and shared > height / 2
+
+    @staticmethod
+    def _joins_line_box(char: PdfCharacter, current, owner) -> bool:
+        """Whether ``char``, in the box ``current``, moves to ``owner``, the
+        box of its text line."""
+        if current.class_name == "fallback_line":
+            return True
+        if calculate_iou_for_boxes(char.visual_bbox.box, owner.box) > 0:
+            return True
+        a, b = current.box, owner.box
+        overlap = max(0, min(a.x2, b.x2) - max(a.x, b.x)) * max(
+            0, min(a.y2, b.y2) - max(a.y, b.y)
+        )
+        smaller = min((a.x2 - a.x) * (a.y2 - a.y), (b.x2 - b.x) * (b.y2 - b.y))
+        return smaller > 0 and overlap > BOX_OVERLAP_SHARE * smaller
 
     def _merge_overlapping_clusters(
         self, lines: dict[int, list[PdfCharacter]], char_height_average: float
