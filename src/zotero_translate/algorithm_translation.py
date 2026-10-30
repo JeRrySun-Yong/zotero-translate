@@ -201,7 +201,9 @@ def _gap(line: AlgorithmLine, a: int, b: int) -> bool:
 def _spaced(line: AlgorithmLine, positions: list[int]) -> list[str]:
     out = []
     for i, k in enumerate(positions):
-        if i and _gap(line, positions[i - 1], k):
+        if i and k in line.underscores:  # a drawn underscore (closure ticket 14)
+            out.append("_")
+        elif i and _gap(line, positions[i - 1], k):
             out.append(" ")
         out.append(line.glyphs[k].text)
     return out

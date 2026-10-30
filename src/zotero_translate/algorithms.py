@@ -94,6 +94,19 @@ by font name, words of capitals only, underscores and camelCase; the rule
 is in ``algorithm_translation``'s module documentation). Small caps show up
 in the text layer as capitals in two alternating sizes of one font (for
 example 10 pt and 8 pt), or as ordinary letters in a small caps font.
+
+Drawn lines (closure ticket 14): a radical's bar, a fraction's bar and an
+identifier's underscore are lines drawn on the page, not glyphs. A drawn line
+belongs to the row whose glyphs own it (``drawn_lines.owners`` in the
+engine, with the math fonts' glyphs as formula glyphs; see that module for
+the rule and its thresholds): the glyphs it belongs to keep their source
+text, and for an underscore so do the whole words on both sides, so
+``num_training_steps`` is one identifier, not three words to translate
+(ticket 16 protects an underscore that is a glyph; this one is drawn). The
+row records the line (``AlgorithmLine.drawn``) so that the layout moves it
+with its glyphs. An algorithm's three rules, table rules and rules above or
+below text belong to no row.
+
 Coordinates are PDF user space: y grows upwards.
 """
 
@@ -104,6 +117,8 @@ import statistics
 from dataclasses import dataclass
 from dataclasses import field
 from typing import NamedTuple
+
+from babeldoc.format.pdf.document_il.utils import drawn_lines
 
 MIN_LINES = 3
 KEPT_SOURCE = "kept_source"
@@ -262,6 +277,13 @@ class AlgorithmLine:
     indexes: list[int] = field(default_factory=list, repr=False)
     keep: list[bool] = field(default_factory=list, repr=False)
     chars: list = field(default_factory=list, repr=False)
+    # The drawn lines that belong to the row: (index in the detector's drawn
+    # lines of the page, positions in ``glyphs`` of the glyphs it belongs
+    # to); the positions of glyphs right after a drawn underscore; and (set
+    # by ``AlgorithmDetector.engine_page``) the engine's curves for the lines.
+    drawn: list[tuple[int, list[int]]] = field(default_factory=list, repr=False)
+    underscores: set[int] = field(default_factory=set, repr=False)
+    curves: list = field(default_factory=list, repr=False)
 
     def report(self) -> dict:
         return {
@@ -348,7 +370,13 @@ class AlgorithmDetector:
     def engine_page(self, page) -> set[int]:
         """The engine hook: indexes in ``page.pdf_character`` of the page's pseudocode."""
         known = {id(f) for unit in self.units for f in unit.fragments}
-        taken = self(page.page_number + 1, glyphs_of_page(page), rules_of_page(page))
+        curves = drawn_curves_of_page(page)
+        taken = self(
+            page.page_number + 1,
+            glyphs_of_page(page),
+            rules_of_page(page),
+            [line for _, line in curves],
+        )
         for unit in self.units:
             for fragment in unit.fragments:
                 if id(fragment) in known:
@@ -356,12 +384,16 @@ class AlgorithmDetector:
                 fragment.chars = [page.pdf_character[i] for i in sorted(fragment.glyphs)]
                 for line in fragment.lines:
                     line.chars = [page.pdf_character[i] for i in line.indexes]
+                    line.curves = [curves[index][0] for index, _ in line.drawn]
         return taken
 
-    def __call__(self, page_number: int, glyphs: list[Glyph], rules=()) -> set[int]:
+    def __call__(self, page_number: int, glyphs: list[Glyph], rules=(), drawn=()) -> set[int]:
         """Detect the algorithms on one page (``rules``: its horizontal rules, ``Rule`` or
-        ``(x0, x1, y)``); return the indexes of their glyphs."""
+        ``(x0, x1, y)``; ``drawn``: all its drawn lines, the same way, of any length);
+        return the indexes of their glyphs."""
         found = detect_page(page_number, glyphs, rules)
+        for _, fragment in found:
+            _attach_drawn_lines(fragment, [drawn_lines.DrawnLine(*line) for line in drawn])
         taken: set[int] = set()
         for index, (title, fragment) in enumerate(found):
             previous = self.units[-1] if self.units else None
@@ -418,6 +450,37 @@ def rules_of_page(page) -> list[Rule]:
         if box is not None and box.y2 - box.y < _RULE_HEIGHT and box.x2 - box.x >= _MIN_RULE:
             rules.append(Rule(box.x, box.x2, (box.y + box.y2) / 2))
     return rules
+
+
+def drawn_curves_of_page(page) -> list[tuple[object, drawn_lines.DrawnLine]]:
+    """The page's drawn lines (``drawn_lines.line_of``), each with its engine curve."""
+    found = []
+    for curve in page.pdf_curve or []:
+        line = drawn_lines.line_of(curve.box)
+        if line is not None:
+            found.append((curve, line))
+    return found
+
+
+def _attach_drawn_lines(fragment: AlgorithmFragment, drawn: list[drawn_lines.DrawnLine]) -> None:
+    """Give each drawn line to the row whose glyphs own it; those glyphs keep their source text."""
+    for index, drawn_line in enumerate(drawn):
+        for row in fragment.lines:
+            marks = [
+                drawn_lines.Mark(g.x0, g.y0, g.x1, g.y1, g.text, bool(_MATH_FONT.search(g.font or "")), g.size)
+                for g in row.glyphs
+            ]
+            found = drawn_lines.owners(drawn_line, marks)
+            if found is None:
+                continue
+            positions = set(found.indexes)
+            if found.kind == "underscore":  # the identifier: the whole words on both sides
+                positions = {k for word in _words(row.glyphs) if positions & set(word) for k in word}
+                row.underscores.add(found.indexes[1])
+            for k in positions:
+                row.keep[k] = True
+            row.drawn.append((index, sorted(positions)))
+            break
 
 
 def detect_page(

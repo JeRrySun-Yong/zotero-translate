@@ -13,6 +13,10 @@ row with natural language this replaces the row's characters:
   word of its own (names, small caps or typewriter words the model kept).
   A placeholder that a glyph outside the algorithm touches (a formula cut
   by the algorithm's edge) is not whole: the algorithm keeps its source.
+- A drawn line of the row (a radical's or fraction's bar, an identifier's
+  underscore; ``AlgorithmLine.drawn``, closure ticket 14) moves with the
+  glyphs it belongs to, by the same dx (``_drawn_line_shifts``); if those
+  glyphs moved by different amounts, the algorithm keeps its source.
 - Translated text gets the style of the row's first natural-language glyph
   (font family, size, bold, colour), not the style of the algorithm's first
   glyph: a bold keyword no longer makes the whole row bold.
@@ -79,8 +83,10 @@ class AlgorithmLayout:
             except Exception as e:  # noqa: BLE001 - only this algorithm keeps its source
                 self.translator.keep_source(unit, f"排版出错：{type(e).__name__}: {e}")
                 continue
-            for page, removed, added in changes:
+            for page, removed, added, shifts in changes:
                 page.pdf_character = [c for c in page.pdf_character if id(c) not in removed] + added
+                for curve, dx in shifts:
+                    _shift_curve(curve, dx)
             unit.mark_translated()
 
 
@@ -98,6 +104,8 @@ def _layout_fragment(page, unit: AlgorithmUnit, f: int, parts: list[Part], texts
     right_edge = fragment.box[2] + _RIGHT_SLACK
     removed: set[int] = set()
     added: list = []
+    shifts: list = []  # (engine curve, dx): drawn lines that move with their glyphs
+    on_page_curves = {id(c) for c in page.pdf_curve or []}
     rows: dict[int, list[Part]] = {}
     for part in parts:
         if part.fragment == f:
@@ -110,27 +118,52 @@ def _layout_fragment(page, unit: AlgorithmUnit, f: int, parts: list[Part], texts
         comment = next((p for p in row if p.kind == "comment"), None)
         line = row[0].line
         limit = right_edge
+        moves: dict[int, float] = {}  # position of a source glyph placed again -> its dx
         if comment is not None:
             # Right-aligned at the source comment's end; never over the body.
             body_end = (
                 max(line.glyphs[k].x1 for k in body.positions) if body is not None else fragment.box[0]
             )
             if comment.has_text:
-                chars, left = _place_comment(page, comment, texts[comment.id], body_end, new_char)
+                chars, left, moved = _place_comment(page, comment, texts[comment.id], body_end, new_char)
                 added += chars
+                moves |= moved
                 removed |= {id(line.chars[k]) for k in [comment.mark, *comment.positions]}
             else:
                 left = line.glyphs[comment.mark].x0
             limit = left - 0.5 * line.glyphs[comment.mark].size
         if body is not None and body.has_text:
             start = line.glyphs[body.positions[0]].x0
-            chars, _ = _fit(page, body, texts[body.id], start, limit, new_char)
+            chars, _, moved = _fit(page, body, texts[body.id], start, limit, new_char)
             first = min(c.box.x for c in chars)
             if abs(first - start) > X_TOLERANCE:
                 raise LayoutError(f"{where(body)}的起始横坐标偏离原文 {abs(first - start):.1f} pt")
             added += chars
+            moves |= moved
             removed |= {id(line.chars[k]) for k in body.positions}
-    return page, removed, added
+        shifts += _drawn_line_shifts(row[0], moves, on_page_curves)
+    return page, removed, added, shifts
+
+
+def _drawn_line_shifts(part: Part, moves: dict[int, float], on_page: set[int]) -> list:
+    """Each drawn line of the row moves with the glyphs it belongs to (closure ticket 14).
+
+    Its glyphs are kept ones, so they all move by one dx (one placeholder) or
+    stay (a part without text). Glyphs moved by different amounts, or a line
+    the page no longer has, make the algorithm keep its source text.
+    """
+    line = part.line
+    shifts = []
+    for (_, positions), curve in zip(line.drawn, line.curves):
+        dxs = {round(moves[k], 3) for k in positions if k in moves}
+        if not dxs:
+            continue
+        if len(dxs) > 1 or any(k not in moves for k in positions):
+            raise LayoutError(f"{where(part)}中画出的线所属的字符被拆开")
+        if id(curve) not in on_page:
+            raise LayoutError(f"{where(part)}中画出的线不在页面上")
+        shifts.append((curve, dxs.pop()))
+    return shifts
 
 
 def _place_comment(page, part: Part, text: str, left_limit: float, new_char):
@@ -141,7 +174,7 @@ def _place_comment(page, part: Part, text: str, left_limit: float, new_char):
     gap = line.glyphs[part.positions[0]].x0 - mark.x1
     scale = 1.0
     while True:
-        chars, width = _row(page, part, text, 0.0, scale, new_char)
+        chars, width, moves = _row(page, part, text, 0.0, scale, new_char)
         left = end - width - gap - (mark.x1 - mark.x0)
         if left >= left_limit + 0.5 * mark.size:
             break
@@ -153,22 +186,23 @@ def _place_comment(page, part: Part, text: str, left_limit: float, new_char):
         _shift(c, dx)
     sign = copy.deepcopy(line.chars[part.mark])
     _shift(sign, left - sign.box.x)
-    return [sign, *chars], left
+    return [sign, *chars], left, {k: v + dx for k, v in moves.items()}
 
 
 def _fit(page, part: Part, text: str, start: float, limit: float, new_char):
     scale = 1.0
     while True:
-        chars, width = _row(page, part, text, start, scale, new_char)
+        chars, width, moves = _row(page, part, text, start, scale, new_char)
         if start + width <= limit:
-            return chars, width
+            return chars, width, moves
         scale = round(scale - _SCALE_STEP, 2)
         if scale < MIN_SCALE - 1e-9:
             raise LayoutError(f"{where(part)}放不下（字号缩到原文的 {MIN_SCALE:.0%} 仍超出）")
 
 
 def _row(page, part: Part, text: str, start: float, scale: float, new_char):
-    """The row's characters from x = ``start``, translated text at ``scale``; and its width."""
+    """The row's characters from x = ``start``, translated text at ``scale``; its width; and
+    the dx of every source glyph placed again (position -> dx)."""
     line = part.line
     style = next(k for k in part.positions if not line.keep[k]) if part.has_text else part.positions[0]
     like = line.chars[style]
@@ -177,6 +211,7 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
     previous = None  # "text", "keep" or "space"
     last = ""  # the last character of translated text
     chars = []
+    moves: dict[int, float] = {}
     words = _source_words(part)
     for token in re.split(r"(\{v\d+\}|" + _WORD + ")", text):
         if not token:
@@ -192,6 +227,7 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
                 cursor += _JOIN * size
             source = [line.chars[k] for k in positions]
             dx = cursor - min(c.box.x for c in source)
+            moves |= {k: dx for k in positions}
             for c in source:
                 moved = copy.deepcopy(c)
                 _shift(moved, dx)
@@ -215,7 +251,7 @@ def _row(page, part: Part, text: str, start: float, scale: float, new_char):
             chars.append(char)
             cursor += width
             previous, last = "text", ch
-    return chars, cursor - start
+    return chars, cursor - start, moves
 
 
 def _check_complete(part: Part, others: list) -> None:
@@ -268,5 +304,16 @@ def _shift(char, dx: float) -> None:
     if char.visual_bbox is not None and char.visual_bbox.box is not None:
         char.visual_bbox.box.x += dx
         char.visual_bbox.box.x2 += dx
+
+
+def _shift_curve(curve, dx: float) -> None:
+    """Move a drawn line sideways: a translation in page space before its own transforms."""
+    curve.box.x += dx
+    curve.box.x2 += dx
+    matrix = list(curve.relocation_transform or [1, 0, 0, 1, 0, 0])
+    if len(matrix) != 6:
+        matrix = [1, 0, 0, 1, 0, 0]
+    matrix[4] = float(matrix[4]) + dx
+    curve.relocation_transform = matrix
 
 
