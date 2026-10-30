@@ -1040,6 +1040,17 @@ class Typesetting:
         # when every unit is inside the form's box, and the box grows (down,
         # right) only up to the form's box.
         clip = self._form_box(paragraph, page)
+        if clip is not None:
+            # Review round 1: the layout must keep whole glyphs inside the
+            # form's box, so it starts from the part of the paragraph box
+            # inside it (AutoRef page 22: the step-1 paragraph's box starts
+            # 0.2 pt above its form).
+            box = Box(
+                x=max(box.x, clip.x),
+                y=max(box.y, clip.y),
+                x2=min(box.x2, clip.x2),
+                y2=min(box.y2, clip.y2),
+            )
 
         # closure 06 (T4): a one-line table cell ("Calls" in a 12 pt cell) that
         # does not fit at the initial scale first widens into the free space
