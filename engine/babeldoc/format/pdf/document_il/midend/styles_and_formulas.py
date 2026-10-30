@@ -389,7 +389,9 @@ class StylesAndFormulas:
                 if box is not None and not (
                     box.x - drawn_lines.TOUCH <= line.x0
                     and line.x1 <= box.x2 + drawn_lines.TOUCH
-                    and box.y - drawn_lines.TOUCH <= line.y <= box.y2 + drawn_lines.TOUCH
+                    and box.y - drawn_lines.TOUCH
+                    <= line.y
+                    <= box.y2 + drawn_lines.TOUCH
                 ):
                     continue
                 formula = self._formula_of_drawn_line(paragraph, line)
@@ -432,7 +434,9 @@ class StylesAndFormulas:
         if found.kind == "underscore":  # the identifier: the whole words on both sides
             while first > 0 and drawn_lines.same_word(marks[first - 1], marks[first]):
                 first -= 1
-            while last + 1 < len(marks) and drawn_lines.same_word(marks[last], marks[last + 1]):
+            while last + 1 < len(marks) and drawn_lines.same_word(
+                marks[last], marks[last + 1]
+            ):
                 last += 1
         first_ci, first_k = flat[first][0], flat[first][1]
         last_ci, last_k = flat[last][0], flat[last][1]

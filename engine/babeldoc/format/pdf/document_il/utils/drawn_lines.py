@@ -131,7 +131,9 @@ def owners(line: DrawnLine, marks: list[Mark]) -> Owners | None:
         return _underscore(line, marks, left, right) if left and right else None
     if not (_reached(line, marks, line.x0) and _reached(line, marks, line.x1)):
         return None
-    if not any(marks[i].formula for i in under + left + right) or _spells_word(marks, under):
+    if not any(marks[i].formula for i in under + left + right) or _spells_word(
+        marks, under
+    ):
         return None
     ends = [i for i in left + right if marks[i].formula and i not in under]
     return Owners("formula", sorted(set(under + ends)))
@@ -150,8 +152,16 @@ def _reached(line: DrawnLine, marks: list[Mark], x: float) -> bool:
 
 
 def _underscore(line: DrawnLine, marks: list[Mark], left: list[int], right: list[int]):
-    before = [i for i in left if abs(marks[i].x1 - line.x0) <= TOUCH and marks[i].text.isalnum()]
-    after = [i for i in right if abs(marks[i].x0 - line.x1) <= TOUCH and marks[i].text.isalnum()]
+    before = [
+        i
+        for i in left
+        if abs(marks[i].x1 - line.x0) <= TOUCH and marks[i].text.isalnum()
+    ]
+    after = [
+        i
+        for i in right
+        if abs(marks[i].x0 - line.x1) <= TOUCH and marks[i].text.isalnum()
+    ]
     if not before or not after:
         return None
     a, b = before[0], after[0]
