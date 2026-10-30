@@ -5,9 +5,34 @@ the algorithm is an input item: the title, each numbered line, each row
 without a number (``Require:``, headings) and each ``▷`` comment (a part of
 its own, so that it can stay right-aligned). In an item's source, every run
 of glyphs that keeps its source text (``AlgorithmLine.keep``: formulas,
-bold keywords, function calls with their arguments, the ``Algorithm N``
-label) is a placeholder ``{vN}``; the item also lists what each placeholder
-stands for. The request carries the condensed paper dossier, the glossary
+bold keywords, function calls with their arguments, constants and
+identifiers, the ``Algorithm N`` label) is a placeholder ``{vN}``; the item
+also lists what each placeholder stands for.
+
+Constants and identifiers (ticket 16) are kept by this mechanism, not by
+the prompt: a model that translates one (AutoDesign p7 "Accept" became
+"接受" in C-10) drops its placeholder, and the answer fails the structure
+check below. ``algorithms.keep_flags`` decides which words they are:
+
+- small caps: capitals in two sizes of one font, or a small caps font by
+  name (``_SMALL_CAPS_FONT``: SFCC, ECCC, CMCSC, LMRomanCaps, SmallCaps;
+  not a name ending in "SC", which in PingFangSC means Simplified Chinese);
+- capitals only, at least ``_CONSTANT_LETTERS`` (6) letters: ACCEPT,
+  REJECT. Shorter ones are abbreviations (LLM, FAISS) left to the model and
+  the glossary. Not in a row without any lower-case letter, formula glyphs
+  included (the d, t of "d_t ← ACCEPT" are lower case, so that row is not
+  one), or in a bold heading row: those are headings;
+- identifiers, in a run of glyphs without a word gap (across font
+  changes): an underscore between letters or digits (``max_retry``), or
+  camelCase (a lower-case letter followed by a capital in one font) that
+  starts in lower case (``avgScore``) or is a call (``SelectParents(A)``).
+  A name that starts with a capital and is no call (AutoDesign, AutoRef,
+  LiDAR) is left to the glossary: key concepts stay in English anyway.
+
+A name of any of these kinds followed by ``(`` keeps everything up to its
+closing parenthesis, like a function call (D5).
+
+The request carries the condensed paper dossier, the glossary
 entries found in the algorithm, the title of the section the algorithm is
 in and the whole algorithm's source text; no first-mention glosses.
 
