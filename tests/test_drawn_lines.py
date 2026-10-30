@@ -399,7 +399,8 @@ def test_the_algorithm_is_translated_with_the_identifier_as_one_placeholder(algo
     assert (unit["result"], unit["reason"]) == ("translated", None)
     (request,) = model.requests_of("algorithm")
     (row,) = [r for r in algorithm_rows(request.body) if "each step" in r["source"]]
-    assert "num_training_steps" in row["keep"].values(), row
+    # One placeholder for the identifier (with the bold keyword next to it, as any kept run).
+    assert any(value.startswith("num_training_steps") for value in row["keep"].values()), row
     assert "training" not in row["source"]
 
 
