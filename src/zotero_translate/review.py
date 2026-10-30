@@ -64,7 +64,7 @@ A JSON array with one object per input item: {{"id": <the item's id>, "output": 
 """
 
 # Added after the instructions only when an item has the field (closure ticket 17).
-KEY_CONCEPT_HEADING_RULES = f"""\
+KEY_CONCEPT_HEADING_REVIEW_RULES = f"""\
 ## Section headings that are key concepts
 An item with "{KEY_CONCEPT_HEADING_FIELD}" is a section heading that is the full name of a key concept: its translation is in Chinese only, the key concept included, with no English words, no gloss and no parentheses. For these items this overrides the terminology rule that keeps key concepts in English: do not put the English back."""
 
@@ -166,7 +166,7 @@ class BatchReviewer:
     def _prompt(self, items: list[dict], glossary_entries: list[tuple[str, str]]) -> str:
         parts = [INSTRUCTIONS]
         if any(KEY_CONCEPT_HEADING_FIELD in item for item in items):
-            parts.append(KEY_CONCEPT_HEADING_RULES)
+            parts.append(KEY_CONCEPT_HEADING_REVIEW_RULES)
         parts.append("## Paper dossier (condensed)\n" + self.condensed_dossier)
         if glossary_entries:
             rows = "\n".join(f"| {s} | {t} |" for s, t in sorted(glossary_entries))

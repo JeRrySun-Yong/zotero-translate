@@ -118,7 +118,7 @@ KEY_CONCEPT_HEADING_FIELD = "key_concept_heading"
 # A section heading that is a key concept's full name is translated into
 # Chinese only, although the glossary keeps key concepts in English
 # (requirement 1; user's decision of 2026-10-29, closure ticket 17).
-KEY_CONCEPT_HEADING_RULES = f"""## Section Headings That Are Key Concepts
+KEY_CONCEPT_HEADING_TRANSLATION_RULES = f"""## Section Headings That Are Key Concepts
 Some input items have "{KEY_CONCEPT_HEADING_FIELD}": the item is a section heading that is the full name of a key concept of this paper. Translate such a heading into Chinese, the key concept included, and write it in Chinese only: no English words, no gloss and no parentheses; keep its section number. This overrides, for these items only, the glossary rule that keeps key concepts in English. Do not output the "{KEY_CONCEPT_HEADING_FIELD}" field.
 
 """
@@ -1202,7 +1202,7 @@ class ILTranslatorLLMOnly:
             first_mention_rules_block=FIRST_MENTION_RULES
             if has_first_mention_glosses
             else "",
-            key_concept_heading_rules_block=KEY_CONCEPT_HEADING_RULES
+            key_concept_heading_rules_block=KEY_CONCEPT_HEADING_TRANSLATION_RULES
             if has_key_concept_headings
             else "",
             contextual_hints_block=contextual_hints_block,

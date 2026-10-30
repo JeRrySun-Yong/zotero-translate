@@ -420,9 +420,9 @@ class TranslationConfig:
         # Reviews an LLM batch after its draft translation. Given the items
         # ({"id", "source", "draft", "page"} and the first-mention glosses
         # and key concept heading fields if any) and the batch's glossary
-        # entries, returns id -> the
-        # final text, or None to keep that paragraph's source text (the
-        # reviewer records it). None skips the review.
+        # entries, returns id -> the final text, or None to keep that
+        # paragraph's source text (the reviewer records it). None skips the
+        # review.
         self.batch_reviewer = batch_reviewer
         # Called with (1-based page, source text, reason) for a paragraph
         # that keeps its source text because its translation failed.
