@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Run by an inner pytest: start a service whose task waits for the fake
 # model, write down where it runs, and wait to be interrupted.
 INNER_TEST = """
+import faulthandler
 import json
 import os
 import time
@@ -45,6 +46,9 @@ def test_holds_a_running_task(start_service):
         out = Path(os.environ["ZT_TEST_WHERE"])
         out.with_suffix(".tmp").write_text(json.dumps(where))
         out.with_suffix(".tmp").replace(out)
+        # Still alive 30 s after being told where it runs (the interrupt comes
+        # within seconds): print every thread's stack, to see where it hangs.
+        faulthandler.dump_traceback_later(30, exit=False)
         time.sleep(600)
 """
 
@@ -155,7 +159,20 @@ def test_an_interrupted_test_run_stops_its_service_and_task_subprocess(tmp_path,
         assert workers
 
         run.send_signal(sig)
-        output = run.communicate(timeout=60)[0]
+        try:
+            output = run.communicate(timeout=60)[0]
+        except subprocess.TimeoutExpired:
+            run.kill()
+            try:
+                output = run.communicate(timeout=10)[0]
+            except subprocess.TimeoutExpired as e:  # its service still holds the pipe
+                output = (e.output or b"").decode(errors="replace") if isinstance(
+                    e.output, bytes
+                ) else (e.output or "")
+            raise AssertionError(
+                f"the inner test run did not exit after the interrupt "
+                f"(exit status {run.poll()}):\n{output}"
+            ) from None
 
         assert not _running(service), output
         assert [pid for pid in workers if _running(pid)] == [], output
