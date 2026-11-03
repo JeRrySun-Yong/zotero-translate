@@ -204,6 +204,41 @@ def test_while_a_task_waits_the_next_runs_and_the_due_rerun_goes_next_without_pr
     assert rerun_started < b_succeeded  # queued while b ran
 
 
+def test_a_due_rerun_not_yet_queued_still_goes_ahead_of_first_attempts(
+    tmp_path, fake_model, start_service
+):
+    # The rerun timer is held between "due" and "queued"; the queue must not
+    # start a first attempt meanwhile. After a restart an overdue rerun is in
+    # the same place until the timer queues it.
+    markers = _pauses(tmp_path)
+    due = _pauses(tmp_path, "due")
+    _fail_dossier(fake_model)
+    service = start_service(
+        fake_model,
+        env={WAITS: "1,600", PAUSE_AFTER_MARKER: str(markers), PAUSE_BEFORE_RERUN_QUEUE: str(due)},
+    )
+
+    a, b, c = service.submit(), service.submit(), service.submit()
+    _wait_for_file(markers / f"{a}-1.paused").unlink()
+    paused_b = _wait_for_file(markers / f"{b}-1.paused")  # a failed: b runs meanwhile
+    _answer_dossier(fake_model)
+    paused_due = _wait_for_file(due / f"{a}-1.paused", timeout=30)
+    paused_b.unlink()
+    service.wait_for(b, lambda s: s["state"] == "succeeded", timeout=120)
+    time.sleep(1.5)
+
+    assert not (markers / f"{c}-1.paused").exists()
+    assert service.status(c)["state"] == "queued"
+    paused_due.unlink()
+    _wait_for_file(markers / f"{a}-2.paused", timeout=60).unlink()
+    assert not (markers / f"{c}-1.paused").exists()
+    _wait_for_file(markers / f"{c}-1.paused", timeout=300).unlink()
+
+    for task_id in (a, b, c):
+        assert service.wait(task_id)["state"] == "succeeded"
+    assert [service.status(t)["attempt"] for t in (a, b, c)] == [2, 1, 1]
+
+
 def test_a_restart_while_waiting_keeps_the_due_time(tmp_path):
     pauses = _pauses(tmp_path)
     with FakeModel() as model:

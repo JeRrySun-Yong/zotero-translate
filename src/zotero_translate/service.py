@@ -33,13 +33,14 @@ without a result) puts the task in ``waiting_rerun`` with a saved due time,
 60 seconds later before the first rerun and 300 before the second (event
 等待自动重跑). When it is due, the task is queued as a rerun and the rerun
 counted, in one transition (event 自动重跑开始); it does not preempt the
-running task. After 2 reruns, or on a ``permanent`` failure, the task fails
-with that attempt's reason. A restart keeps a waiting task's due time and
-counts no rerun again; an interrupted rerun attempt is requeued as
-interrupted, using no rerun. The
-service alone writes the
-task state: every transition goes through ``TaskQueue._decide``, under one
-lock, and is saved with the counters it changes as one atomic replacement of
+running task, and no first attempt starts while a due rerun is not yet
+queued. After 2 reruns, or on a ``permanent`` failure, the task fails with
+that attempt's reason. A restart keeps a waiting task's due time and counts
+no rerun again; an interrupted rerun attempt is requeued as interrupted,
+using no rerun.
+
+The service alone writes the task state: every transition goes through
+``TaskQueue._decide``, under one lock, and is saved with the counters it changes as one atomic replacement of
 the status file. Each attempt runs in its own subprocess
 (``zotero_translate.worker``), which reports progress and its result over a
 pipe; the service adopts only reports of the task's current attempt while the
@@ -129,7 +130,7 @@ LOCK_FILE = "service.lock"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
-RERUN_WAITS = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
+RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Queue classes (spec section 1, "排队顺序"), in the order they run: tasks
@@ -199,8 +200,9 @@ class TaskQueue:
         A task left running was interrupted: after its processes are reaped
         it is queued again, ahead of the others, unless this is its third
         interruption in a row, which fails it. A queued task keeps its queue
-        class and sort key; a task waiting for a rerun keeps its due time. A task directory from before M3 keeps its final
-        state; queued, it is queued as a first attempt; running, it fails.
+        class and sort key; a task waiting for a rerun keeps its due time.
+        A task directory from before M3 keeps its final state; queued, it
+        is queued as a first attempt; running, it fails.
         An error with one task fails that task alone, with a readable reason.
         """
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -329,11 +331,16 @@ class TaskQueue:
                         break
                     self._cond.wait(order[0][0] - now if order else None)
                 task_id = order[0][2]
-                del self._due[task_id]
+            # It stays among the due ones until it is queued, so the runner
+            # does not start a first attempt meanwhile.
             try:
                 self._queue_rerun(task_id)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the reruns
                 self._fail_after_error(task_id, e)
+            finally:
+                with self._cond:
+                    del self._due[task_id]
+                    self._cond.notify_all()
 
     def _queue_rerun(self, task_id: str) -> None:
         """The rerun is due: queue the task as a rerun and count it, in one transition."""
@@ -520,12 +527,23 @@ class TaskQueue:
 
     # -- the runner ----------------------------------------------------------
 
+    def _next_task(self) -> str | None:
+        """The waiting task to start next; None while there is none, scheduling
+        is blocked, or a due rerun not yet queued would go ahead of it."""
+        if not self._waiting or self._cleanup_blocked:
+            return None
+        task_id = self._queue_order()[0]
+        if self._waiting[task_id][0] > _QUEUE_RANK[RERUN_QUEUE_CLASS]:
+            now = time.time()
+            if any(due <= now for due, _ in self._due.values()):
+                return None
+        return task_id
+
     def _run_forever(self) -> None:
         while True:
             with self._cond:
-                while not self._waiting or self._cleanup_blocked:
+                while (task_id := self._next_task()) is None:
                     self._cond.wait()
-                task_id = self._queue_order()[0]
                 place = self._waiting.pop(task_id)
             try:
                 # The processes of its earlier attempts go first.
@@ -762,8 +780,11 @@ def _failure(error: str, category: str) -> dict:
 
 
 def _rerun_waits() -> tuple[float, float]:
-    """Seconds to wait before the first and the second rerun; test only: ``ZT_TEST_RERUN_WAITS_SECONDS``."""
-    setting = os.environ.get(RERUN_WAITS)
+    """Seconds to wait before the first and the second rerun.
+
+    Test only: ``ZT_TEST_RERUN_WAITS_SECONDS`` replaces them.
+    """
+    setting = os.environ.get(RERUN_WAITS_SETTING)
     if not setting:
         return RERUN_WAITS_SECONDS
     first, second = (float(part) for part in setting.split(","))

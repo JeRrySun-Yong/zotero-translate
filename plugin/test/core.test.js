@@ -78,11 +78,11 @@ test("a row waiting for an automatic rerun says so, about when, which rerun and 
   };
   assert.equal(
     core.taskRow(waiting).status,
-    "等待自动重跑（约 1 分钟后，第 1 次重跑，共 2 次），上次失败：生成论文档案失败：管线模型服务端出错（HTTP 500）",
+    "等待自动重跑（约 1 分钟后，第 1 次自动重跑，共 2 次），上次失败：生成论文档案失败：管线模型服务端出错（HTTP 500）",
   );
   assert.equal(
     core.taskRow({ ...waiting, rerunsUsed: 1, nextAttemptInSeconds: 241, error: "管线模型请求超时（480 秒）" }).status,
-    "等待自动重跑（约 5 分钟后，第 2 次重跑，共 2 次），上次失败：管线模型请求超时（480 秒）",
+    "等待自动重跑（约 5 分钟后，第 2 次自动重跑，共 2 次），上次失败：管线模型请求超时（480 秒）",
   );
   // Due now (0 seconds left) still reads "about 1 minute", never "0 minutes".
   assert.match(core.taskRow({ ...waiting, nextAttemptInSeconds: 0 }).status, /约 1 分钟后/);

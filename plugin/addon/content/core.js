@@ -73,7 +73,7 @@ var ZoteroTranslateCore = (() => {
     }
     if (task.state === "waiting_rerun") {
       const minutes = Math.max(1, Math.ceil((task.nextAttemptInSeconds || 0) / 60));
-      status = `${status}（约 ${minutes} 分钟后，第 ${(task.rerunsUsed || 0) + 1} 次重跑，共 ${task.rerunsMax || 2} 次）`;
+      status = `${status}（约 ${minutes} 分钟后，第 ${(task.rerunsUsed || 0) + 1} 次自动重跑，共 ${task.rerunsMax || 2} 次）`;
       if (task.error) {
         status = `${status}，上次失败：${task.error}`;
       }
