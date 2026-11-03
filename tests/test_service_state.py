@@ -194,9 +194,9 @@ def _marked_processes(task_id: str) -> list[psutil.Process]:
     found = []
     for process in psutil.process_iter():
         try:
-            if process.environ().get(MARK_ENV, "").startswith(f"{task_id}:"):
-                if process.status() != psutil.STATUS_ZOMBIE:
-                    found.append(process)
+            marked = process.environ().get(MARK_ENV, "").startswith(f"{task_id}:")
+            if marked and process.status() != psutil.STATUS_ZOMBIE:
+                found.append(process)
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
     return found
