@@ -577,11 +577,12 @@ class TaskQueue:
         what: str = "翻译服务处理任务出错",
         category: str = "retryable",
         attempt_error: str | None = None,
+        attempt_ended: bool = False,
     ) -> None:
         """End a task the service itself could not carry through; ``what`` begins the reason.
 
-        An error while an attempt was running ends that attempt as a
-        failure of ``category`` (``retryable`` unless the attempt's own
+        An error while the service adopts an attempt's result
+        (``attempt_ended``) ends that attempt as a failure of ``category`` (``retryable`` unless the attempt's own
         result was ``permanent``): a retryable one waits for an automatic
         rerun while reruns remain (spec section 1), else the task fails.
         When the attempt had failed on its own, ``attempt_error`` is its
@@ -610,7 +611,8 @@ class TaskQueue:
                     return
                 reruns_used = status.get("reruns_used", 0)
                 rerun = (
-                    category == "retryable"
+                    attempt_ended
+                    and category == "retryable"
                     and status.get("state") == "running"
                     and reruns_used < RERUNS_MAX
                 )
@@ -684,6 +686,7 @@ class TaskQueue:
                 e,
                 category=result.get("category", "retryable") if failed else "retryable",
                 attempt_error=result.get("error") if failed else None,
+                attempt_ended=True,
             )
 
     def _adopt_result(self, task_id: str, attempt: int, result: dict) -> None:
