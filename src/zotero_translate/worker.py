@@ -39,6 +39,10 @@ from zotero_translate.paper_task import run_paper_task
 from zotero_translate.settings import SettingsError
 from zotero_translate.settings import load_pipeline_settings
 
+# Test only: when set, the subprocess first sends a line that is not JSON and
+# a progress report without a stage, which the service must drop.
+BAD_REPORTS = "ZT_TEST_WORKER_BAD_REPORTS"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="zotero_translate.worker")
@@ -68,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
                 pipe.flush()
             except OSError:  # the service is gone
                 os._exit(3)
+
+    if os.environ.get(BAD_REPORTS):  # test only: two reports the service must drop
+        with pipe_lock:
+            pipe.write("not a report\n")
+            pipe.write(json.dumps({"attempt": args.attempt, "type": "progress"}) + "\n")
+            pipe.flush()
 
     report_path = td.attempt_report_path(directory, args.attempt)
     report_path.parent.mkdir(parents=True, exist_ok=True)

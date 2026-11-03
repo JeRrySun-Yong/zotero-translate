@@ -44,7 +44,13 @@ production): ``ZT_TEST_PAUSE_AFTER_MARKER`` (after the process marker is saved,
 before the subprocess starts) and ``ZT_TEST_PAUSE_BEFORE_ADOPT`` (after the
 subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
-until that file is deleted.
+until that file is deleted. ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
+subprocess send two malformed reports (``zotero_translate.worker``).
+
+One task's error never stops the queue: a worker report the service cannot
+use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
+error of the service itself while it carries an attempt through fails that
+task with a readable reason, and the runner goes on with the next task.
 """
 
 from __future__ import annotations
@@ -60,6 +66,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from email.parser import BytesParser
 from email.policy import HTTP
@@ -101,6 +108,7 @@ _EVENTS = {
     "started": "开始",
     "succeeded": "成功",
     "failed": "失败",
+    "report_dropped": "丢弃上报",  # a worker report the service cannot use
 }
 
 
@@ -224,7 +232,10 @@ class TaskQueue:
         )
         if reason:
             line += f" reason={json.dumps(reason, ensure_ascii=False)}"
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except (OSError, ValueError):  # no standard output: the transition stands
+            pass
 
     # -- HTTP side -----------------------------------------------------------
 
@@ -292,65 +303,104 @@ class TaskQueue:
                 while not self._queue:
                     self._cond.wait()
                 task_id = self._queue.popleft()
-                status = td.read_status(self.tasks_dir / task_id)
-                attempt = status.get("attempt", 0) + 1
-                self._decide(
-                    task_id,
-                    "started",
-                    {
-                        "state": "running",
-                        "stage": FIRST_STAGE,
-                        "progress": 0,
-                        "attempt": attempt,
-                        "process_marker": f"{task_id}:{attempt}",
-                        "attempts": status.get("attempts", [])
-                        + [
-                            {
-                                "attempt": attempt,
-                                "started_at": time.time(),
-                                "ended_at": None,
-                                "outcome": None,
-                                "reason": None,
-                            }
-                        ],
-                    },
-                )
             try:
-                result = self._run(task_id, attempt)
-            except Exception as e:  # noqa: BLE001 - the runner thread must survive
-                result = _failure(f"无法启动论文任务：{e}", "retryable")
-            _test_pause(PAUSE_BEFORE_ADOPT, task_id, attempt)
-            if result["outcome"] == "succeeded":
-                self._adopt(
-                    task_id,
-                    attempt,
-                    "succeeded",
-                    {
-                        "state": "succeeded",
-                        "stage": td.DONE_STAGE,
-                        "progress": 100,
-                        "error": None,
-                        "failure_category": None,
-                        "consecutive_interruptions": 0,
-                        "kept_source_paragraphs": result.get("kept_source_paragraphs", 0),
-                        "kept_source_algorithms": result.get("kept_source_algorithms", 0),
-                    },
-                    outcome="succeeded",
-                )
-            else:
-                self._adopt(
-                    task_id,
-                    attempt,
-                    "failed",
-                    {
-                        "state": "failed",
-                        "error": result["error"],
-                        "failure_category": result["category"],
-                        "consecutive_interruptions": 0,
-                    },
-                    outcome="failed",
-                    reason=result["error"],
-                )
+                self._run_attempt(task_id)
+            except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
+                self._fail_after_error(task_id, e)
+
+    def _fail_after_error(self, task_id: str, error: Exception) -> None:
+        """Fail a task whose attempt the service itself could not carry through.
+
+        Best effort and never raises: the runner goes on with the next task.
+        The task's report.json is written if it can be.
+        """
+        reason = f"翻译服务处理任务出错：{type(error).__name__}: {error}"
+        print(f"task={task_id}: {reason}", file=sys.stderr, flush=True)
+        traceback.print_exception(error, file=sys.stderr)
+        directory = self.tasks_dir / task_id
+        with self._cond:
+            try:
+                status = td.read_status(directory)
+                if status["state"] in td.TERMINAL_STATES:
+                    return
+                changes = {"state": "failed", "error": reason, "failure_category": "retryable"}
+                if status.get("attempts"):
+                    attempts = [dict(a) for a in status["attempts"]]
+                    attempts[-1].update(ended_at=time.time(), outcome="failed", reason=reason)
+                    changes["attempts"] = attempts
+                    try:
+                        self._write_task_report(
+                            directory, {**status, **changes}, "failed", reason
+                        )
+                    except Exception:  # noqa: BLE001 - the state matters more than the report
+                        traceback.print_exc()
+                td.write_status(directory, **changes)
+                self._log(task_id, "failed", status.get("attempt", 0), reason)
+            except Exception:  # noqa: BLE001 - nothing more can be done for this task
+                traceback.print_exc()
+
+    def _run_attempt(self, task_id: str) -> None:
+        """Start the task's next attempt, run it, and adopt its result."""
+        with self._cond:
+            status = td.read_status(self.tasks_dir / task_id)
+            attempt = status.get("attempt", 0) + 1
+            self._decide(
+                task_id,
+                "started",
+                {
+                    "state": "running",
+                    "stage": FIRST_STAGE,
+                    "progress": 0,
+                    "attempt": attempt,
+                    "process_marker": f"{task_id}:{attempt}",
+                    "attempts": status.get("attempts", [])
+                    + [
+                        {
+                            "attempt": attempt,
+                            "started_at": time.time(),
+                            "ended_at": None,
+                            "outcome": None,
+                            "reason": None,
+                        }
+                    ],
+                },
+            )
+        try:
+            result = self._run(task_id, attempt)
+        except Exception as e:  # noqa: BLE001 - reported as this attempt's failure
+            result = _failure(f"无法启动论文任务：{e}", "retryable")
+        _test_pause(PAUSE_BEFORE_ADOPT, task_id, attempt)
+        if result["outcome"] == "succeeded":
+            self._adopt(
+                task_id,
+                attempt,
+                "succeeded",
+                {
+                    "state": "succeeded",
+                    "stage": td.DONE_STAGE,
+                    "progress": 100,
+                    "error": None,
+                    "failure_category": None,
+                    "consecutive_interruptions": 0,
+                    "kept_source_paragraphs": result.get("kept_source_paragraphs", 0),
+                    "kept_source_algorithms": result.get("kept_source_algorithms", 0),
+                },
+                outcome="succeeded",
+            )
+        else:
+            self._adopt(
+                task_id,
+                attempt,
+                "failed",
+                {
+                    "state": "failed",
+                    "error": result["error"],
+                    "failure_category": result["category"],
+                    "consecutive_interruptions": 0,
+                },
+                outcome="failed",
+                reason=result["error"],
+            )
 
     def _run(self, task_id: str, attempt: int) -> dict:
         """Run one attempt's subprocess until it exits; return its result report."""
@@ -391,26 +441,55 @@ class TaskQueue:
         finally:
             os.close(write_end)
         result = None
-        with os.fdopen(read_end, encoding="utf-8") as reports:
+        with os.fdopen(read_end, encoding="utf-8", errors="replace") as reports:
             for line in reports:
+                # A report the service cannot use is dropped and logged; it
+                # never ends the attempt while the subprocess still runs.
                 try:
-                    report = json.loads(line)
-                except ValueError:
-                    continue
-                if report.get("type") == "progress":
-                    self._adopt(
+                    result = self._take_report(task_id, attempt, line)
+                except Exception as e:  # noqa: BLE001
+                    self._log(
                         task_id,
-                        report.get("attempt"),
-                        "progress",
-                        {"stage": report["stage"], "progress": report["progress"]},
+                        "report_dropped",
+                        attempt,
+                        f"{type(e).__name__}: {e}；上报内容：{line.strip()[:200]}",
                     )
-                elif report.get("type") == "result" and report.get("attempt") == attempt:
-                    result = report
+                if result is not None:
                     break
         exit_code = process.wait()
         if result is None:
             return _failure(f"论文任务进程异常退出（退出码 {exit_code}）", "retryable")
         return result
+
+
+    def _take_report(self, task_id: str, attempt: int, line: str) -> dict | None:
+        """Adopt a progress report, or return a valid result of this attempt.
+
+        Raise ``ValueError``, ``KeyError`` or ``TypeError`` for a report that
+        is malformed or not of this attempt.
+        """
+        report = json.loads(line)
+        if report["attempt"] != attempt:
+            raise ValueError(f"不是本次尝试（第 {attempt} 次）的上报")
+        if report["type"] == "progress":
+            self._adopt(
+                task_id,
+                attempt,
+                "progress",
+                {"stage": str(report["stage"]), "progress": int(report["progress"])},
+            )
+            return None
+        if report["type"] != "result":
+            raise ValueError(f"未知的上报类型 {report['type']!r}")
+        if report["outcome"] == "failed":
+            if not isinstance(report["error"], str) or report["category"] not in (
+                "permanent",
+                "retryable",
+            ):
+                raise ValueError("失败结果缺少原因或类别")
+        elif report["outcome"] != "succeeded":
+            raise ValueError(f"未知的结局 {report['outcome']!r}")
+        return report
 
 
 def _failure(error: str, category: str) -> dict:

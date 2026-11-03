@@ -47,8 +47,12 @@ def write_json(path: Path, data: dict, indent: int | None = None) -> None:
     """Write ``data`` to ``path`` as JSON, replacing the file atomically."""
     path = Path(path)
     tmp = path.with_suffix(f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def attempt_report_path(task_dir: Path, attempt: int) -> Path:
