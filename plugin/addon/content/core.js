@@ -44,13 +44,14 @@ var ZoteroTranslateCore = (() => {
     return { contentType: `multipart/form-data; boundary=${boundary}`, body };
   }
 
-  // Task states: the service's queued/running/failed, plus the plugin's own
-  // submitting (upload under way), attaching (service succeeded, PDFs being
-  // added to the item) and done (both PDFs attached).
+  // Task states: the service's queued/running/waiting_rerun/failed, plus the
+  // plugin's own submitting (upload under way), attaching (service
+  // succeeded, PDFs being added to the item) and done (both PDFs attached).
   const STATUS_LABELS = {
     submitting: "提交中",
     queued: "排队中",
     running: "翻译中",
+    waiting_rerun: "等待自动重跑",
     attaching: "挂回中",
     done: "已挂回",
     failed: "失败",
@@ -58,8 +59,10 @@ var ZoteroTranslateCore = (() => {
 
   /** What the task window shows for one task; a waiting task shows its
    *  place in the service's queue, a running one its attempt when the
-   *  service has started more than one (after a restart), a finished one
-   *  how many paragraphs and algorithms kept their source text. */
+   *  service has started more than one (after a restart or a rerun), one
+   *  waiting for an automatic rerun about how many minutes are left, which
+   *  rerun comes next and why the last attempt failed, a finished one how
+   *  many paragraphs and algorithms kept their source text. */
   function taskRow(task) {
     let status = STATUS_LABELS[task.state] || task.state;
     if (task.state === "queued" && task.queuePosition) {
@@ -67,6 +70,13 @@ var ZoteroTranslateCore = (() => {
     }
     if (task.state === "running" && task.attempt > 1) {
       status = `${status}（第 ${task.attempt} 次尝试）`;
+    }
+    if (task.state === "waiting_rerun") {
+      const minutes = Math.max(1, Math.ceil((task.nextAttemptInSeconds || 0) / 60));
+      status = `${status}（约 ${minutes} 分钟后，第 ${(task.rerunsUsed || 0) + 1} 次重跑，共 ${task.rerunsMax || 2} 次）`;
+      if (task.error) {
+        status = `${status}，上次失败：${task.error}`;
+      }
     }
     if (task.state === "done") {
       const kept = [];
