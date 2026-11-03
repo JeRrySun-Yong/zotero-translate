@@ -7,7 +7,7 @@
 name = "zotero-translate"
 version = "0.1.0"
 requires-python = "==3.12.*"
-dependencies = ["babeldoc", "httpx", "pymupdf"]
+dependencies = ["babeldoc", "httpx", "psutil", "pymupdf"]
 
 [project.scripts]
 zotero-translate = "zotero_translate.cli:main"

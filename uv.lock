@@ -1497,6 +1497,7 @@ source = { editable = "." }
 dependencies = [
     { name = "babeldoc" },
     { name = "httpx" },
+    { name = "psutil" },
     { name = "pymupdf" },
 ]
 
@@ -1509,6 +1510,7 @@ dev = [
 requires-dist = [
     { name = "babeldoc", editable = "engine" },
     { name = "httpx" },
+    { name = "psutil" },
     { name = "pymupdf" },
 ]
 
