@@ -14,6 +14,7 @@ looked at.
 
 import json
 import math
+import threading
 import time
 from pathlib import Path
 
@@ -447,3 +448,28 @@ def test_a_restart_at_the_due_moment_queues_the_rerun_once(tmp_path):
             if restarted is not None:
                 stop_service(restarted)
             stop_service(service)
+
+
+def test_a_rerun_scheduled_again_while_the_last_one_is_being_queued_is_kept(tmp_path):
+    # In process, because the window is too small to hit through HTTP: the
+    # rerun timer has queued a task, and before the timer finishes, that
+    # rerun's attempt fails and schedules the next rerun. The timer must not
+    # drop the new schedule, or the task would wait forever.
+    from zotero_translate.service import TaskQueue
+
+    queue = TaskQueue(tmp_path / "data", tmp_path / "env", tmp_path / "argon.env", 1)
+
+    def queue_rerun(task_id: str) -> None:
+        queue._schedule_rerun(task_id, time.time() + 600, 0.0)  # failed again meanwhile
+
+    queue._queue_rerun = queue_rerun
+    queue._schedule_rerun("t", time.time() - 1, 0.0)
+    threading.Thread(target=queue._rerun_forever, daemon=True).start()
+
+    deadline = time.monotonic() + 5
+    while not (queue._due.get("t", (0,))[0] > time.time() + 500) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.5)
+    with queue._cond:
+        assert "t" in queue._due
+        assert queue._due["t"][0] > time.time() + 500

@@ -334,15 +334,19 @@ class TaskQueue:
                         break
                     self._cond.wait(order[0][0] - now if order else None)
                 task_id = order[0][2]
+                entry = self._due[task_id]
             # It stays among the due ones until it is queued, so the runner
-            # does not start a first attempt meanwhile.
+            # does not start a first attempt meanwhile. Only this entry is
+            # removed: once queued, the rerun's attempt may fail and schedule
+            # the next rerun before this thread gets here.
             try:
                 self._queue_rerun(task_id)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the reruns
                 self._fail_after_error(task_id, e)
             finally:
                 with self._cond:
-                    del self._due[task_id]
+                    if self._due.get(task_id) is entry:
+                        del self._due[task_id]
                     self._cond.notify_all()
 
     def _queue_rerun(self, task_id: str) -> None:
