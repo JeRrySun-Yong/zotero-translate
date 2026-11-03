@@ -1,7 +1,8 @@
 /* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
  * the "翻译任务" window, and the Zotero side of the task lifecycle
- * (lifecycle.js): reading the source PDF, importing an output PDF as an
- * attachment, saving the tasks in a preference.
+ * (lifecycle.js): reading the source PDF, temporary files for the downloaded
+ * PDFs, importing an output PDF as an attachment, saving the tasks in a
+ * preference.
  *
  * The plugin sends the service only the PDF and its file name; model
  * credentials and translation parameters live in the service.
@@ -35,7 +36,21 @@ var ZoteroTranslate = {
       serviceUrl: () => Zotero.Prefs.get(this.SERVICE_URL_PREF, true),
       readSource: (task) => this._readSource(task),
       attachTarget: (task) => this._attachTarget(task),
-      importAttachment: (task, target, output) => this._importAttachment(task, target, output),
+      tempFiles: {
+        makeDirectory: async (task) => {
+          const dir = PathUtils.join(PathUtils.tempDir, "zotero-translate", task.taskId);
+          await IOUtils.makeDirectory(dir);
+          return dir;
+        },
+        write: async (dir, fileName, bytes) => {
+          const path = PathUtils.join(dir, fileName);
+          await IOUtils.write(path, bytes);
+          return path;
+        },
+        remove: (dir) => IOUtils.remove(dir, { recursive: true }),
+      },
+      importAttachment: (target, { path, title }) =>
+        Zotero.Attachments.importFromFile({ file: path, title, ...target }),
       store: {
         load: () => Zotero.Prefs.get(this.TASKS_PREF, true),
         save: (value) => Zotero.Prefs.set(this.TASKS_PREF, value, true),
@@ -160,19 +175,6 @@ var ZoteroTranslate = {
       throw new Error("找不到原 PDF 附件");
     }
     return { libraryID: source.libraryID, collections: source.getCollections() };
-  },
-
-  /** Import one output PDF at the target; Zotero copies the file into its own storage. */
-  async _importAttachment(task, target, output) {
-    const dir = PathUtils.join(PathUtils.tempDir, "zotero-translate", task.taskId);
-    await IOUtils.makeDirectory(dir);
-    try {
-      const path = PathUtils.join(dir, output.fileName);
-      await IOUtils.write(path, output.bytes);
-      await Zotero.Attachments.importFromFile({ file: path, title: output.title, ...target });
-    } finally {
-      await IOUtils.remove(dir, { recursive: true });
-    }
   },
 
   openTaskWindow(window) {

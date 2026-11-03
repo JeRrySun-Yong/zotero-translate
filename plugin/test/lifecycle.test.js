@@ -12,7 +12,9 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 const pdfBytes = (text) => new Response(new TextEncoder().encode(text), { status: 200 });
 
 /** A Zotero stand-in: answers requests from `routes` ("METHOD url" -> response
- *  or function), records requests and imports, keeps the saved state. */
+ *  or function), records requests and imports, keeps temporary files in
+ *  memory (`files`, path -> text), logs every file step in `steps`, keeps the
+ *  saved state. `failWrite` (a file name) and `failRemove` inject errors. */
 function environment({ routes = {}, saved = null } = {}) {
   const env = {
     requests: [],
@@ -21,6 +23,10 @@ function environment({ routes = {}, saved = null } = {}) {
     timers: [],
     routes,
     missingSources: [],
+    files: new Map(),
+    steps: [],
+    failWrite: null,
+    failRemove: false,
   };
   env.lifecycle = createTaskLifecycle({
     fetch: async (url, options = {}) => {
@@ -50,13 +56,33 @@ function environment({ routes = {}, saved = null } = {}) {
       }
       return { libraryID: 1, collections: [] };
     },
-    importAttachment: async (task, target, output) => {
-      env.imports.push({
-        target,
-        title: output.title,
-        fileName: output.fileName,
-        text: new TextDecoder().decode(output.bytes),
-      });
+    tempFiles: {
+      makeDirectory: async (task) => {
+        env.steps.push(`mkdir ${task.taskId}`);
+        return `/tmp/zotero-translate/${task.taskId}`;
+      },
+      write: async (dir, fileName, bytes) => {
+        env.steps.push(`write ${fileName}`);
+        if (fileName === env.failWrite) {
+          throw new Error("磁盘已满");
+        }
+        const path = `${dir}/${fileName}`;
+        env.files.set(path, new TextDecoder().decode(bytes));
+        return path;
+      },
+      remove: async (dir) => {
+        env.steps.push(`remove ${dir}`);
+        if (env.failRemove) {
+          throw new Error("无法删除临时目录");
+        }
+        for (const path of [...env.files.keys()].filter((p) => p.startsWith(`${dir}/`))) {
+          env.files.delete(path);
+        }
+      },
+    },
+    importAttachment: async (target, { path, title }) => {
+      env.steps.push(`import ${title}`);
+      env.imports.push({ target, title, fileName: path.split("/").pop(), text: env.files.get(path) });
     },
     store: {
       load: () => env.saved,
@@ -257,4 +283,42 @@ test("a poll tick while the previous poll is still waiting for an answer does no
   assert.deepEqual(env.status(), ["翻译中"]);
   env.timers[0].fn(); // the next tick after the answer polls again (and waits; not awaited)
   assert.equal(env.requests.filter((r) => r === `GET ${SERVICE}/tasks/t1`).length, 2);
+});
+
+test("both PDFs are downloaded and written before either is imported; the temporary directory is removed", async () => {
+  const env = environment({ routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.lifecycle.pollTasks();
+  assert.deepEqual(env.steps, [
+    "mkdir t1",
+    "write AutoDesign-中文译文.pdf",
+    "write AutoDesign-双语对照.pdf",
+    "import 中文译文",
+    "import 双语对照",
+    "remove /tmp/zotero-translate/t1",
+  ]);
+  assert.deepEqual(env.files, new Map());
+});
+
+test("when writing the second PDF fails, nothing is attached and the temporary directory is removed", async () => {
+  const env = environment({ routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.failWrite = "AutoDesign-双语对照.pdf";
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.lifecycle.pollTasks();
+  assert.deepEqual(env.imports, []);
+  assert.deepEqual(env.status(), ["失败：磁盘已满"]);
+  assert.equal(env.steps.at(-1), "remove /tmp/zotero-translate/t1");
+  assert.deepEqual(env.files, new Map());
+});
+
+test("when removing the temporary directory fails, both PDFs stay attached and the task fails", async () => {
+  const env = environment({ routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.failRemove = true;
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.lifecycle.pollTasks();
+  assert.deepEqual(env.imports.map((i) => i.title), ["中文译文", "双语对照"]);
+  assert.deepEqual(env.status(), ["失败：无法删除临时目录"]);
 });

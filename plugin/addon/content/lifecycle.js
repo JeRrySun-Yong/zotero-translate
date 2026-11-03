@@ -13,8 +13,10 @@
  * - attachTarget(task): where the task's PDFs go (the original item, or the
  *   standalone source PDF's library and collections), resolved once before
  *   any download; throws with the reason when the source is gone;
- * - importAttachment(task, target, output): import one PDF, output = {file, title,
- *   fileName, bytes}, as an attachment at that target;
+ * - tempFiles: {makeDirectory(task), write(dir, fileName, bytes), remove(dir)}:
+ *   the task's temporary directory for the downloaded PDFs; write returns the file's path;
+ * - importAttachment(target, {path, title}): import one PDF file as an
+ *   attachment at that target;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
  * - debug(message), logError(error): logging.
  *
@@ -39,6 +41,7 @@ var ZoteroTranslateLifecycle = (() => {
     serviceUrl,
     readSource,
     attachTarget,
+    tempFiles,
     importAttachment,
     store,
     debug,
@@ -226,26 +229,30 @@ var ZoteroTranslateLifecycle = (() => {
       changed();
     }
 
-    /** Resolve where the PDFs go, download both, then import them one by one;
-     *  existing attachments stay as they are. */
+    /** Resolve where the PDFs go; download both into the task's temporary
+     *  directory; only when both are written, import them; always remove the
+     *  directory. A failure before the imports attaches nothing; existing
+     *  attachments stay as they are. */
     async function attachOutputs(task) {
       const target = await attachTarget(task);
-      const outputs = [];
-      for (const output of Core.OUTPUTS) {
-        const url = Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "files", output.file);
-        const response = await request(task, url);
-        if (!response.ok) {
-          throw new Error(`下载${output.title}失败（HTTP ${response.status}）`);
+      const dir = await tempFiles.makeDirectory(task);
+      try {
+        const files = [];
+        for (const output of Core.OUTPUTS) {
+          const url = Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "files", output.file);
+          const response = await request(task, url);
+          if (!response.ok) {
+            throw new Error(`下载${output.title}失败（HTTP ${response.status}）`);
+          }
+          const fileName = Core.outputFileName(task.sourceFileName, output.title);
+          const path = await tempFiles.write(dir, fileName, new Uint8Array(await response.arrayBuffer()));
+          files.push({ path, title: output.title });
         }
-        outputs.push({
-          file: output.file,
-          title: output.title,
-          fileName: Core.outputFileName(task.sourceFileName, output.title),
-          bytes: new Uint8Array(await response.arrayBuffer()),
-        });
-      }
-      for (const output of outputs) {
-        await importAttachment(task, target, output);
+        for (const file of files) {
+          await importAttachment(target, file);
+        }
+      } finally {
+        await tempFiles.remove(dir);
       }
     }
 
