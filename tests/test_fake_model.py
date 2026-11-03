@@ -36,7 +36,9 @@ def test_custom_responder_per_kind(fake_model):
     assert post(fake_model, "anything").json()["choices"][0]["message"]["content"] == "custom"
 
 
-@pytest.mark.parametrize("error, status", [("500", 500), ("429", 429)])
+@pytest.mark.parametrize(
+    "error, status", [("500", 500), ("429", 429), ("401", 401), ("403", 403)]
+)
 def test_injects_http_errors_on_the_nth_request_of_a_kind(fake_model, error, status):
     fake_model.inject_error(error, kind="translate_batch", nth=2)
 
