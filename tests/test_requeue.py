@@ -138,6 +138,32 @@ def test_a_task_running_when_the_service_dies_runs_again_as_attempt_2_and_succee
             stop_service(service)
 
 
+def test_a_failed_attempt_clears_the_consecutive_interruptions(tmp_path):
+    with FakeModel() as model:
+        model.inject_error("timeout", kind="dossier")  # attempt 1 hangs: interrupted
+        # Only attempt 2 gets to its term list request, which fails it at once.
+        model.inject_error("401", kind="term_list")
+        service = launch_service(model, tmp_path)
+        restarted = None
+        try:
+            task_id = service.submit()
+            service.wait_for(task_id, lambda s: s["state"] == "running" and model.requests)
+
+            _kill(service)
+            restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
+            final = restarted.wait(task_id)
+
+            assert final["state"] == "failed"
+            assert final["attempt"] == 2
+            outcomes = [a["outcome"] for a in restarted.report(task_id)["attempts"]]
+            assert outcomes == ["interrupted", "failed"]
+            assert _status_file(restarted, task_id)["consecutive_interruptions"] == 0
+        finally:
+            if restarted is not None:
+                stop_service(restarted)
+            stop_service(service)
+
+
 def test_the_interrupted_task_runs_first_and_queued_tasks_keep_their_order(tmp_path):
     pauses = tmp_path / "pauses"
     pauses.mkdir()
