@@ -134,9 +134,9 @@ def load_argon_settings(env_file: Path, cache_dir: Path | None = None) -> ModelS
 
 def _read_endpoint_file(env_file: Path, missing_reason: str) -> dict[str, str]:
     env_file = Path(env_file)
-    if not env_file.is_file():
-        raise SettingsError(f"{missing_reason}：{env_file}")
     try:
+        if not env_file.is_file():
+            raise SettingsError(f"{missing_reason}：{env_file}")
         values = read_env_file(env_file)
     except (OSError, UnicodeDecodeError) as e:  # unreadable or not UTF-8: a settings error too
         raise SettingsError(f"读不了环境文件 {env_file}：{type(e).__name__}") from e

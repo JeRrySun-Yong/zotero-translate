@@ -29,6 +29,7 @@ from tests.fake_model import FakeModel
 WAITS = "ZT_TEST_RERUN_WAITS_SECONDS"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
+PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 
 
 def _event(line: str) -> str:
@@ -101,17 +102,21 @@ def test_a_credential_error_fails_the_task_at_once_without_a_rerun(
     assert service.report(task_id)["failure_category"] == "permanent"
 
 
-@pytest.mark.parametrize("breakage", ["not UTF-8", "unreadable"])
+@pytest.mark.parametrize("breakage", ["not UTF-8", "unreadable", "directory unreadable"])
 def test_settings_the_worker_cannot_read_fail_the_task_at_once_without_a_rerun(tmp_path, breakage):
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
     with FakeModel() as model:
-        env_file = write_env_file(tmp_path, model.base_url, FAKE_API_KEY)
+        env_file = write_env_file(env_dir, model.base_url, FAKE_API_KEY)
         service = launch_service(model, tmp_path, env_file=env_file, env={WAITS: "0.5,0.5"})
         try:
             # The service checked the file at startup; the worker cannot read it.
             if breakage == "not UTF-8":
                 env_file.write_bytes(b"OPENAI_BASE_URL=\xff\xfe\n")
-            else:
+            elif breakage == "unreadable":
                 env_file.chmod(0)
+            else:
+                env_dir.chmod(0)
             task_id = service.submit()
             final = service.wait(task_id)
             time.sleep(1.5)  # past both waits
@@ -122,6 +127,7 @@ def test_settings_the_worker_cannot_read_fail_the_task_at_once_without_a_rerun(t
             assert _status_file(service, task_id)["failure_category"] == "permanent"
             assert _events(service, task_id) == ["提交", "开始", "失败"]
         finally:
+            env_dir.chmod(0o700)
             env_file.chmod(0o600)
             stop_service(service)
 
@@ -264,6 +270,37 @@ def test_a_due_rerun_not_yet_queued_still_goes_ahead_of_first_attempts(
     for task_id in (a, b, c):
         assert service.wait(task_id)["state"] == "succeeded"
     assert [service.status(t)["attempt"] for t in (a, b, c)] == [2, 1, 1]
+
+
+def test_a_rerun_due_while_the_next_task_is_being_reaped_still_goes_first(
+    tmp_path, fake_model, start_service
+):
+    # The runner has picked b and is reaping b's earlier processes when a's
+    # rerun comes due: b is still queued, keeps a queue position, and a goes first.
+    reaps = _pauses(tmp_path, "reaps")
+    _fail_dossier(fake_model)
+    service = start_service(fake_model, env={WAITS: "1,600", PAUSE_BEFORE_REAP: str(reaps)})
+
+    a, b = service.submit(), service.submit()
+    _wait_for_file(reaps / f"{a}-1.paused").unlink()
+    paused_b = _wait_for_file(reaps / f"{b}-1.paused", timeout=60)  # a failed and waits
+    held = service.status(b)
+    assert held["state"] == "queued"
+    assert held["queue_position"] == 1
+    _answer_dossier(fake_model)
+    service.wait_for(a, lambda s: s["state"] == "queued", timeout=30)
+    assert service.status(a)["queue_position"] == 1
+    assert service.status(b)["queue_position"] == 2
+
+    paused_b.unlink()
+    _wait_for_file(reaps / f"{a}-2.paused", timeout=60).unlink()
+    _wait_for_file(reaps / f"{b}-1.paused", timeout=300).unlink()
+    for task_id in (a, b):
+        assert service.wait(task_id)["state"] == "succeeded"
+    assert service.status(a)["attempt"] == 2
+    lines = service.output
+    started = [line.split("task=", 1)[1].split(" ", 1)[0] for line in lines if "event=开始" in line]
+    assert started == [a, a, b]
 
 
 def test_a_restart_while_waiting_keeps_the_due_time(tmp_path):

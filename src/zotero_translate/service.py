@@ -79,7 +79,9 @@ subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
 until that file is deleted. ``ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE`` is a pause
 of the same kind when a rerun is due, before it is queued (the attempt in
-the file name is the one that failed). ``ZT_TEST_RERUN_WAITS_SECONDS``
+the file name is the one that failed), and ``ZT_TEST_PAUSE_BEFORE_REAP``
+when the queue has picked the next task, before its earlier processes are
+reaped (the attempt is the one about to start). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
 ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
@@ -130,6 +132,7 @@ LOCK_FILE = "service.lock"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
+PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -544,14 +547,20 @@ class TaskQueue:
             with self._cond:
                 while (task_id := self._next_task()) is None:
                     self._cond.wait()
-                place = self._waiting.pop(task_id)
             try:
-                # The processes of its earlier attempts go first.
+                next_attempt = td.read_status(self.tasks_dir / task_id).get("attempt", 0) + 1
+                _test_pause(PAUSE_BEFORE_REAP, task_id, next_attempt)
+                # The processes of its earlier attempts go first. Meanwhile the
+                # task stays queued, in its place, so a rerun that comes due or
+                # a requeue can still go ahead of it.
                 if not self._reap(task_id):
-                    with self._cond:
-                        self._waiting[task_id] = place
                     continue
-                self._run_attempt(task_id)
+                with self._cond:
+                    if self._next_task() != task_id:
+                        continue
+                    del self._waiting[task_id]
+                    attempt = self._start_attempt(task_id)
+                self._run_attempt(task_id, attempt)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
                 self._fail_after_error(task_id, e)
 
@@ -599,8 +608,8 @@ class TaskQueue:
             except Exception:  # noqa: BLE001 - nothing more can be done for this task
                 traceback.print_exc()
 
-    def _run_attempt(self, task_id: str) -> None:
-        """Start the task's next attempt, run it, and adopt its result."""
+    def _start_attempt(self, task_id: str) -> int:
+        """Save the task as running its next attempt; return the attempt number."""
         with self._cond:
             status = td.read_status(self.tasks_dir / task_id)
             attempt = status.get("attempt", 0) + 1
@@ -625,6 +634,10 @@ class TaskQueue:
                     ],
                 },
             )
+        return attempt
+
+    def _run_attempt(self, task_id: str, attempt: int) -> None:
+        """Run the started attempt and adopt its result."""
         try:
             result = self._run(task_id, attempt)
         except Exception as e:  # noqa: BLE001 - reported as this attempt's failure
