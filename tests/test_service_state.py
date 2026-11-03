@@ -266,3 +266,63 @@ def test_worker_does_not_write_state_and_a_restart_still_fails_the_task(tmp_path
             if restarted is not None:
                 stop_service(restarted)
             stop_service(service)
+
+
+def test_report_json_gives_the_failure_when_the_worker_cannot_read_its_settings(tmp_path):
+    with FakeModel() as model:
+        env_file, argon_env_file = _env_files(tmp_path, model)
+        service = launch_service(model, tmp_path, env_file=env_file, argon_env_file=argon_env_file)
+        try:
+            env_file.unlink()  # the service checked it at startup; the worker cannot read it
+
+            task_id = service.submit()
+            final = service.wait(task_id)
+
+            assert final["state"] == "failed"
+            assert final["error"]
+            report = service.report(task_id)
+            assert report["state"] == "failed"
+            assert report["error"] == final["error"]
+            assert report["attempts"][0]["outcome"] == "failed"
+        finally:
+            stop_service(service)
+
+
+def test_a_task_the_service_cannot_finish_fails_and_the_next_task_still_runs(tmp_path):
+    pauses = tmp_path / "pauses"
+    pauses.mkdir()
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path, env={"ZT_TEST_PAUSE_BEFORE_ADOPT": str(pauses)})
+        try:
+            broken = service.submit()
+            flag = _wait_for_file(pauses / f"{broken}-1.paused", timeout=300)
+            # The service cannot write this task's report.json.
+            (service.data_dir / "tasks" / broken / "report.json").mkdir()
+            flag.unlink()
+
+            failed = service.wait(broken)
+            assert failed["state"] == "failed"
+            assert "翻译服务处理任务出错" in failed["error"]
+
+            nxt = service.submit()
+            _wait_for_file(pauses / f"{nxt}-1.paused", timeout=300).unlink()
+            assert service.wait(nxt)["state"] == "succeeded"
+        finally:
+            stop_service(service)
+
+
+def test_malformed_worker_reports_are_dropped_and_logged_without_failing_the_attempt(tmp_path):
+    with FakeModel() as model:
+        # Test only: the worker also sends a line that is not JSON and a
+        # progress report without a stage.
+        service = launch_service(model, tmp_path, env={"ZT_TEST_WORKER_BAD_REPORTS": "1"})
+        try:
+            task_id = service.submit()
+            final = service.wait(task_id)
+
+            assert final["state"] == "succeeded", final["error"]
+            events = [_event(line) for line in service.log_lines(task_id)]
+            assert events.count("丢弃上报") == 2
+            assert events[-1] == "成功"
+        finally:
+            stop_service(service)
