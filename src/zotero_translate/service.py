@@ -5,8 +5,9 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
-- ``GET /tasks/{task_id}`` -> state, stage, progress, queue position, error,
-  kept source paragraphs and downloadable files
+- ``GET /tasks/{task_id}`` -> state, stage, progress, attempt (attempts
+  started, interrupted ones included; 0 until the first starts), queue
+  position, error, kept source paragraphs and downloadable files
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -17,7 +18,10 @@ then binds its port, and only then restores the queue; when the lock or the
 port is taken it exits with status 1 and a readable reason on stderr, and
 touches no task.
 
-Tasks run first in, first out, one at a time. The service alone writes the
+Tasks run one at a time, ordered by queue class (tasks interrupted by a
+restart first, then first attempts) and, within a class, by submission
+time; class and sort key are saved, so the order survives a restart. The
+service alone writes the
 task state: every transition goes through ``TaskQueue._decide``, under one
 lock, and is saved with the counters it changes as one atomic replacement of
 the status file. Each attempt runs in its own subprocess
@@ -26,18 +30,30 @@ pipe; the service adopts only reports of the task's current attempt while the
 task is running, and drops any other. Before it starts the subprocess, the
 service saves the attempt's process marker ``<task_id>:<attempt>`` in the
 status file and passes it to the subprocess in the environment variable
-``ZT_PROCESS_MARK``, which every process the subprocess starts inherits.
+``ZT_PROCESS_MARK``, which every process the subprocess starts inherits. The
+subprocess runs in a process group of its own. Before a new attempt starts,
+when the service starts, and after a subprocess exits without a result, the
+service reaps every process with a marker of the task
+(``zotero_translate.processes``); if that cannot be confirmed, the reason
+goes to the task's ``cleanup_error`` and the log (event 进程回收出错), and no
+new attempt starts.
 
 Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
 summary of all attempts (number, start and end time, outcome, reason). The
 service writes one line per task event to standard output (the service log):
-submitted, started, succeeded, failed. No API key and no HTTP poll is logged.
+submitted, started, interrupted, requeued, succeeded, failed, cleanup error,
+report dropped. No API key and no HTTP poll is logged.
 
-When the service starts, every task left queued or running by an earlier
-service is marked as failed ("翻译服务重启，任务中断"); there is no resuming.
-The report of an attempt cut short so is marked incomplete. A task
-subprocess ends itself when its service is gone.
+When the service starts (``TaskQueue.restore``), a task an earlier service
+left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
+report is marked incomplete): it is queued again ahead of the others and
+starts a new attempt, unless that was its third interruption in a row, which
+fails it ("翻译服务多次重启，任务中断"). A queued task keeps its place. A task
+directory from before M3 keeps its final state; queued, it is queued; running,
+it fails ("升级前未完成的任务，请重试"). An error with one task fails that task
+alone. A task subprocess ends its process group and itself when its service
+is gone.
 
 Test-only settings (environment variables of the service; never set them in
 production): ``ZT_TEST_PAUSE_AFTER_MARKER`` (after the process marker is saved,
