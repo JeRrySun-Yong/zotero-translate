@@ -379,6 +379,9 @@ class TaskQueue:
                     pass_fds=(write_end,),
                     env={**os.environ, MARK_ENV: marker},
                 )
+        except BaseException:
+            os.close(read_end)
+            raise
         finally:
             os.close(write_end)
         result = None
