@@ -73,6 +73,8 @@ def run_paper_task(
     output_dir: Path,
     settings: PipelineSettings,
     on_progress: ProgressCallback = lambda stage, progress: None,
+    report_path: Path | None = None,
+    attempt: int | None = None,
 ) -> PaperTaskResult:
     """Translate ``source_pdf``; write ``mono.pdf`` and ``dual.pdf`` into ``output_dir``.
 
@@ -82,7 +84,9 @@ def run_paper_task(
     ``on_progress(stage, progress)`` receives our stage name and an overall
     percentage (0-99) that never decreases. The paper dossier and the
     paper's term list are written to ``output_dir`` before translation; the
-    task report is written there whether the task succeeds or fails.
+    task report is written to ``report_path`` (default
+    ``output_dir/report.json``) whether the task succeeds or fails. The
+    service passes the attempt number, which the report then carries.
     """
     from babeldoc.docvision.doclayout import DocLayoutModel
     from babeldoc.format.pdf import high_level
@@ -117,7 +121,7 @@ def run_paper_task(
     client = models.flash
     kept = KeptSource()
     algorithms = AlgorithmDetector()
-    report = TaskReport(models, kept, algorithms)
+    report = TaskReport(models, kept, algorithms, attempt)
 
     def progress(stage: str, percent: int) -> None:
         report.enter_stage(stage)
@@ -215,7 +219,7 @@ def run_paper_task(
         report.fail(f"论文任务出错：{type(e).__name__}: {e}")
         raise
     finally:
-        report.write(output_dir / REPORT_FILE)
+        report.write(report_path or output_dir / REPORT_FILE)
         models.close()
 
 

@@ -6,6 +6,8 @@ PDF directly, without Zotero or the service, and writes ``mono.pdf``,
 output directory. Both share the
 model response cache in the data directory.
 
+``serve`` exits with 2 when an environment file is missing or incomplete
+and 1 when another service holds the data directory or the port is taken.
 ``run`` exits with 0 when the paper task succeeds, 1 when it fails (the
 task report's ``state`` is ``failed`` and its ``error`` says why) and 2 when
 an environment file is missing or incomplete. A script that logs the exit
@@ -47,10 +49,9 @@ def main(argv: list[str] | None = None) -> int:
         except s.SettingsError as e:
             print(e, file=sys.stderr)
             return 2
-        serve_forever(
+        return serve_forever(
             args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
         )
-        return 0
     return _run(args)
 
 

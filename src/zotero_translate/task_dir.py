@@ -1,9 +1,10 @@
 """Layout of one task directory and its status file.
 
 The task directory holds the source PDF, the status file, the two output
-PDFs, the paper dossier, the paper's term list, the task report and the
-log. The paper task subprocess writes the status file; the translation
-service reads it to answer status queries.
+PDFs, the paper dossier, the paper's term list, the task report, the log,
+and ``attempts/<n>/report.json``, the task report of each attempt. Only the
+translation service writes the status file (``zotero_translate.service``);
+the paper task subprocess reports its progress and result to the service.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ LOG_FILE = "task.log"
 REPORT_FILE = "report.json"
 DOSSIER_FILE = "dossier.json"
 TERMS_FILE = "terms.json"
+ATTEMPTS_DIR = "attempts"
 OUTPUT_FILES = {"mono": "mono.pdf", "dual": "dual.pdf"}
 # Files that ``GET /tasks/{task_id}/files/{name}`` serves, by name.
 DOWNLOAD_FILES = {**OUTPUT_FILES, "terms": TERMS_FILE}
@@ -37,10 +39,21 @@ def write_status(task_dir: Path, **fields) -> dict:
     path = task_dir / STATUS_FILE
     status = read_status(task_dir) if path.exists() else {}
     status.update(fields)
-    tmp = path.with_suffix(f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    write_json(path, status)
     return status
+
+
+def write_json(path: Path, data: dict, indent: int | None = None) -> None:
+    """Write ``data`` to ``path`` as JSON, replacing the file atomically."""
+    path = Path(path)
+    tmp = path.with_suffix(f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def attempt_report_path(task_dir: Path, attempt: int) -> Path:
+    """The task report of one attempt (attempts count from 1)."""
+    return Path(task_dir) / ATTEMPTS_DIR / str(attempt) / REPORT_FILE
 
 
 def available_files(task_dir: Path) -> list[str]:

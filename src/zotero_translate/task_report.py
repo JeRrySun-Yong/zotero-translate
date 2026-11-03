@@ -1,6 +1,9 @@
-"""Task report: what one paper task did, written as JSON when the task ends.
+"""Task report: what one attempt of a paper task did, written as JSON when it ends.
 
-It records the time spent in each stage with the requests sent and the
+In the translation service each attempt has its own report, which starts
+with the attempt number; the service copies the last one to the task's
+``report.json`` with a summary of all attempts (``zotero_translate.service``).
+``run`` has one attempt and no attempt number. It records the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
@@ -38,7 +41,9 @@ class TaskReport:
         models: PipelineModels,
         kept: KeptSource,
         algorithms: AlgorithmDetector | None = None,
+        attempt: int | None = None,
     ):
+        self.attempt = attempt
         self.models = models
         self.kept = kept
         self.algorithms = algorithms or AlgorithmDetector()
@@ -79,6 +84,7 @@ class TaskReport:
         clients = endpoints.values()
         forwarded = self.models.flash.forwarded_pages
         report = {
+            **({"attempt": self.attempt} if self.attempt is not None else {}),
             "state": self.state,
             "error": self.error,
             "total_seconds": round(now - self._started, 1),
