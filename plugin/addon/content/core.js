@@ -56,7 +56,10 @@ var ZoteroTranslateCore = (() => {
     done: "已挂回",
     failed: "失败",
   };
-  const UNFINISHED_STATES = new Set(["submitting", "queued", "running", "waiting_rerun", "attaching"]);
+  // Unfinished states: the plugin still has work to do for the task (the
+  // lifecycle saves these across restarts and submits no second task for the
+  // same source PDF); only these show a disconnection.
+  const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching"];
 
   /** What the task window shows for one task; a waiting task shows its
    *  place in the service's queue, a running one its attempt when the
@@ -65,15 +68,16 @@ var ZoteroTranslateCore = (() => {
    *  rerun comes next and why the last attempt failed, a finished one how
    *  many paragraphs and algorithms kept their source text. An unfinished
    *  task whose service has not answered since `disconnectedSince` says it
-   *  waits for the service, and for how many whole minutes so far (at `now`). */
+   *  waits for the service, and for how many whole minutes so far (at `now`;
+   *  at least 1). */
   function taskRow(task, now) {
     const row = {
       title: task.title,
       stage: task.stage || "",
       percent: task.progress == null ? "" : `${task.progress}%`,
     };
-    if (task.disconnectedSince != null && UNFINISHED_STATES.has(task.state)) {
-      const minutes = Math.max(0, Math.floor((now - task.disconnectedSince) / 60000));
+    if (task.disconnectedSince != null && UNFINISHED_STATES.includes(task.state)) {
+      const minutes = Math.max(1, Math.floor((now - task.disconnectedSince) / 60000));
       return { ...row, status: `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）` };
     }
     let status = STATUS_LABELS[task.state] || task.state;
@@ -105,7 +109,7 @@ var ZoteroTranslateCore = (() => {
     return { ...row, status: task.state === "failed" && task.error ? `${status}：${task.error}` : status };
   }
 
-  return { OUTPUTS, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow };
+  return { OUTPUTS, UNFINISHED_STATES, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow };
 })();
 
 if (typeof module !== "undefined") {

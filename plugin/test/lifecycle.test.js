@@ -346,7 +346,7 @@ for (const [name, route] of Object.entries(UNANSWERED_QUERIES)) {
     const since = env.lifecycle.tasks[0].disconnectedSince;
     assert.ok(since === 4000 || since === 14000, `disconnectedSince ${since}`);
     assert.equal(env.lifecycle.tasks[0].state, "running");
-    assert.deepEqual(env.status(), [DISCONNECTED(0)]);
+    assert.deepEqual(env.status(), [DISCONNECTED(1)]);
     assert.equal(env.lifecycle.rows()[0].canRetry, false);
     assert.equal(JSON.parse(env.saved)[0].disconnectedSince, since);
 
@@ -416,7 +416,7 @@ test("the query's time limit covers reading the body, and the request is aborted
   await env.clock.advance(1);
   assert.equal(env.lifecycle.tasks[0].disconnectedSince, 12000);
   assert.equal(signal.aborted, true);
-  assert.deepEqual(env.status(), [DISCONNECTED(0)]);
+  assert.deepEqual(env.status(), [DISCONNECTED(1)]);
 });
 
 test("a task whose service does not answer does not hold up the queries of other tasks", async () => {
@@ -431,7 +431,24 @@ test("a task whose service does not answer does not hold up the queries of other
   await env.clock.advance(30000);
   assert.deepEqual(env.times(QUERY("t2")), [2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 22000, 24000, 26000, 28000, 30000]);
   assert.deepEqual(env.times(QUERY("t1")), [2000, 22000]); // one at a time: the next only after the first timed out at 12s
-  assert.deepEqual(env.status(), [DISCONNECTED(0), "翻译中"]);
+  assert.deepEqual(env.status(), [DISCONNECTED(1), "翻译中"]);
+});
+
+test("tasks saved before disconnections were recorded are restored and queried every 2 seconds", async () => {
+  const saved = JSON.stringify([
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running" },
+    { ...SOURCE, sourceItemID: 12, title: "Other", serviceUrl: SERVICE, taskId: "t2", state: "queued" },
+  ]);
+  const env = environment({ saved, routes: { [QUERY("t1")]: status("running"), [QUERY("t2")]: status("queued") } });
+  env.lifecycle.start();
+  assert.deepEqual(env.status(), ["翻译中", "排队中"]);
+  assert.deepEqual(JSON.parse(env.saved).map((t) => [t.taskId, t.state, t.disconnectedSince]), [
+    ["t1", "running", null],
+    ["t2", "queued", null],
+  ]);
+  await env.clock.advance(4000);
+  assert.deepEqual(env.times(QUERY("t1")), [2000, 4000]);
+  assert.deepEqual(env.times(QUERY("t2")), [2000, 4000]);
 });
 
 // ---- upload ----
@@ -491,6 +508,7 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
 const UNANSWERED_DOWNLOADS = {
   "no connection": () => refused,
   "HTTP 503": () => json(503, { detail: "restarting" }),
+  "HTTP 403": () => json(403, { detail: "forbidden" }),
   "no full answer within 120 seconds": () => stuckBody,
 };
 
@@ -502,7 +520,7 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     await env.clock.advance(120000);
     assert.equal(env.lifecycle.tasks[0].state, "attaching");
     assert.ok(env.lifecycle.tasks[0].disconnectedSince != null);
-    assert.deepEqual(env.status(), [DISCONNECTED(env.clock.now() - env.lifecycle.tasks[0].disconnectedSince >= MINUTE ? 1 : 0)]);
+    assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
     assert.deepEqual(env.imports, []); // nothing imported before both are written
     assert.deepEqual(env.files, new Map());
     assert.deepEqual(JSON.parse(env.saved).map((t) => t.state), ["attaching"]);
@@ -514,6 +532,42 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     assert.equal(env.times(QUERY("t1")).length, 1); // the service is not asked again; the downloads are
   });
 }
+
+test("a disconnection that began before attaching keeps its start until both PDFs are attached", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  delete env.routes[MONO("t1")];
+  await env.clock.advance(2000); // t=2s: succeeded; the first download cannot connect
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, 2000);
+
+  env.routes[MONO("t1")] = pdfBytes("mono pdf");
+  delete env.routes[DUAL("t1")];
+  await env.clock.advance(10000); // t=12s: mono downloads, dual cannot connect
+  assert.deepEqual(env.times(MONO("t1")), [2000, 12000]);
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, 2000);
+  assert.equal(JSON.parse(env.saved)[0].disconnectedSince, 2000);
+
+  env.routes[DUAL("t1")] = pdfBytes("dual pdf");
+  await env.clock.advance(10000); // t=22s: both download and are attached
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, null);
+});
+
+test("a task that is downloading does not hold up the queries of other tasks", async () => {
+  const env = environment({ routes: { ...succeededRoutes("t1"), [QUERY("t2")]: status("running") } });
+  env.routes[MONO("t1")] = () => new Promise((resolve) => env.clock.setTimeout(() => resolve(pdfBytes("mono pdf")), 100000));
+  env.lifecycle.start();
+  env.routes[UPLOAD] = json(201, { task_id: "t1" });
+  await env.lifecycle.submit(SOURCE);
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "Other" });
+
+  await env.clock.advance(60000); // t1 downloads from 2s to 102s
+  assert.deepEqual(env.lifecycle.tasks.map((t) => t.state), ["attaching", "running"]);
+  assert.deepEqual(env.times(QUERY("t2")), Array.from({ length: 30 }, (_, i) => 2000 * (i + 1)));
+  await env.clock.advance(50000);
+  assert.deepEqual(env.status(), ["已挂回", "翻译中"]);
+  assert.equal(env.times(QUERY("t2")).length, 55);
+});
 
 test("a download the service no longer has (404) fails with 译文已不在翻译服务中，请重试", async () => {
   const env = await submitted(succeededRoutes("t1"));

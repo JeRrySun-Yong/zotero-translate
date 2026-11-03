@@ -111,3 +111,11 @@ test("the upload carries only the PDF bytes and the original file name", async (
   assert.deepEqual(new Uint8Array(await form.get("file").arrayBuffer()), pdfBytes);
   assert.equal(form.get("filename"), "Smith 2024 智能体.pdf");
 });
+
+test("a disconnected unfinished row says how many whole minutes it has waited, at least 1", () => {
+  const task = { title: "A", state: "queued", queuePosition: 2, disconnectedSince: 1000 };
+  assert.equal(core.taskRow(task, 1000).status, "翻译服务暂时连不上，恢复后继续（已 1 分钟）");
+  assert.equal(core.taskRow(task, 1000 + 119999).status, "翻译服务暂时连不上，恢复后继续（已 1 分钟）");
+  assert.equal(core.taskRow(task, 1000 + 180000).status, "翻译服务暂时连不上，恢复后继续（已 3 分钟）");
+  assert.equal(core.taskRow({ ...task, state: "failed", error: "x" }, 1000).status, "失败：x");
+});

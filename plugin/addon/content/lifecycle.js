@@ -8,9 +8,10 @@
  * the request's time limit, a non-success status other than 404, an answer
  * that cannot be read), an unfinished task does not fail: it records when
  * the disconnection began, shows how long it has lasted, and tries again
- * every 10 seconds instead of 2. Only the service's `failed`, or a 404 for
- * the task or one of its PDFs, fails the task. An upload that cannot reach
- * the service fails at once, naming the service address.
+ * every 10 seconds instead of 2. The disconnection ends with a full answer
+ * to a query, or when both PDFs are attached. Only the service's `failed`,
+ * or a 404 for the task or one of its PDFs, fails the task. An upload that
+ * cannot reach the service fails at once, naming the service address.
  *
  * Everything outside the lifecycle comes in as a dependency, given to
  * createTaskLifecycle():
@@ -32,10 +33,11 @@
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript after
  * core.js, which defines ZoteroTranslateLifecycle in the plugin scope; Node
- * loads it with require() for plugin/test/.
+ * loads it with require() for plugin/test/. Loading it has one side effect
+ * in Zotero: the plugin scope has fetch but not AbortController, so the file
+ * adds it to that scope with Cu.importGlobalProperties (Node has it already).
  */
 if (typeof AbortController === "undefined") {
-  // The Zotero plugin scope has fetch but not AbortController.
   Cu.importGlobalProperties(["AbortController"]);
 }
 
@@ -49,12 +51,12 @@ var ZoteroTranslateLifecycle = (() => {
   const UPLOAD_LIMIT_MS = 120000;
   const QUERY_LIMIT_MS = 10000;
   const DOWNLOAD_LIMIT_MS = 120000; // each PDF
+  // Unfinished states (core.js): saved for restarts, and a source PDF with a
+  // task in one of them is not submitted again.
+  const ACTIVE_STATES = Core.UNFINISHED_STATES;
   // States in which the plugin has a next operation for the task: query the
   // service, or (attaching) download and import the PDFs.
-  const SCHEDULED_STATES = ["queued", "running", "waiting_rerun", "attaching"];
-  // Unfinished states: saved for restarts, and a source PDF with a task in
-  // one of them is not submitted again.
-  const ACTIVE_STATES = ["submitting", ...SCHEDULED_STATES];
+  const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => state !== "submitting");
   // Task fields saved for restarts.
   const SAVED_FIELDS = [
     "sourceItemID",
@@ -85,7 +87,7 @@ var ZoteroTranslateLifecycle = (() => {
   }) {
     let nextKey = 1;
     let savedValue = null;
-    let running = false;
+    let started = false;
     // Task key -> the timer of the task's next operation. A task's next
     // operation is set only when its current one has finished, so a task
     // never has two operations at once.
@@ -105,7 +107,7 @@ var ZoteroTranslateLifecycle = (() => {
 
       /** Load the tasks saved before Zotero last quit and schedule their next operations. */
       start() {
-        running = true;
+        started = true;
         restoreTasks();
         for (const task of lifecycle.tasks) {
           schedule(task);
@@ -114,7 +116,7 @@ var ZoteroTranslateLifecycle = (() => {
 
       /** No further operations start; one under way finishes without scheduling another. */
       stop() {
-        running = false;
+        started = false;
         for (const timer of timers.values()) {
           clock.clearTimeout(timer);
         }
@@ -184,7 +186,7 @@ var ZoteroTranslateLifecycle = (() => {
     /** Set the task's next operation: 2 seconds from now, or 10 while the
      *  service cannot be reached. */
     function schedule(task) {
-      if (!running || !SCHEDULED_STATES.includes(task.state)) {
+      if (!started || !SCHEDULED_STATES.includes(task.state)) {
         return;
       }
       const delay = task.disconnectedSince == null ? POLL_INTERVAL_MS : DISCONNECTED_INTERVAL_MS;
@@ -291,13 +293,9 @@ var ZoteroTranslateLifecycle = (() => {
             if (answer.status === 404) {
               throw new Error("译文已不在翻译服务中，请重试");
             }
-            if (answer.status >= 500) {
+            if (answer.body == null) {
               throw new Unreachable(`HTTP ${answer.status}`);
             }
-            if (answer.body == null) {
-              throw new Error(`下载${output.title}失败（HTTP ${answer.status}）`);
-            }
-            task.disconnectedSince = null;
             const fileName = Core.outputFileName(task.sourceFileName, output.title);
             files.push({ path: await tempFiles.write(dir, fileName, answer.body), title: output.title });
           }
@@ -308,6 +306,7 @@ var ZoteroTranslateLifecycle = (() => {
           await tempFiles.remove(dir);
         }
         task.state = "done";
+        task.disconnectedSince = null;
       } catch (e) {
         if (e instanceof Unreachable) {
           disconnected(task);
