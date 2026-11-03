@@ -2,11 +2,16 @@
 
 The pipeline model client appends a record for every send, and one for every
 answer taken from the cache, to ``requests.jsonl`` next to the attempt's task
-report, as soon as the send ends: one JSON object per line, flushed at once,
-so that a killed process leaves every finished record behind. The task
-report (``zotero_translate.task_report``) carries them as ``requests``; for
-an attempt whose report the worker never wrote, the translation service
-reads them from this file (``load_records``).
+report, as soon as the send ends: one JSON object per line, written at once,
+so that a killed process leaves every finished record behind.
+
+``requests.jsonl`` is the source of truth. The task report
+(``zotero_translate.task_report``) carries the records as ``requests`` as far
+as they existed when it was written; sends can still end after that (a
+failed paper task does not wait for its algorithm requests). When an attempt
+ends, the translation service replaces the report's ``requests`` with the
+file's (``load_records``). Under ``run`` nobody does: there the file is
+complete and ``report.json`` may lack the sends that ended after it.
 
 A record has these fields:
 
@@ -83,7 +88,7 @@ class RequestLog:
         self._lock = threading.Lock()
         self._next_request = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self.path.open("w", encoding="utf-8")  # a new attempt starts empty
+        self.path.write_text("", encoding="utf-8")  # a new attempt starts empty
 
     def new_request(self) -> int:
         """The number of a new logical request."""
@@ -92,17 +97,18 @@ class RequestLog:
             return self._next_request
 
     def append(self, **fields) -> None:
+        """Add a record to the file at once.
+
+        There is no closing: a send that ends after the task report was
+        written (e.g. an algorithm request still in flight when the paper
+        task failed) is still appended, as long as the process lives.
+        """
         record = {"attempt": self.attempt, **fields}
         line = json.dumps(record, ensure_ascii=False)
         with self._lock:
             self.records.append(record)
-            if not self._file.closed:
-                self._file.write(line + "\n")
-                self._file.flush()
-
-    def close(self) -> None:
-        with self._lock:
-            self._file.close()
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write(line + "\n")
 
 
 def load_records(path: Path) -> list[dict]:

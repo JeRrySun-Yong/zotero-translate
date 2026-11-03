@@ -239,7 +239,6 @@ def run_paper_task(
     finally:
         report.write(report_path)
         models.close()
-        request_log.close()
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):

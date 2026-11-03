@@ -25,10 +25,12 @@ from tests.conftest import EXCERPT
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
 from tests.conftest import FAKE_MODEL_NAME
+from tests.conftest import FIXTURES
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
+from tests.fake_model import pseudo_translate_algorithm
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 from zotero_translate.model_client import PipelineModels
@@ -59,6 +61,7 @@ FIELDS = {
 # The fake model's names for the request kinds that differ from the records'.
 FAKE_KINDS = {"translate_batch": "translation_batch", "algorithm": "algorithm_translation"}
 MESSAGES = [{"role": "user", "content": "hello"}]
+LATE_SECONDS = 4.0  # how long the late algorithm answer takes
 
 
 def _settings(fake: FakeModel, tmp_path: Path, **changes) -> ModelSettings:
@@ -94,7 +97,6 @@ def test_each_send_of_a_request_gets_a_record_with_its_result(tmp_path):
             client.complete(MESSAGES, page=7, kind="translation_batch")
         finally:
             client.close()
-            log.close()
 
     records = load_records(log.path)
     assert records == log.records
@@ -141,7 +143,6 @@ def test_an_answer_the_caller_rejects_and_a_permanent_http_error_are_recorded(tm
                 raise AssertionError("HTTP 401 did not fail the request")
         finally:
             client.close()
-            log.close()
 
     records = load_records(log.path)
     assert _summary(records) == [
@@ -158,7 +159,7 @@ def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tm
     with FakeModel() as model:
         client, log = _client(model, tmp_path)
 
-        def broken_post(body: dict):
+        def broken_post(body: dict, timing):
             time.sleep(0.05)
             raise error
 
@@ -168,7 +169,6 @@ def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tm
                 client.complete(MESSAGES, page=5, kind="review")
         finally:
             client.close()
-            log.close()
 
     assert raised.value is error
     (record,) = load_records(log.path)
@@ -190,7 +190,6 @@ def test_a_cache_hit_gets_a_record_with_time_zero(tmp_path):
             client.complete(MESSAGES, page=2, kind="review")
         finally:
             client.close()
-            log.close()
 
     assert len(model.requests) == 1
     sent, hit = load_records(log.path)
@@ -224,7 +223,6 @@ def test_the_wait_for_a_concurrency_slot_is_recorded_apart_from_the_send(tmp_pat
                 thread.join(timeout=30)
         finally:
             client.close()
-            log.close()
 
     first, second = sorted(load_records(log.path), key=lambda r: r["slot_wait_seconds"])
     assert first["slot_wait_seconds"] < delay / 2
@@ -253,7 +251,6 @@ def test_timeouts_and_the_forward_to_argon_are_recorded_by_endpoint(tmp_path):
             models.flash.complete(MESSAGES, page=4, kind="translation_batch")
         finally:
             models.close()
-            log.close()
 
     records = load_records(log.path)
     assert _summary(records) == [
@@ -280,7 +277,6 @@ def test_a_cache_entry_from_before_the_records_is_recorded_as_this_clients(tmp_p
             assert client.complete(MESSAGES, kind="review") == "old answer"
         finally:
             client.close()
-            log.close()
 
     (hit,) = load_records(log.path)
     assert (hit["result"], hit["endpoint"], hit["model"]) == ("cache_hit", "flash", "fake-flash")
@@ -430,4 +426,41 @@ def test_an_interrupted_attempt_keeps_the_records_from_before_the_interruption(t
         finally:
             if restarted is not None:
                 stop_service(restarted)
+            stop_service(service)
+
+
+def test_a_send_that_ends_after_the_task_failed_is_in_the_attempts_records(tmp_path):
+    # The algorithm request starts before the batches and answers late; a
+    # batch fails the task with HTTP 401 meanwhile. The worker writes its
+    # failure report while the algorithm send is still in flight, and that
+    # send ends afterwards. (Closing the client then leaves that send waiting
+    # until the request timeout, which is therefore small here; see backlog.)
+    def late_algorithm(body: dict) -> str:
+        time.sleep(LATE_SECONDS)
+        return pseudo_translate_algorithm(body)
+
+    with FakeModel() as model:
+        model.respond("algorithm", late_algorithm)
+        model.inject_error("401", kind="translate_batch")
+        service = launch_service(model, tmp_path, request_timeout=LATE_SECONDS * 2)
+        try:
+            task_id = service.submit(FIXTURES / "maliang-p6.pdf")
+            final = service.wait(task_id)
+            assert final["state"] == "failed"
+            assert "HTTP 401" in final["error"]
+            assert model.requests_of("algorithm")
+
+            directory = _attempt_dir(service, task_id, 1)
+            records = load_records(directory / REQUESTS_FILE)
+            failed = [r for r in records if r["http_status"] == 401]
+            late = [r for r in records if r["kind"] == "algorithm_translation" and r["send"] == 1]
+            assert len(failed) == 1 and len(late) == 1, records
+            # The algorithm send started before the failure and ended after it.
+            assert late[0]["started_at"] < failed[0]["started_at"]
+            assert late[0]["seconds"] > 1
+            report = json.loads((directory / "report.json").read_text("utf-8"))
+            assert report["state"] == "failed"
+            assert report["requests"] == records
+            assert service.report(task_id)["requests"] == records
+        finally:
             stop_service(service)

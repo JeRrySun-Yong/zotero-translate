@@ -128,6 +128,7 @@ class _SendTiming:
     slot_wait_seconds: float = 0.0  # waiting for a concurrency slot
     seconds: float = 0.0  # from going out to the end
     http_status: int | None = None  # once a response arrived
+    sent: float = 0.0  # monotonic clock as the send goes out; not recorded
 
 
 class ModelClient:
@@ -320,15 +321,15 @@ class ModelClient:
         """Send ``body`` once; fill ``timing`` as it goes, also when this raises."""
         waiting = time.monotonic()
         with self._slots:
-            sent = time.monotonic()
-            timing.slot_wait_seconds = sent - waiting
-            timing.started_at = time.time()
+            timing.sent = time.monotonic()
+            timing.slot_wait_seconds = timing.sent - waiting
+            timing.started_at = time.time()  # ``_post`` sets both again as the request goes out
             with self._lock:
                 self._in_flight += 1
                 self.request_count += 1
                 self.max_in_flight = max(self.max_in_flight, self._in_flight)
             try:
-                status_code, data = self._post(body)
+                status_code, data = self._post(body, timing)
             except _Timeout:
                 self._count_timeout()
                 raise
@@ -340,7 +341,7 @@ class ModelClient:
             except httpx.TransportError as e:
                 raise _NetworkError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
             finally:
-                timing.seconds = time.monotonic() - sent
+                timing.seconds = time.monotonic() - timing.sent
                 with self._lock:
                     self._in_flight -= 1
         timing.http_status = status_code
@@ -368,8 +369,12 @@ class ModelClient:
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
 
-    def _post(self, body: dict) -> tuple[int, bytes]:
+    def _post(self, body: dict, timing: _SendTiming) -> tuple[int, bytes]:
         """Send one chat completion; return its status code and whole body.
+
+        The request's thread sets ``timing.started_at`` and ``timing.sent``
+        right before the HTTP call, so that a send's time leaves out the
+        thread's start.
 
         httpx's timeout bounds each network operation, e.g. each wait for
         the next bytes, not the whole request: a response that trickles in
@@ -382,6 +387,8 @@ class ModelClient:
         abandoned = threading.Event()
 
         def run() -> None:
+            timing.started_at = time.time()
+            timing.sent = time.monotonic()
             try:
                 with self._http.stream("POST", "/chat/completions", json=body) as response:
                     chunks = []

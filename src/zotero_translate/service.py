@@ -59,8 +59,9 @@ Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
 summary of all attempts (number, start and end time, outcome, reason). An
 attempt's request records are appended to ``attempts/<n>/requests.jsonl`` as
-they happen; when the worker wrote no report, the service takes them from
-there (``zotero_translate.request_log``). The service writes one line per task event to standard output (the service log):
+they happen; when an attempt ends, the service sets its report's ``requests``
+to that file's records, which include the sends that ended after the worker
+wrote its report (``zotero_translate.request_log``). The service writes one line per task event to standard output (the service log):
 submitted, started, interrupted, requeued, waiting for a rerun, rerun
 started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
 
@@ -435,15 +436,17 @@ class TaskQueue:
                 "state": "failed" if outcome == "failed" else None,
                 "error": reason,
             }
-        if "requests" not in report:
-            # The worker never wrote its report: its request records, as far
-            # as they were appended before it ended.
-            report["requests"] = load_records(path.parent / REQUESTS_FILE)
+        records = path.parent / REQUESTS_FILE
+        if records.exists() or "requests" not in report:
+            # The request records file is the source of truth: it also holds
+            # the sends that ended after the worker wrote its report, and
+            # those of a worker that never wrote one.
+            report["requests"] = load_records(records)
         if outcome == "interrupted":
             # The attempt did not run to its end: say so, invent nothing.
             report.update(complete=False, incomplete_reason=reason)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            td.write_json(path, report, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        td.write_json(path, report, indent=2)
         report["attempts"] = status["attempts"]
         td.write_json(directory / td.REPORT_FILE, report, indent=2)
 
