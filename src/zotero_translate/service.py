@@ -61,7 +61,9 @@ before the subprocess starts) and ``ZT_TEST_PAUSE_BEFORE_ADOPT`` (after the
 subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
 until that file is deleted. ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
-subprocess send two malformed reports (``zotero_translate.worker``).
+subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
+makes it start a child that sleeps for an hour, by multiprocessing's spawn
+method like the engine (``zotero_translate.worker``).
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
