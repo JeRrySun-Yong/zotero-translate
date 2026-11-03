@@ -157,7 +157,8 @@ class TaskQueue:
         ``outcome`` (succeeded, failed, interrupted) ends the current attempt:
         its summary entry gets the end time, outcome and reason, and the
         task's ``report.json`` becomes that attempt's report with the summary
-        of all attempts.
+        of all attempts. The report is written before the status file, so a
+        transition whose report cannot be written is not saved at all.
         """
         directory = self.tasks_dir / task_id
         with self._cond:
@@ -167,9 +168,8 @@ class TaskQueue:
                 attempts = [dict(a) for a in status["attempts"]]
                 attempts[-1].update(ended_at=time.time(), outcome=outcome, reason=reason)
                 changes["attempts"] = attempts
+                self._write_task_report(directory, {**status, **changes}, outcome, reason)
             status = td.write_status(directory, **changes)
-            if outcome is not None and status.get("attempts"):
-                self._write_task_report(directory, status, outcome, reason)
             self._log(task_id, event, status.get("attempt", 0), reason)
             return status
 
@@ -195,7 +195,13 @@ class TaskQueue:
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            report = {"attempt": attempt, "state": None, "error": None}
+            # No report from the worker (it could not read its settings or
+            # start, or was cut short): only what the outcome says.
+            report = {
+                "attempt": attempt,
+                "state": "failed" if outcome == "failed" else None,
+                "error": reason,
+            }
         if outcome == "interrupted":
             # The attempt did not run to its end: say so, invent nothing.
             report.update(complete=False, incomplete_reason=reason)
