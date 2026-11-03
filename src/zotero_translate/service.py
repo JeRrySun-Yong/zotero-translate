@@ -5,9 +5,13 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
-- ``GET /tasks/{task_id}`` -> state, stage, progress, attempt (attempts
-  started, interrupted ones included; 0 until the first starts), queue
-  position, error, kept source paragraphs and downloadable files
+- ``GET /tasks/{task_id}`` -> state (queued, running, waiting_rerun,
+  succeeded, failed), stage, progress, attempt (attempts started,
+  interrupted ones included; 0 until the first starts), reruns_used and
+  reruns_max (2), next_attempt_in_seconds (only while waiting_rerun), queue
+  position (only while queued), error (the last failure's reason, only
+  while waiting_rerun or failed), kept source paragraphs and downloadable
+  files
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -19,8 +23,20 @@ port is taken it exits with status 1 and a readable reason on stderr, and
 touches no task.
 
 Tasks run one at a time, ordered by queue class (tasks interrupted by a
-restart first, then first attempts) and, within a class, by submission
-time; class and sort key are saved, so the order survives a restart. The
+restart first, by submission time; then due automatic reruns, by due time,
+then submission time; then first attempts, by submission time); class and
+sort key are saved, so the order survives a restart.
+
+An attempt that fails with category ``retryable`` (anything but a
+credential error or unreadable settings; also a subprocess that exits
+without a result) puts the task in ``waiting_rerun`` with a saved due time,
+60 seconds later before the first rerun and 300 before the second (event
+等待自动重跑). When it is due, the task is queued as a rerun and the rerun
+counted, in one transition (event 自动重跑开始); it does not preempt the
+running task. After 2 reruns, or on a ``permanent`` failure, the task fails
+with that attempt's reason. A restart keeps a waiting task's due time and
+counts no rerun again; an interrupted rerun attempt is requeued as
+interrupted, using no rerun. The
 service alone writes the
 task state: every transition goes through ``TaskQueue._decide``, under one
 lock, and is saved with the counters it changes as one atomic replacement of
@@ -42,8 +58,8 @@ Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
 summary of all attempts (number, start and end time, outcome, reason). The
 service writes one line per task event to standard output (the service log):
-submitted, started, interrupted, requeued, succeeded, failed, cleanup error,
-report dropped. No API key and no HTTP poll is logged.
+submitted, started, interrupted, requeued, waiting for a rerun, rerun
+started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
 
 When the service starts (``TaskQueue.restore``), a task an earlier service
 left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
@@ -60,7 +76,11 @@ production): ``ZT_TEST_PAUSE_AFTER_MARKER`` (after the process marker is saved,
 before the subprocess starts) and ``ZT_TEST_PAUSE_BEFORE_ADOPT`` (after the
 subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
-until that file is deleted. ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
+until that file is deleted. ``ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE`` is a pause
+of the same kind when a rerun is due, before it is queued (the attempt in
+the file name is the one that failed). ``ZT_TEST_RERUN_WAITS_SECONDS``
+("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
+``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
 makes it start a child that sleeps for an hour, by multiprocessing's spawn
 method like the engine (``zotero_translate.worker``).
@@ -179,7 +199,7 @@ class TaskQueue:
         A task left running was interrupted: after its processes are reaped
         it is queued again, ahead of the others, unless this is its third
         interruption in a row, which fails it. A queued task keeps its queue
-        class and sort key. A task directory from before M3 keeps its final
+        class and sort key; a task waiting for a rerun keeps its due time. A task directory from before M3 keeps its final
         state; queued, it is queued as a first attempt; running, it fails.
         An error with one task fails that task alone, with a readable reason.
         """
