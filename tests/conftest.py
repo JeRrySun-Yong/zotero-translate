@@ -8,9 +8,10 @@ dossier and term list endpoint, ADR 0004) at a second fake model or, when
 the test gives none, at the same one.
 
 No process outlives the tests (closure ticket 09): the service runs in its
-own process group, which its task subprocesses inherit, and ``stop_service``
-ends the whole group. pytest tears the fixtures down when it is interrupted
-with SIGINT, and SIGTERM is made to interrupt it the same way.
+own process group, and ``stop_service`` ends the whole group, then every
+process with a process marker of one of its tasks (task subprocesses run in
+groups of their own, M3 ticket 04). pytest tears the fixtures down when it
+is interrupted with SIGINT, and SIGTERM is made to interrupt it the same way.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+import psutil
 import pytest
 
 from tests.fake_model import FakeModel
@@ -37,6 +39,9 @@ FAKE_API_KEY = "sk-fake-test-key-0123456789"
 FAKE_ARGON_API_KEY = "sk-fake-argon-key-9876543210"
 ARGON_MODEL_NAME = "gemini-4-argon-high"  # the default, since the argon file names no model
 TERMINAL_STATES = {"succeeded", "failed"}
+# The environment variable that carries a task process's process marker
+# "<task_id>:<attempt>" (spec section 2).
+MARK_ENV = "ZT_PROCESS_MARK"
 
 
 class ServiceClient:
@@ -204,11 +209,14 @@ def serve_command(
 
 
 def stop_service(client: ServiceClient) -> None:
-    """End the service and every task subprocess it started; return when all have exited.
+    """End the service and every task process it started; return when all have exited.
 
-    A task subprocess ends itself when its service is gone, but that check
-    has failed to run at least once (a worker left running for 31 minutes
-    after a test), so the subprocesses get the signal too.
+    The service's process group is signalled first. Task subprocesses run
+    in process groups of their own (M3 ticket 04) and end themselves and
+    their children when the service is gone, but that check has failed to
+    run at least once (a worker left running for 31 minutes after a test),
+    so every process with a process marker of a task in the service's data
+    directory is then ended too, whatever its group.
     """
     group = client.process.pid  # the leader of its own session and process group
     for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 10.0)):
@@ -218,8 +226,49 @@ def stop_service(client: ServiceClient) -> None:
         except subprocess.TimeoutExpired:
             continue
         if _group_ended(group, timeout=grace):
+            break
+    else:
+        raise AssertionError(f"processes of the service group {group} survived SIGKILL")
+    data_dir = getattr(client, "data_dir", None)
+    if data_dir is not None:
+        _end_marked_processes(data_dir)
+
+
+def marked_processes(task_ids) -> list[psutil.Process]:
+    """Live processes whose process marker names one of ``task_ids``."""
+    prefixes = tuple(f"{task_id}:" for task_id in task_ids)
+    found = []
+    if not prefixes:
+        return found
+    for process in psutil.process_iter():
+        try:
+            if process.environ().get(MARK_ENV, "").startswith(prefixes) and (
+                process.status() != psutil.STATUS_ZOMBIE
+            ):
+                found.append(process)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return found
+
+
+def _end_marked_processes(data_dir: Path) -> None:
+    """End every process of a task under ``data_dir``: SIGTERM, then SIGKILL."""
+    tasks = Path(data_dir) / "tasks"
+    task_ids = [p.name for p in tasks.iterdir()] if tasks.is_dir() else []
+    for method in (psutil.Process.terminate, psutil.Process.kill):
+        left = marked_processes(task_ids)
+        if not left:
             return
-    raise AssertionError(f"processes of the service group {group} survived SIGKILL")
+        for process in left:
+            try:
+                method(process)
+            except psutil.NoSuchProcess:
+                pass
+        deadline = time.monotonic() + 10
+        while marked_processes(task_ids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    left = marked_processes(task_ids)
+    assert not left, f"task processes survived SIGKILL: {[p.pid for p in left]}"
 
 
 def _signal_group(group: int, sig: signal.Signals) -> None:

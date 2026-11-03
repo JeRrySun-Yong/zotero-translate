@@ -228,7 +228,7 @@ def test_process_marker_is_saved_before_the_worker_starts_and_passed_to_it(tmp_p
             stop_service(service)
 
 
-def test_worker_does_not_write_state_and_a_restart_still_fails_the_task(tmp_path):
+def test_worker_does_not_write_state_and_a_restart_requeues_the_task(tmp_path):
     pauses = tmp_path / "pauses"
     pauses.mkdir()
     with FakeModel() as model:
@@ -246,22 +246,32 @@ def test_worker_does_not_write_state_and_a_restart_still_fails_the_task(tmp_path
             assert held["progress"] < 100
 
             # The service dies holding the result: attempt 1 ends as interrupted,
-            # and its success is never adopted.
+            # its success is never adopted, and attempt 2 runs (M3 ticket 04).
             service.process.kill()
             service.process.wait(timeout=10)
             restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
-            time.sleep(1)
-            final = restarted.status(task_id)
+            final = restarted.wait(task_id)
 
-            assert final["state"] == "failed"
-            assert final["error"] == "翻译服务重启，任务中断"
+            assert final["state"] == "succeeded", final["error"]
+            assert final["attempt"] == 2
             report = restarted.report(task_id)
-            [summary] = report["attempts"]
-            assert summary["outcome"] == "interrupted"
-            assert summary["reason"] == "翻译服务重启，任务中断"
-            assert report["complete"] is False
-            assert report["incomplete_reason"] == "翻译服务重启，任务中断"
-            assert [_event(line) for line in restarted.log_lines(task_id)] == ["失败"]
+            first, second = report["attempts"]
+            assert first["outcome"] == "interrupted"
+            assert first["reason"] == "翻译服务重启，任务中断"
+            assert second["outcome"] == "succeeded"
+            attempt_1 = json.loads(
+                (service.data_dir / "tasks" / task_id / "attempts" / "1" / "report.json").read_text(
+                    "utf-8"
+                )
+            )
+            assert attempt_1["complete"] is False
+            assert attempt_1["incomplete_reason"] == "翻译服务重启，任务中断"
+            assert [_event(line) for line in restarted.log_lines(task_id)] == [
+                "中断",
+                "重新排队并开始新尝试",
+                "开始",
+                "成功",
+            ]
         finally:
             if restarted is not None:
                 stop_service(restarted)

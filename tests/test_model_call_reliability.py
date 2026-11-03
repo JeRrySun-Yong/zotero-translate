@@ -281,7 +281,8 @@ def test_run_exits_with_a_nonzero_code_when_the_paper_task_fails(tmp_path, fake_
     assert "论文任务失败" in result.stderr
 
 
-def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
+def test_restart_requeues_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
+    # M3 ticket 04: a restart no longer fails unfinished tasks; they run again.
     with FakeModel(delay=1.0) as model:
         service = launch_service(model, tmp_path)
         restarted = None
@@ -289,23 +290,31 @@ def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
             running = service.submit()
             queued = service.submit()
             service.wait_for(running, lambda s: s["state"] == "running" and model.requests)
+            task_dir = service.data_dir / "tasks" / running
+            old = subprocess.run(["pgrep", "-f", str(task_dir)], capture_output=True, text=True)
+            old_workers = [int(pid) for pid in old.stdout.split()]
+            assert old_workers
 
             # Only the service: its task subprocess must end itself.
             service.process.kill()
             service.process.wait(timeout=10)
             restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
-            for task_id in (running, queued):
-                status = restarted.status(task_id)
-                assert status["state"] == "failed"
-                assert status["error"] == RESTART_ERROR
-            time.sleep(1.5)  # longer than the old subprocess's parent check
-            sent = len(model.requests)
-            time.sleep(2.5)
 
-            assert len(model.requests) == sent, "the old subprocess still sends requests"
-            assert restarted.status(running)["error"] == RESTART_ERROR
-            task_dir = service.data_dir / "tasks" / running
-            assert subprocess.run(["pgrep", "-f", str(task_dir)]).returncode == 1
+            assert restarted.status(running)["state"] in {"queued", "running"}
+            assert restarted.status(queued)["state"] == "queued"
+            # The HTTP interface answers only after the restored service has
+            # reaped the old processes; the old worker also ends itself.
+            states = subprocess.run(
+                ["ps", "-o", "stat=", "-p", ",".join(map(str, old_workers))],
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+            assert [s for s in states if not s.startswith("Z")] == [], "the old subprocess still runs"
+            for task_id, attempt in ((running, 2), (queued, 1)):
+                final = restarted.wait(task_id)
+                assert final["state"] == "succeeded", final["error"]
+                assert final["attempt"] == attempt
+            assert restarted.report(running)["attempts"][0]["reason"] == RESTART_ERROR
         finally:
             if restarted is not None:
                 stop_service(restarted)

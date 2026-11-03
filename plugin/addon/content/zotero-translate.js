@@ -26,7 +26,7 @@ var ZoteroTranslate = {
 
   // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
   // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
-  // progress, queuePosition, error}
+  // progress, attempt, queuePosition, error}
   tasks: [],
   // Why items of the latest submission were skipped; shown in the task window.
   notices: [],
@@ -153,6 +153,7 @@ var ZoteroTranslate = {
       state: "submitting",
       stage: null,
       progress: null,
+      attempt: null,
       queuePosition: null,
       error: null,
     });
@@ -243,6 +244,7 @@ var ZoteroTranslate = {
       Object.assign(task, {
         stage: status.stage,
         progress: status.progress,
+        attempt: status.attempt,
         queuePosition: status.queue_position,
         error: status.error,
         keptSourceParagraphs: status.kept_source_paragraphs,

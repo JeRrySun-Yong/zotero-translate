@@ -5,8 +5,9 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
-- ``GET /tasks/{task_id}`` -> state, stage, progress, queue position, error,
-  kept source paragraphs and downloadable files
+- ``GET /tasks/{task_id}`` -> state, stage, progress, attempt (attempts
+  started, interrupted ones included; 0 until the first starts), queue
+  position, error, kept source paragraphs and downloadable files
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -17,7 +18,10 @@ then binds its port, and only then restores the queue; when the lock or the
 port is taken it exits with status 1 and a readable reason on stderr, and
 touches no task.
 
-Tasks run first in, first out, one at a time. The service alone writes the
+Tasks run one at a time, ordered by queue class (tasks interrupted by a
+restart first, then first attempts) and, within a class, by submission
+time; class and sort key are saved, so the order survives a restart. The
+service alone writes the
 task state: every transition goes through ``TaskQueue._decide``, under one
 lock, and is saved with the counters it changes as one atomic replacement of
 the status file. Each attempt runs in its own subprocess
@@ -26,18 +30,30 @@ pipe; the service adopts only reports of the task's current attempt while the
 task is running, and drops any other. Before it starts the subprocess, the
 service saves the attempt's process marker ``<task_id>:<attempt>`` in the
 status file and passes it to the subprocess in the environment variable
-``ZT_PROCESS_MARK``, which every process the subprocess starts inherits.
+``ZT_PROCESS_MARK``, which every process the subprocess starts inherits. The
+subprocess runs in a process group of its own. Before a new attempt starts,
+when the service starts, and after a subprocess exits without a result, the
+service reaps every process with a marker of the task
+(``zotero_translate.processes``); if that cannot be confirmed, the reason
+goes to the task's ``cleanup_error`` and the log (event 进程回收出错), and no
+new attempt starts.
 
 Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
 summary of all attempts (number, start and end time, outcome, reason). The
 service writes one line per task event to standard output (the service log):
-submitted, started, succeeded, failed. No API key and no HTTP poll is logged.
+submitted, started, interrupted, requeued, succeeded, failed, cleanup error,
+report dropped. No API key and no HTTP poll is logged.
 
-When the service starts, every task left queued or running by an earlier
-service is marked as failed ("翻译服务重启，任务中断"); there is no resuming.
-The report of an attempt cut short so is marked incomplete. A task
-subprocess ends itself when its service is gone.
+When the service starts (``TaskQueue.restore``), a task an earlier service
+left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
+report is marked incomplete): it is queued again ahead of the others and
+starts a new attempt, unless that was its third interruption in a row, which
+fails it ("翻译服务多次重启，任务中断"). A queued task keeps its place. A task
+directory from before M3 keeps its final state; queued, it is queued; running,
+it fails ("升级前未完成的任务，请重试"). An error with one task fails that task
+alone. A task subprocess ends its process group and itself when its service
+is gone.
 
 Test-only settings (environment variables of the service; never set them in
 production): ``ZT_TEST_PAUSE_AFTER_MARKER`` (after the process marker is saved,
@@ -45,7 +61,9 @@ before the subprocess starts) and ``ZT_TEST_PAUSE_BEFORE_ADOPT`` (after the
 subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
 until that file is deleted. ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
-subprocess send two malformed reports (``zotero_translate.worker``).
+subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
+makes it start a child that sleeps for an hour, by multiprocessing's spawn
+method like the engine (``zotero_translate.worker``).
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
@@ -55,7 +73,6 @@ task with a readable reason, and the runner goes on with the next task.
 
 from __future__ import annotations
 
-import collections
 import datetime
 import errno
 import fcntl
@@ -75,21 +92,30 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from zotero_translate import __version__
+from zotero_translate import processes
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import FIRST_STAGE
 from zotero_translate.settings import model_cache_dir
 
 HOST = "127.0.0.1"
 RESTART_ERROR = "翻译服务重启，任务中断"
+MANY_RESTARTS_ERROR = "翻译服务多次重启，任务中断"
+UPGRADE_ERROR = "升级前未完成的任务，请重试"
+MAX_INTERRUPTIONS = 3  # in a row; the third fails the task
 LOCK_FILE = "service.lock"
-MARK_ENV = "ZT_PROCESS_MARK"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
+# Queue classes (spec section 1, "排队顺序"), in the order they run: tasks
+# interrupted by a restart, then (ticket 05) due automatic reruns, then
+# first attempts; within a class by the sort key, the submission time.
+INTERRUPTED_QUEUE_CLASS = "interrupted"
+FIRST_QUEUE_CLASS = "first"
+_QUEUE_RANK = {INTERRUPTED_QUEUE_CLASS: 0, FIRST_QUEUE_CLASS: 2}
+
 # The state fields a new task starts with (spec section 1), besides state,
 # stage, progress and the kept source counts.
-FIRST_QUEUE_CLASS = "first"
 _INITIAL_FIELDS = {
     "attempt": 0,  # attempts started, interrupted ones included
     "reruns_used": 0,
@@ -106,14 +132,17 @@ _INITIAL_FIELDS = {
 _EVENTS = {
     "submitted": "提交",
     "started": "开始",
+    "interrupted": "中断",  # the attempt was cut short by a restart
+    "requeued": "重新排队并开始新尝试",
     "succeeded": "成功",
     "failed": "失败",
+    "cleanup_error": "进程回收出错",
     "report_dropped": "丢弃上报",  # a worker report the service cannot use
 }
 
 
 class TaskQueue:
-    """Task directories under ``<data_dir>/tasks`` plus a FIFO run queue.
+    """Task directories under ``<data_dir>/tasks`` plus the run queue.
 
     Construction touches no task; ``restore`` handles what an earlier
     service left, and ``start`` starts running tasks.
@@ -125,27 +154,121 @@ class TaskQueue:
         self.env_file = Path(env_file)
         self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
-        self._queue: collections.deque[str] = collections.deque()  # waiting tasks
+        # Waiting tasks: task ID -> (rank of its queue class, sort key).
+        self._waiting: dict[str, tuple[int, float]] = {}
+        # Tasks whose processes could not be reaped: no new attempt starts
+        # while there is one (spec section 2, "回收失败").
+        self._cleanup_blocked: set[str] = set()
         # The one lock every state transition and the queue go through.
         self._cond = threading.Condition(threading.RLock())
 
     def restore(self) -> None:
-        """Fail every task an earlier service left queued or running."""
+        """Take over the tasks an earlier service left unfinished (spec sections 1 and 3).
+
+        A task left running was interrupted: after its processes are reaped
+        it is queued again, ahead of the others, unless this is its third
+        interruption in a row, which fails it. A queued task keeps its queue
+        class and sort key. A task directory from before M3 keeps its final
+        state; queued, it is queued as a first attempt; running, it fails.
+        An error with one task fails that task alone, with a readable reason.
+        """
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         for status_file in sorted(self.tasks_dir.glob(f"*/{td.STATUS_FILE}")):
             task_id = status_file.parent.name
             try:
-                state = td.read_status(status_file.parent)["state"]
-            except (OSError, ValueError, KeyError):
-                continue
-            if state not in td.TERMINAL_STATES:
+                self._restore_task(task_id)
+            except Exception as e:  # noqa: BLE001 - one task's error must not stop the service
+                self._fail_after_error(task_id, e, "翻译服务接管任务出错")
+
+    def _restore_task(self, task_id: str) -> None:
+        directory = self.tasks_dir / task_id
+        status = td.read_status(directory)
+        state = status["state"]
+        if state in td.TERMINAL_STATES:
+            return
+        if "attempt" not in status:  # written before M3: none of the new fields
+            fields = {**_INITIAL_FIELDS, "queue_key": _submitted_at(directory)}
+            if state == "running":
+                # Its processes carry no marker: no reaping, no new attempt.
                 self._decide(
                     task_id,
                     "failed",
-                    {"state": "failed", "error": RESTART_ERROR, "failure_category": "retryable"},
-                    outcome="interrupted" if state == "running" else None,
-                    reason=RESTART_ERROR,
+                    {**fields, "state": "failed", "error": UPGRADE_ERROR, "failure_category": "retryable"},
+                    reason=UPGRADE_ERROR,
                 )
+            elif state == "queued":
+                with self._cond:
+                    td.write_status(directory, **fields)
+                    self._enqueue(task_id, FIRST_QUEUE_CLASS, fields["queue_key"])
+            return
+        if not self._reap(task_id):
+            return  # left as it is until its processes are reaped
+        if state == "queued":
+            self._enqueue(task_id, status["queue_class"], status["queue_key"])
+        elif state == "running":
+            interruptions = status.get("consecutive_interruptions", 0) + 1
+            if interruptions < MAX_INTERRUPTIONS:
+                queue_key = _submitted_at(directory)
+                self._decide(
+                    task_id,
+                    "interrupted",
+                    {
+                        "state": "queued",
+                        "stage": td.QUEUED_STAGE,
+                        "progress": 0,
+                        "consecutive_interruptions": interruptions,
+                        "queue_class": INTERRUPTED_QUEUE_CLASS,
+                        "queue_key": queue_key,
+                    },
+                    outcome="interrupted",
+                    reason=RESTART_ERROR,
+                    then=(("requeued", None),),
+                )
+                self._enqueue(task_id, INTERRUPTED_QUEUE_CLASS, queue_key)
+            else:
+                self._decide(
+                    task_id,
+                    "interrupted",
+                    {
+                        "state": "failed",
+                        "error": MANY_RESTARTS_ERROR,
+                        "failure_category": "retryable",
+                        "consecutive_interruptions": interruptions,
+                    },
+                    outcome="interrupted",
+                    reason=RESTART_ERROR,
+                    then=(("failed", MANY_RESTARTS_ERROR),),
+                )
+
+    def _enqueue(self, task_id: str, queue_class: str, queue_key: float) -> None:
+        with self._cond:
+            self._waiting[task_id] = (_QUEUE_RANK[queue_class], queue_key)
+            self._cond.notify_all()
+
+    def _queue_order(self) -> list[str]:
+        """The waiting tasks in the order they will run."""
+        return sorted(self._waiting, key=self._waiting.__getitem__)
+
+    def _reap(self, task_id: str) -> bool:
+        """Reap the task's processes by marker; on failure record why, block scheduling, return False.
+
+        Retrying a failed reap is ticket 09's: until then the task stays
+        as it is and no new attempt starts.
+        """
+        try:
+            processes.reap(task_id)
+        except processes.ReapError as e:
+            reason = f"{e}；暂停调度新的尝试"
+            with self._cond:
+                self._decide(task_id, "cleanup_error", {"cleanup_error": reason}, reason=reason)
+                self._cleanup_blocked.add(task_id)
+            return False
+        with self._cond:
+            if td.read_status(self.tasks_dir / task_id).get("cleanup_error"):
+                td.write_status(self.tasks_dir / task_id, cleanup_error=None)
+            self._cleanup_blocked.discard(task_id)
+            self._cond.notify_all()
+        return True
 
     def start(self) -> None:
         threading.Thread(target=self._run_forever, name="task-runner", daemon=True).start()
@@ -159,8 +282,12 @@ class TaskQueue:
         fields: dict,
         outcome: str | None = None,
         reason: str | None = None,
+        then: tuple[tuple[str, str | None], ...] = (),
     ) -> dict:
         """Apply one state transition: save ``fields`` atomically and log ``event``.
+
+        ``then`` gives further ``(event, reason)`` log lines of the same
+        transition, e.g. the requeue after an interruption.
 
         ``outcome`` (succeeded, failed, interrupted) ends the current attempt:
         its summary entry gets the end time, outcome and reason, and the
@@ -178,7 +305,8 @@ class TaskQueue:
                 changes["attempts"] = attempts
                 self._write_task_report(directory, {**status, **changes}, outcome, reason)
             status = td.write_status(directory, **changes)
-            self._log(task_id, event, status.get("attempt", 0), reason)
+            for logged, why in ((event, reason), *then):
+                self._log(task_id, logged, status.get("attempt", 0), why)
             return status
 
     def _adopt(self, task_id: str, attempt: int, event: str, fields: dict, **end) -> bool:
@@ -264,8 +392,7 @@ class TaskQueue:
                 queue_key=submitted_at,
             )
             self._log(task_id, "submitted", 0, None)
-            self._queue.append(task_id)
-            self._cond.notify()
+            self._enqueue(task_id, FIRST_QUEUE_CLASS, submitted_at)
         return task_id
 
     def task_dir(self, task_id: str) -> Path | None:
@@ -280,14 +407,14 @@ class TaskQueue:
             return None
         with self._cond:
             status = td.read_status(directory)
-            position = (
-                self._queue.index(task_id) + 1 if task_id in self._queue else None
-            )
+            order = self._queue_order()
+            position = order.index(task_id) + 1 if task_id in order else None
         return {
             "task_id": task_id,
             "state": status["state"],
             "stage": status["stage"],
             "progress": status["progress"],
+            "attempt": status.get("attempt", 0),
             "queue_position": position,
             "error": status.get("error"),
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
@@ -300,30 +427,49 @@ class TaskQueue:
     def _run_forever(self) -> None:
         while True:
             with self._cond:
-                while not self._queue:
+                while not self._waiting or self._cleanup_blocked:
                     self._cond.wait()
-                task_id = self._queue.popleft()
+                task_id = self._queue_order()[0]
+                place = self._waiting.pop(task_id)
             try:
+                # The processes of its earlier attempts go first.
+                if not self._reap(task_id):
+                    with self._cond:
+                        self._waiting[task_id] = place
+                    continue
                 self._run_attempt(task_id)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
                 self._fail_after_error(task_id, e)
 
-    def _fail_after_error(self, task_id: str, error: Exception) -> None:
-        """Fail a task whose attempt the service itself could not carry through.
+    def _fail_after_error(
+        self, task_id: str, error: Exception, what: str = "翻译服务处理任务出错"
+    ) -> None:
+        """Fail a task the service itself could not carry through; ``what`` begins the reason.
 
-        Best effort and never raises: the runner goes on with the next task.
-        The task's report.json is written if it can be.
+        Best effort and never raises: the service goes on with the other
+        tasks. The task's report.json is written if it can be; a status file
+        that cannot be read is replaced by one that says the task failed.
         """
-        reason = f"翻译服务处理任务出错：{type(error).__name__}: {error}"
+        reason = f"{what}：{type(error).__name__}: {error}"
         print(f"task={task_id}: {reason}", file=sys.stderr, flush=True)
         traceback.print_exception(error, file=sys.stderr)
         directory = self.tasks_dir / task_id
         with self._cond:
+            self._waiting.pop(task_id, None)
             try:
-                status = td.read_status(directory)
-                if status["state"] in td.TERMINAL_STATES:
+                try:
+                    status = td.read_status(directory)
+                except (OSError, ValueError):
+                    status = {"stage": td.QUEUED_STAGE, "progress": 0}
+                    td.write_json(directory / td.STATUS_FILE, status)
+                if status.get("state") in td.TERMINAL_STATES:
                     return
-                changes = {"state": "failed", "error": reason, "failure_category": "retryable"}
+                changes = {
+                    "state": "failed",
+                    "error": reason,
+                    "failure_category": "retryable",
+                    "consecutive_interruptions": 0,
+                }
                 if status.get("attempts"):
                     attempts = [dict(a) for a in status["attempts"]]
                     attempts[-1].update(ended_at=time.time(), outcome="failed", reason=reason)
@@ -352,7 +498,7 @@ class TaskQueue:
                     "stage": FIRST_STAGE,
                     "progress": 0,
                     "attempt": attempt,
-                    "process_marker": f"{task_id}:{attempt}",
+                    "process_marker": processes.marker(task_id, attempt),
                     "attempts": status.get("attempts", [])
                     + [
                         {
@@ -433,7 +579,10 @@ class TaskQueue:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     pass_fds=(write_end,),
-                    env={**os.environ, MARK_ENV: marker},
+                    env={**os.environ, processes.MARK_ENV: marker},
+                    # Its own process group: it ends the group when the
+                    # service is gone (zotero_translate.worker).
+                    start_new_session=True,
                 )
         except BaseException:
             os.close(read_end)
@@ -458,6 +607,8 @@ class TaskQueue:
                     break
         exit_code = process.wait()
         if result is None:
+            # It may have left processes behind; a failed reap blocks scheduling.
+            self._reap(task_id)
             return _failure(f"论文任务进程异常退出（退出码 {exit_code}）", "retryable")
         return result
 
@@ -489,6 +640,11 @@ class TaskQueue:
         elif report["outcome"] != "succeeded":
             raise ValueError(f"未知的结局 {report['outcome']!r}")
         return report
+
+
+def _submitted_at(directory: Path) -> float:
+    """When the task was submitted (its ``task.json``), the sort key within a queue class."""
+    return float(json.loads((directory / "task.json").read_text("utf-8"))["submitted_at"])
 
 
 def _failure(error: str, category: str) -> dict:
