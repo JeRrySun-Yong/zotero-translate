@@ -317,6 +317,43 @@ def test_run_writes_the_records_next_to_its_report(tmp_path):
     assert {r["endpoint"] for r in records} == {"argon"}
 
 
+def _late_algorithm(body: dict) -> str:
+    time.sleep(LATE_SECONDS)
+    return pseudo_translate_algorithm(body)
+
+
+def test_a_run_that_fails_with_an_algorithm_send_in_flight_reports_that_send(tmp_path):
+    # As in the service test below: the algorithm send outlives the failure
+    # report; ``run`` must still bring report.json up to date as it exits.
+    with FakeModel() as model:
+        model.respond("algorithm", _late_algorithm)
+        model.inject_error("401", kind="translate_batch")
+        output_dir = tmp_path / "out"
+        command = Path(sys.executable).with_name("zotero-translate")
+        timeout = LATE_SECONDS * 2  # see the service test below
+        flash = write_env_file(tmp_path, model.base_url, FAKE_API_KEY, FAKE_MODEL_NAME, timeout)
+        argon = write_env_file(tmp_path, model.base_url, FAKE_ARGON_API_KEY, None, timeout)
+        result = subprocess.run(
+            [str(command), "run", str(FIXTURES / "maliang-p6.pdf"), "--output-dir", str(output_dir)]
+            + ["--env-file", str(flash), "--argon-env-file", str(argon)]
+            + ["--data-dir", str(tmp_path / "data")],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert model.requests_of("algorithm")
+
+    assert result.returncode == 1, result.stderr[-2000:]
+    report = json.loads((output_dir / "report.json").read_text("utf-8"))
+    assert report["state"] == "failed"
+    records = load_records(output_dir / REQUESTS_FILE)
+    failed = [r for r in records if r["http_status"] == 401]
+    late = [r for r in records if r["kind"] == "algorithm_translation" and r["send"] == 1]
+    assert len(failed) == 1 and len(late) == 1, records
+    assert late[0]["started_at"] < failed[0]["started_at"]
+    assert report["requests"] == records
+
+
 def _attempt_dir(service, task_id: str, attempt: int) -> Path:
     return service.data_dir / "tasks" / task_id / "attempts" / str(attempt)
 
@@ -435,12 +472,8 @@ def test_a_send_that_ends_after_the_task_failed_is_in_the_attempts_records(tmp_p
     # failure report while the algorithm send is still in flight, and that
     # send ends afterwards. (Closing the client then leaves that send waiting
     # until the request timeout, which is therefore small here; see backlog.)
-    def late_algorithm(body: dict) -> str:
-        time.sleep(LATE_SECONDS)
-        return pseudo_translate_algorithm(body)
-
     with FakeModel() as model:
-        model.respond("algorithm", late_algorithm)
+        model.respond("algorithm", _late_algorithm)
         model.inject_error("401", kind="translate_batch")
         service = launch_service(model, tmp_path, request_timeout=LATE_SECONDS * 2)
         try:

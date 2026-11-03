@@ -9,9 +9,10 @@ so that a killed process leaves every finished record behind.
 (``zotero_translate.task_report``) carries the records as ``requests`` as far
 as they existed when it was written; sends can still end after that (a
 failed paper task does not wait for its algorithm requests). When an attempt
-ends, the translation service replaces the report's ``requests`` with the
-file's (``load_records``). Under ``run`` nobody does: there the file is
-complete and ``report.json`` may lack the sends that ended after it.
+ends (after the worker process has exited), the translation service
+replaces the report's ``requests`` with the file's (``load_records``).
+``run`` does the same with ``update_report`` as its process exits, after
+Python has joined the threads still sending.
 
 A record has these fields:
 
@@ -39,6 +40,7 @@ No record holds a message, an answer, a header or an API key.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -109,6 +111,25 @@ class RequestLog:
             self.records.append(record)
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(line + "\n")
+
+
+def update_report(report_path: Path) -> None:
+    """Set the ``requests`` of the task report at ``report_path`` to its ``requests.jsonl``.
+
+    Nothing happens when the report does not exist or does not parse.
+    """
+    report_path = Path(report_path)
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    records = load_records(report_path.parent / REQUESTS_FILE)
+    if not isinstance(report, dict) or report.get("requests") == records:
+        return
+    report["requests"] = records
+    tmp = report_path.with_suffix(f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, report_path)
 
 
 def load_records(path: Path) -> list[dict]:

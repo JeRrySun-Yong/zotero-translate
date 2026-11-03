@@ -2,8 +2,10 @@
 
 ``serve`` starts the translation service. ``run`` runs one paper task on a
 PDF directly, without Zotero or the service, and writes ``mono.pdf``,
-``dual.pdf``, ``dossier.json``, ``terms.json`` and ``report.json`` into the
-output directory. Both share the
+``dual.pdf``, ``dossier.json``, ``terms.json``, ``report.json`` and
+``requests.jsonl`` (the request records) into the output directory; as it
+exits, ``report.json``'s ``requests`` is brought up to date with
+``requests.jsonl``. Both share the
 model response cache in the data directory.
 
 ``serve`` exits with 2 when an environment file is missing or incomplete
@@ -18,6 +20,7 @@ status must read ``$?`` before anything else runs: in
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import shutil
 import sys
@@ -81,6 +84,7 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
 def _run(args) -> int:
     from zotero_translate.paper_task import PaperTaskError
     from zotero_translate.paper_task import run_paper_task
+    from zotero_translate.request_log import update_report
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
@@ -98,6 +102,11 @@ def _run(args) -> int:
     if source.resolve() != args.pdf.resolve():
         shutil.copyfile(args.pdf, source)
     started = time.monotonic()
+    # A failed paper task does not wait for its algorithm requests, so sends
+    # can end after the report is written. Python joins those threads at
+    # exit before it runs atexit handlers: then the report's request records
+    # are made whole from requests.jsonl.
+    atexit.register(update_report, args.output_dir / "report.json")
     try:
         result = run_paper_task(
             source,
