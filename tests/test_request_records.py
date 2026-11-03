@@ -125,18 +125,19 @@ def test_an_answer_the_caller_rejects_and_a_permanent_http_error_are_recorded(tm
     with FakeModel() as model:
         model.inject_error("401", kind="other", nth=3)
         client, log = _client(model, tmp_path)
+        log.stage = "生成本篇术语清单"
         seen = []
 
         def validate(content: str) -> None:
             seen.append(content)
             if len(seen) == 1:
-                log.stage = "排版"  # the paper task moves on while the request runs
+                log.stage = "解析版面"  # the paper task moves on while the request runs
                 raise ValueError("first answer rejected")
 
         try:
-            client.complete(MESSAGES, validate=validate, kind="review")
+            client.complete(MESSAGES, validate=validate, kind="gloss_rewrite")
             try:
-                client.complete([{"role": "user", "content": "other"}], kind="review")
+                client.complete([{"role": "user", "content": "other"}], kind="gloss_rewrite")
             except ModelCallError as e:
                 assert e.category == "permanent"
             else:
@@ -151,7 +152,37 @@ def test_an_answer_the_caller_rejects_and_a_permanent_http_error_are_recorded(tm
         (2, 1, "flash", "http_error", 401),
     ]
     # The stage is the one the request started in, for each of its sends.
-    assert [r["stage"] for r in records] == ["翻译与审校", "翻译与审校", "排版"]
+    assert [r["stage"] for r in records] == ["生成本篇术语清单", "生成本篇术语清单", "解析版面"]
+
+
+def test_an_engine_request_is_recorded_in_the_translation_stage_while_progress_lags(tmp_path):
+    with FakeModel() as model:
+        client, log = _client(model, tmp_path)
+        log.stage = "解析版面"  # the progress reports have not caught up with the engine
+        try:
+            for n, kind in enumerate(
+                [
+                    "translation_batch",
+                    "single_paragraph",
+                    "review",
+                    "algorithm_translation",
+                    "algorithm_review",
+                    "dossier",
+                ]
+            ):
+                client.complete([{"role": "user", "content": f"request {n}"}], kind=kind)
+        finally:
+            client.close()
+
+    stages = {r["kind"]: r["stage"] for r in load_records(log.path)}
+    assert stages == {
+        "translation_batch": "翻译与审校",
+        "single_paragraph": "翻译与审校",
+        "review": "翻译与审校",
+        "algorithm_translation": "翻译与审校",
+        "algorithm_review": "翻译与审校",
+        "dossier": "解析版面",  # not an engine request: the paper task's stage
+    }
 
 
 def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tmp_path):
@@ -288,6 +319,19 @@ def test_a_torn_last_line_is_skipped(tmp_path):
     path.write_text('{"request": 1}\n{"request": 2, "kin', encoding="utf-8")
     assert load_records(path) == [{"request": 1}]
     assert load_records(tmp_path / "missing.jsonl") == []
+
+
+def test_a_last_line_cut_inside_a_utf8_sequence_loses_only_itself(tmp_path):
+    path = tmp_path / REQUESTS_FILE
+    first = json.dumps({"request": 1, "stage": "翻译与审校"}, ensure_ascii=False) + "\n"
+    second = json.dumps({"request": 2, "stage": "排版"}, ensure_ascii=False) + "\n"
+    cut = json.dumps({"request": 3, "stage": "翻译与审校"}, ensure_ascii=False).encode("utf-8")
+    cut = cut[: cut.index("译".encode("utf-8")) + 1]  # mid-JSON and mid-character
+    path.write_bytes((first + second).encode("utf-8") + cut)
+    assert load_records(path) == [
+        {"request": 1, "stage": "翻译与审校"},
+        {"request": 2, "stage": "排版"},
+    ]
 
 
 def test_run_writes_the_records_next_to_its_report(tmp_path):

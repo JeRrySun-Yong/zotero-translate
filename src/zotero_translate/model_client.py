@@ -72,6 +72,7 @@ from typing import Callable
 
 import httpx
 
+from zotero_translate.request_log import KIND_STAGES
 from zotero_translate.request_log import RequestLog
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import PipelineSettings
@@ -197,7 +198,9 @@ class ModelClient:
         key = ResponseCache.key(body)
         log = self.request_log
         request = log.new_request() if log is not None else None
-        stage = log.stage if log is not None else None  # the stage the request starts in
+        # The stage the request belongs to: by its kind for the engine's
+        # requests, else the paper task's stage as the request starts.
+        stage = KIND_STAGES.get(kind, log.stage) if log is not None else None
 
         def record(
             endpoint: str | None, model: str, send: int | None, timing: _SendTiming, result: str

@@ -20,8 +20,9 @@ A record has these fields:
 - ``request``: the logical request, numbered from 1 within the attempt; the
   resends of one request share it;
 - ``kind``: the request kind, one of ``KINDS``;
-- ``stage``: the stage of the paper task when the request started (its
-  resends keep it);
+- ``stage``: the stage the request belongs to: for the engine's requests
+  the translation stage (``KIND_STAGES``), for the others the paper task's
+  stage when the request started (its resends keep it);
 - ``page``: the page (1-based) the request comes from, or None;
 - ``send``: which send of the request this is, from 1; None for a cache hit;
 - ``endpoint`` and ``model``: the endpoint role (``flash`` or ``argon``) and
@@ -44,6 +45,8 @@ import os
 import threading
 from pathlib import Path
 
+from zotero_translate.paper_task import TRANSLATE_STAGE
+
 REQUESTS_FILE = "requests.jsonl"
 
 # Request kinds: the paper dossier, the paper's term list, the promoted
@@ -62,6 +65,22 @@ KINDS = (
     "algorithm_review",
     "single_paragraph",
 )
+
+# The stage of the requests the engine sends: it sends them all while it
+# translates. The paper task's progress reports lag behind the engine (a
+# batch can go out while they still say layout parsing), so these kinds take
+# their stage from here; the others, sent while the paper task itself is in
+# their stage, take it from the progress reports (``RequestLog.stage``).
+KIND_STAGES = {
+    kind: TRANSLATE_STAGE
+    for kind in (
+        "translation_batch",
+        "review",
+        "algorithm_translation",
+        "algorithm_review",
+        "single_paragraph",
+    )
+}
 
 # Send results: an answer the caller accepted; a send cut off at the request
 # timeout; an HTTP error status; a network error before an answer; an answer
@@ -133,16 +152,20 @@ def update_report(report_path: Path) -> None:
 
 
 def load_records(path: Path) -> list[dict]:
-    """The records in a request log file; [] if it is missing; a torn last line is skipped."""
+    """The records in a request log file; [] if it is missing.
+
+    Each line is decoded on its own, so a line cut short by a killed process,
+    even in the middle of a UTF-8 sequence, loses only itself.
+    """
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        lines = Path(path).read_bytes().split(b"\n")
     except OSError:
         return []
     records = []
     for line in lines:
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError included
             continue
         if isinstance(record, dict):
             records.append(record)
