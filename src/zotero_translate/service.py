@@ -57,8 +57,10 @@ new attempt starts.
 
 Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
-summary of all attempts (number, start and end time, outcome, reason). The
-service writes one line per task event to standard output (the service log):
+summary of all attempts (number, start and end time, outcome, reason). An
+attempt's request records are appended to ``attempts/<n>/requests.jsonl`` as
+they happen; when the worker wrote no report, the service takes them from
+there (``zotero_translate.request_log``). The service writes one line per task event to standard output (the service log):
 submitted, started, interrupted, requeued, waiting for a rerun, rerun
 started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
 
@@ -117,6 +119,8 @@ from zotero_translate import __version__
 from zotero_translate import processes
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import FIRST_STAGE
+from zotero_translate.request_log import REQUESTS_FILE
+from zotero_translate.request_log import load_records
 from zotero_translate.settings import model_cache_dir
 
 HOST = "127.0.0.1"
@@ -431,6 +435,10 @@ class TaskQueue:
                 "state": "failed" if outcome == "failed" else None,
                 "error": reason,
             }
+        if "requests" not in report:
+            # The worker never wrote its report: its request records, as far
+            # as they were appended before it ended.
+            report["requests"] = load_records(path.parent / REQUESTS_FILE)
         if outcome == "interrupted":
             # The attempt did not run to its end: say so, invent nothing.
             report.update(complete=False, incomplete_reason=reason)

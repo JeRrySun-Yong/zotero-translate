@@ -22,7 +22,10 @@ algorithms (pseudocode) found: pages, numbered lines, result ("translated" or
 "kept_source") and the reason for keeping the source, each translated row's
 source and final text, and each line's number, start x and glyphs, and the
 translated text the mono PDF draws but does not show (``lost_text``: page
-and text of each piece; see ``zotero_translate.lost_text``).
+and text of each piece; see ``zotero_translate.lost_text``), and one record
+per model request send and per cache hit (``requests``; see
+``zotero_translate.request_log``, which appends them to ``requests.jsonl``
+next to the report as they happen).
 """
 
 from __future__ import annotations
@@ -66,6 +69,8 @@ class TaskReport:
         self.lost_text: list[dict] | None = None
 
     def enter_stage(self, stage: str) -> None:
+        if self.models.request_log is not None:
+            self.models.request_log.stage = stage
         if self._stages and self._stages[-1][0] == stage:
             return
         now = time.monotonic()
@@ -132,6 +137,9 @@ class TaskReport:
             "kept_source_algorithms": self.algorithms.kept_source,
             "algorithms": self.algorithms.report(),
             "lost_text": self.lost_text,
+            "requests": (
+                list(self.models.request_log.records) if self.models.request_log else []
+            ),
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 

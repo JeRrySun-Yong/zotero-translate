@@ -96,8 +96,10 @@ def run_paper_task(
     percentage (0-99) that never decreases. The paper dossier and the
     paper's term list are written to ``output_dir`` before translation; the
     task report is written to ``report_path`` (default
-    ``output_dir/report.json``) whether the task succeeds or fails. The
-    service passes the attempt number, which the report then carries.
+    ``output_dir/report.json``) whether the task succeeds or fails, and
+    its request records are appended to ``requests.jsonl`` next to it as
+    they happen. The service passes the attempt number, which the report
+    and the records then carry.
     """
     from babeldoc.docvision.doclayout import DocLayoutModel
     from babeldoc.format.pdf import high_level
@@ -119,6 +121,8 @@ def run_paper_task(
     from zotero_translate.lost_text import report_lost_text
     from zotero_translate.model_client import ModelCallError
     from zotero_translate.model_client import PipelineModels
+    from zotero_translate.request_log import REQUESTS_FILE
+    from zotero_translate.request_log import RequestLog
     from zotero_translate.review import BatchReviewer
     from zotero_translate.review import KeptSource
     from zotero_translate.task_report import TaskReport
@@ -128,7 +132,10 @@ def run_paper_task(
 
     output_dir = Path(output_dir)
     engine_output = output_dir / "engine-output"
-    models = PipelineModels(settings)
+    report_path = Path(report_path or output_dir / REPORT_FILE)
+    # The request records, appended next to the report as they happen.
+    request_log = RequestLog(report_path.parent / REQUESTS_FILE, attempt)
+    models = PipelineModels(settings, request_log)
     client = models.flash
     kept = KeptSource()
     algorithms = AlgorithmDetector()
@@ -230,8 +237,9 @@ def run_paper_task(
         report.fail(f"论文任务出错：{type(e).__name__}: {e}")
         raise
     finally:
-        report.write(report_path or output_dir / REPORT_FILE)
+        report.write(report_path)
         models.close()
+        request_log.close()
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):

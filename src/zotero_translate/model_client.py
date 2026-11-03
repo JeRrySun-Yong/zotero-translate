@@ -49,6 +49,12 @@ its remaining attempts to argon (its ``fallback``):
   concurrency limit, which all argon requests share.
 - A forwarded answer is cached under the flash request, so a resubmitted
   paper finds it without sending anything.
+
+Request latency records (spec section 7, ``zotero_translate.request_log``):
+with a ``request_log``, every send gets a record when it ends, and so does
+every answer from the cache. A send's time is counted from the moment it
+goes out, after its concurrency slot is taken, to its end; the wait for the
+slot is recorded on its own.
 """
 
 from __future__ import annotations
@@ -64,6 +70,7 @@ from typing import Callable
 
 import httpx
 
+from zotero_translate.request_log import RequestLog
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import PipelineSettings
 
@@ -107,16 +114,30 @@ class _NetworkError(_RetryableError):
     """One attempt could not reach the endpoint, or lost the connection before an answer."""
 
 
+class _HttpError(_RetryableError):
+    """One attempt got an HTTP error status that a resend may fix (400, 429, 5xx)."""
+
+
 class ModelClient:
     """One endpoint's client: its model, its concurrency limit, the cache and the retries.
 
     ``fallback`` is the client that takes over a request after
     ``FORWARD_AFTER_TIMEOUTS`` timeouts in a row; None never forwards.
+    ``role`` (``flash`` or ``argon``) names the endpoint in the request
+    records, which go to ``request_log``; None records nothing.
     """
 
-    def __init__(self, settings: ModelSettings, fallback: ModelClient | None = None):
+    def __init__(
+        self,
+        settings: ModelSettings,
+        fallback: ModelClient | None = None,
+        role: str | None = None,
+        request_log: RequestLog | None = None,
+    ):
         self.settings = settings
         self.fallback = fallback
+        self.role = role
+        self.request_log = request_log
         self._cache = ResponseCache(settings.cache_dir) if settings.cache_dir else None
         self._slots = threading.BoundedSemaphore(settings.concurrency)
         self._lock = threading.Lock()
@@ -145,22 +166,48 @@ class ModelClient:
         return self.settings.model
 
     def complete(
-        self, messages: list[dict], validate: Validator | None = None, page: int | None = None
+        self,
+        messages: list[dict],
+        validate: Validator | None = None,
+        page: int | None = None,
+        kind: str | None = None,
     ) -> str:
         """Return the stripped message content of one chat completion.
 
         ``validate(content)`` raises if the content is unusable (e.g. it does
         not parse); such an answer is retried like a failed request and is
         never cached. ``page`` (1-based) is where the request comes from; the
-        task report lists it when the request is forwarded.
+        task report lists it when the request is forwarded. ``kind`` is the
+        request kind of its records (``request_log.KINDS``).
         """
         body = self._body(messages)
         key = ResponseCache.key(body)
+        log = self.request_log
+        request = log.new_request() if log is not None else None
+
+        def record(client: ModelClient, send: int | None, timing: dict, result: str) -> None:
+            if log is not None:
+                log.append(
+                    request=request,
+                    kind=kind,
+                    stage=log.stage,
+                    page=page,
+                    send=send,
+                    endpoint=client.role,
+                    model=client.model,
+                    started_at=timing.get("started_at"),
+                    slot_wait_seconds=round(timing.get("slot_wait_seconds", 0.0), 3),
+                    seconds=round(timing.get("seconds", 0.0), 3),
+                    result=result,
+                    http_status=timing.get("http_status"),
+                )
+
         if self._cache is not None:
             cached = self._cache.get(key)
             if cached is not None:
                 with self._lock:
                     self.cache_hits += 1
+                record(self, None, {"started_at": time.time()}, "cache_hit")
                 return cached
         attempts = 1 + self.settings.max_retries
         answered = False
@@ -168,8 +215,13 @@ class ModelClient:
         timeouts_in_a_row = 0
         forwarded_from = None  # the attempt number of the first attempt on the fallback
         for attempt in range(1, attempts + 1):
+            timing: dict = {}
             try:
-                content = target._send(target_body)
+                try:
+                    content = target._send(target_body, timing)
+                except ModelCallError:  # an HTTP error no resend fixes
+                    record(target, attempt, timing, "http_error")
+                    raise
                 if validate is not None:
                     try:
                         validate(content)
@@ -177,6 +229,7 @@ class ModelClient:
                         answered = True
                         raise _RetryableError(f"无法解析管线模型的响应：{e}") from e
             except _RetryableError as e:
+                record(target, attempt, timing, _result_of(e))
                 timeouts_in_a_row = timeouts_in_a_row + 1 if isinstance(e, _Timeout) else 0
                 if attempt == attempts:
                     where = (
@@ -211,6 +264,7 @@ class ModelClient:
                     self.retry_count += 1
                 time.sleep(wait)
                 continue
+            record(target, attempt, timing, "succeeded")
             if self._cache is not None:
                 self._cache.put(key, content)
             return content
@@ -231,8 +285,18 @@ class ModelClient:
             "reasoning_effort": self.settings.reasoning_effort,
         }
 
-    def _send(self, body: dict) -> str:
+    def _send(self, body: dict, timing: dict) -> str:
+        """Send ``body`` once; fill ``timing`` with the send's record fields as it goes.
+
+        ``timing`` gets ``slot_wait_seconds`` once a concurrency slot is
+        taken, ``started_at`` as the send goes out, ``seconds`` at its end and
+        ``http_status`` if a response arrived; it is filled when this raises, too.
+        """
+        waiting = time.monotonic()
         with self._slots:
+            sent = time.monotonic()
+            timing["slot_wait_seconds"] = sent - waiting
+            timing["started_at"] = time.time()
             with self._lock:
                 self._in_flight += 1
                 self.request_count += 1
@@ -250,16 +314,18 @@ class ModelClient:
             except httpx.TransportError as e:
                 raise _NetworkError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
             finally:
+                timing["seconds"] = time.monotonic() - sent
                 with self._lock:
                     self._in_flight -= 1
+        timing["http_status"] = status_code
         if status_code == 429:
-            raise _RetryableError("管线模型限流（HTTP 429）" + self._body_excerpt(data))
+            raise _HttpError("管线模型限流（HTTP 429）" + self._body_excerpt(data))
         if status_code >= 500:
-            raise _RetryableError(
+            raise _HttpError(
                 f"管线模型服务端出错（HTTP {status_code}）" + self._body_excerpt(data)
             )
         if status_code == 400:
-            raise _RetryableError("管线模型拒绝了请求（HTTP 400）" + self._body_excerpt(data))
+            raise _HttpError("管线模型拒绝了请求（HTTP 400）" + self._body_excerpt(data))
         if status_code in (401, 403):
             raise ModelCallError(
                 f"管线模型拒绝了请求（HTTP {status_code}）", category="permanent"
@@ -336,16 +402,31 @@ class ModelClient:
         self._http.close()
 
 
+def _result_of(error: _RetryableError) -> str:
+    """The record result of a send that failed with ``error``."""
+    if isinstance(error, _Timeout):
+        return "timeout"
+    if isinstance(error, _NetworkError):
+        return "network_error"
+    if isinstance(error, _HttpError):
+        return "http_error"
+    return "invalid_answer"
+
+
 class PipelineModels:
     """The paper task's two clients (ADR 0004).
 
     ``argon`` takes the paper dossier, the term list and the promoted glosses
-    request; ``flash`` takes everything else and forwards to ``argon``.
+    request; ``flash`` takes everything else and forwards to ``argon``. Both
+    write their request records to ``request_log``.
     """
 
-    def __init__(self, settings: PipelineSettings):
-        self.argon = ModelClient(settings.argon)
-        self.flash = ModelClient(settings.flash, fallback=self.argon)
+    def __init__(self, settings: PipelineSettings, request_log: RequestLog | None = None):
+        self.request_log = request_log
+        self.argon = ModelClient(settings.argon, role="argon", request_log=request_log)
+        self.flash = ModelClient(
+            settings.flash, fallback=self.argon, role="flash", request_log=request_log
+        )
 
     def endpoints(self) -> dict[str, ModelClient]:
         return {"flash": self.flash, "argon": self.argon}

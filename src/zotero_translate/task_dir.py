@@ -2,7 +2,9 @@
 
 The task directory holds the source PDF, the status file, the two output
 PDFs, the paper dossier, the paper's term list, the task report, the log,
-and ``attempts/<n>/report.json``, the task report of each attempt. Only the
+and ``attempts/<n>/report.json``, the task report of each attempt, with
+``attempts/<n>/requests.jsonl``, its request records as they happened
+(``zotero_translate.request_log``). Only the
 translation service writes the status file (``zotero_translate.service``);
 the paper task subprocess reports its progress and result to the service.
 """

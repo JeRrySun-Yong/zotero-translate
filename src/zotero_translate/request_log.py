@@ -1,0 +1,111 @@
+"""Request latency records: one line per model request send of an attempt (spec section 7).
+
+The pipeline model client appends a record for every send, and one for every
+answer taken from the cache, to ``requests.jsonl`` next to the attempt's task
+report, as soon as the send ends: one JSON object per line, flushed at once,
+so that a killed process leaves every finished record behind. The task
+report (``zotero_translate.task_report``) carries them as ``requests``; for
+an attempt whose report the worker never wrote, the translation service
+reads them from this file (``load_records``).
+
+A record has these fields:
+
+- ``attempt``: the attempt number (None for ``run``);
+- ``request``: the logical request, numbered from 1 within the attempt; the
+  resends of one request share it;
+- ``kind``: the request kind, one of ``KINDS``;
+- ``stage``: the stage of the paper task when the request was made;
+- ``page``: the page (1-based) the request comes from, or None;
+- ``send``: which send of the request this is, from 1; None for a cache hit;
+- ``endpoint`` and ``model``: the endpoint role (``flash`` or ``argon``) and
+  model name the send went to;
+- ``started_at``: the wall-clock time (Unix seconds) the send went out;
+- ``slot_wait_seconds``: the time spent waiting for a concurrency slot;
+- ``seconds``: from sending to the end (last byte read, timeout, error);
+  0 for a cache hit;
+- ``result``: one of ``RESULTS``; with ``http_error``, ``http_status`` is the
+  status code (it is set whenever a response arrived).
+
+No record holds a message, an answer, a header or an API key.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+
+REQUESTS_FILE = "requests.jsonl"
+
+# Request kinds: the paper dossier, the paper's term list, the promoted
+# glosses request (释义补写), the gloss rewrite (释义重写), a translation
+# batch, the review of a batch, the translation of an algorithm and its
+# review, and the engine's one-paragraph translation after a failed batch
+# (逐段重译).
+KINDS = (
+    "dossier",
+    "term_list",
+    "promoted_glosses",
+    "gloss_rewrite",
+    "translation_batch",
+    "review",
+    "algorithm_translation",
+    "algorithm_review",
+    "single_paragraph",
+)
+
+# Send results: an answer the caller accepted; a send cut off at the request
+# timeout; an HTTP error status; a network error before an answer; an answer
+# that was empty, did not parse or that the caller's check rejected; an
+# answer from the cache (no send).
+RESULTS = ("succeeded", "timeout", "http_error", "network_error", "invalid_answer", "cache_hit")
+
+
+class RequestLog:
+    """The request records of one attempt, appended to ``path`` as they happen."""
+
+    def __init__(self, path: Path, attempt: int | None = None):
+        self.path = Path(path)
+        self.attempt = attempt
+        self.stage: str | None = None  # set by the task report as the paper task moves on
+        self.records: list[dict] = []
+        self._lock = threading.Lock()
+        self._next_request = 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", encoding="utf-8")  # a new attempt starts empty
+
+    def new_request(self) -> int:
+        """The number of a new logical request."""
+        with self._lock:
+            self._next_request += 1
+            return self._next_request
+
+    def append(self, **fields) -> None:
+        record = {"attempt": self.attempt, **fields}
+        line = json.dumps(record, ensure_ascii=False)
+        with self._lock:
+            self.records.append(record)
+            if not self._file.closed:
+                self._file.write(line + "\n")
+                self._file.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._file.close()
+
+
+def load_records(path: Path) -> list[dict]:
+    """The records in a request log file; [] if it is missing; a torn last line is skipped."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
