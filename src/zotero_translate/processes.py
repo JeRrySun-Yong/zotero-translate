@@ -108,7 +108,8 @@ def group_members() -> list[psutil.Process]:
     group = os.getpgid(0)
     members = []
     for process in psutil.process_iter():
-        if process.pid == me:
+        # PID 0 (the kernel on macOS) would name this process's own group to getpgid.
+        if process.pid in (0, me):
             continue
         try:
             if os.getpgid(process.pid) == group and _alive(process):
