@@ -24,6 +24,7 @@ from tests.conftest import EXCERPT
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FakeModel
+from tests.test_basic_term_promotion import HARNESS_GLOSS
 from tests.test_basic_term_promotion import MODEL_TERMS
 from tests.test_basic_term_promotion import rewriting_responder
 

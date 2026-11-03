@@ -55,7 +55,7 @@ def reap(task_id: str) -> None:
     """End every process of ``task_id``; raise ``ReapError`` if that cannot be confirmed."""
     try:
         processes = marked_processes(task_id)
-    except Exception as e:  # noqa: BLE001 - the scan itself failed
+    except Exception as e:  # the scan itself failed
         raise ReapError(f"无法扫描进程：{type(e).__name__}: {e}") from e
     survivors = end(processes)
     if survivors:
