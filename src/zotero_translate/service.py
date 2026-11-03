@@ -90,8 +90,10 @@ method like the engine (``zotero_translate.worker``).
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
-error of the service itself while it carries an attempt through fails that
-task with a readable reason, and the runner goes on with the next task.
+error of the service itself while an attempt runs ends that attempt as a
+retryable failure (an automatic rerun while reruns remain), an error at any
+other point fails the task, both with a readable reason, and the runner goes
+on with the next task.
 """
 
 from __future__ import annotations
@@ -571,7 +573,13 @@ class TaskQueue:
     def _fail_after_error(
         self, task_id: str, error: Exception, what: str = "翻译服务处理任务出错"
     ) -> None:
-        """Fail a task the service itself could not carry through; ``what`` begins the reason.
+        """End a task the service itself could not carry through; ``what`` begins the reason.
+
+        An error while an attempt was running ends that attempt as a
+        ``retryable`` failure (spec section 1): the task waits for an
+        automatic rerun while reruns remain, else it fails. An error at any
+        other point (taking over at startup, queueing a due rerun, starting
+        an attempt) fails the task.
 
         Best effort and never raises: the service goes on with the other
         tasks. The task's report.json is written if it can be; a status file
@@ -591,12 +599,17 @@ class TaskQueue:
                     td.write_json(directory / td.STATUS_FILE, status)
                 if status.get("state") in td.TERMINAL_STATES:
                     return
+                reruns_used = status.get("reruns_used", 0)
+                rerun = status.get("state") == "running" and reruns_used < RERUNS_MAX
                 changes = {
                     "state": "failed",
                     "error": reason,
                     "failure_category": "retryable",
                     "consecutive_interruptions": 0,
                 }
+                if rerun:
+                    due = time.time() + _rerun_waits()[reruns_used]
+                    changes.update(state="waiting_rerun", next_attempt_at=due)
                 if status.get("attempts"):
                     attempts = [dict(a) for a in status["attempts"]]
                     attempts[-1].update(ended_at=time.time(), outcome="failed", reason=reason)
@@ -608,7 +621,9 @@ class TaskQueue:
                     except Exception:  # noqa: BLE001 - the state matters more than the report
                         traceback.print_exc()
                 td.write_status(directory, **changes)
-                self._log(task_id, "failed", status.get("attempt", 0), reason)
+                self._log(task_id, changes["state"], status.get("attempt", 0), reason)
+                if rerun:
+                    self._schedule_rerun(task_id, changes["next_attempt_at"], _submitted_at(directory))
             except Exception:  # noqa: BLE001 - nothing more can be done for this task
                 traceback.print_exc()
 
