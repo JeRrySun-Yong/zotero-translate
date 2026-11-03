@@ -57,6 +57,14 @@ test("a finished row says how many paragraphs and algorithms kept their source t
   );
 });
 
+test("a running row names the attempt when the service has started more than one", () => {
+  const running = { title: "A", state: "running", stage: "翻译与审校", progress: 10 };
+  assert.equal(core.taskRow({ ...running, attempt: 1 }).status, "翻译中");
+  assert.equal(core.taskRow(running).status, "翻译中");
+  assert.equal(core.taskRow({ ...running, attempt: 2 }).status, "翻译中（第 2 次尝试）");
+  assert.equal(core.taskRow({ title: "A", state: "queued", attempt: 2, queuePosition: 1 }).status, "排队中（第 1 位）");
+});
+
 test("a failed row shows the reason", () => {
   const row = core.taskRow({ title: "A", state: "failed", stage: "翻译与审校", progress: 30, error: "管线模型请求连续失败（第 2 页附近）" });
   assert.equal(row.status, "失败：管线模型请求连续失败（第 2 页附近）");

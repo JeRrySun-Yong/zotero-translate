@@ -57,12 +57,16 @@ var ZoteroTranslateCore = (() => {
   };
 
   /** What the task window shows for one task; a waiting task shows its
-   *  place in the service's queue, a finished one how many paragraphs and
-   *  algorithms kept their source text. */
+   *  place in the service's queue, a running one its attempt when the
+   *  service has started more than one (after a restart), a finished one
+   *  how many paragraphs and algorithms kept their source text. */
   function taskRow(task) {
     let status = STATUS_LABELS[task.state] || task.state;
     if (task.state === "queued" && task.queuePosition) {
       status = `${status}（第 ${task.queuePosition} 位）`;
+    }
+    if (task.state === "running" && task.attempt > 1) {
+      status = `${status}（第 ${task.attempt} 次尝试）`;
     }
     if (task.state === "done") {
       const kept = [];
