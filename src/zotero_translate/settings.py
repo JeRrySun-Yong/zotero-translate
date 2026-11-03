@@ -136,7 +136,10 @@ def _read_endpoint_file(env_file: Path, missing_reason: str) -> dict[str, str]:
     env_file = Path(env_file)
     if not env_file.is_file():
         raise SettingsError(f"{missing_reason}：{env_file}")
-    values = read_env_file(env_file)
+    try:
+        values = read_env_file(env_file)
+    except (OSError, UnicodeDecodeError) as e:  # unreadable or not UTF-8: a settings error too
+        raise SettingsError(f"读不了环境文件 {env_file}：{type(e).__name__}") from e
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not values.get(k)]
     if missing:
         raise SettingsError(f"环境文件 {env_file} 缺少：{', '.join(missing)}")

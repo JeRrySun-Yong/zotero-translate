@@ -19,8 +19,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import FAKE_API_KEY
 from tests.conftest import launch_service
 from tests.conftest import stop_service
+from tests.conftest import write_env_file
 from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import FakeModel
 
@@ -97,6 +99,31 @@ def test_a_credential_error_fails_the_task_at_once_without_a_rerun(
     assert _events(service, task_id) == ["提交", "开始", "失败"]
     assert _status_file(service, task_id)["failure_category"] == "permanent"
     assert service.report(task_id)["failure_category"] == "permanent"
+
+
+@pytest.mark.parametrize("breakage", ["not UTF-8", "unreadable"])
+def test_settings_the_worker_cannot_read_fail_the_task_at_once_without_a_rerun(tmp_path, breakage):
+    with FakeModel() as model:
+        env_file = write_env_file(tmp_path, model.base_url, FAKE_API_KEY)
+        service = launch_service(model, tmp_path, env_file=env_file, env={WAITS: "0.5,0.5"})
+        try:
+            # The service checked the file at startup; the worker cannot read it.
+            if breakage == "not UTF-8":
+                env_file.write_bytes(b"OPENAI_BASE_URL=\xff\xfe\n")
+            else:
+                env_file.chmod(0)
+            task_id = service.submit()
+            final = service.wait(task_id)
+            time.sleep(1.5)  # past both waits
+
+            assert final["state"] == "failed"
+            assert service.status(task_id)["state"] == "failed"
+            assert service.status(task_id)["reruns_used"] == 0
+            assert _status_file(service, task_id)["failure_category"] == "permanent"
+            assert _events(service, task_id) == ["提交", "开始", "失败"]
+        finally:
+            env_file.chmod(0o600)
+            stop_service(service)
 
 
 def test_several_failed_batches_with_one_401_fail_the_task_as_permanent(
