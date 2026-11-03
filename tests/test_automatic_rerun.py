@@ -126,6 +126,7 @@ def test_a_credential_error_stays_permanent_when_a_report_cannot_be_written(
     time.sleep(1.5)  # past both waits: nothing is rerun
 
     assert final["state"] == "failed"
+    assert "HTTP 401" in final["error"], final["error"]  # the attempt's own reason
     assert service.status(task_id)["state"] == "failed"
     assert service.status(task_id)["reruns_used"] == 0
     assert _status_file(service, task_id)["failure_category"] == "permanent"
