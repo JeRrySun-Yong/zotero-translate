@@ -20,6 +20,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -41,11 +42,24 @@ TERMINAL_STATES = {"succeeded", "failed"}
 class ServiceClient:
     """Talks to a running translation service over HTTP, like the plugin does."""
 
-    def __init__(self, base_url: str, process: subprocess.Popen, data_dir: Path):
+    def __init__(
+        self,
+        base_url: str,
+        process: subprocess.Popen,
+        data_dir: Path,
+        output: list[str] | None = None,
+    ):
         self.base_url = base_url
         self.process = process
         self.data_dir = data_dir
+        # Every line the service has written to its standard output so far,
+        # the ``{"url": ...}`` line first; filled by a reader thread.
+        self.output = output if output is not None else []
         self.http = httpx.Client(base_url=base_url, timeout=30)
+
+    def log_lines(self, task_id: str) -> list[str]:
+        """The service log lines (task events) about one task."""
+        return [line for line in self.output if f"task={task_id} " in line]
 
     def submit(self, pdf: Path = EXCERPT, filename: str | None = None) -> str:
         response = self.http.post(
@@ -122,6 +136,7 @@ def launch_service(
     argon: FakeModel | str | None = None,
     argon_env_file: Path | None = None,
     argon_concurrency: int | None = None,
+    env: dict[str, str] | None = None,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
@@ -131,6 +146,9 @@ def launch_service(
     and ``FAKE_ARGON_API_KEY``. Pass ``data_dir`` to restart on earlier data,
     ``request_timeout`` (seconds) to replace the 480-second request timeout of
     both endpoints, and ``argon_concurrency`` to replace argon's limit of 16.
+    ``env`` adds environment variables to the service's (the ``ZT_TEST_``
+    settings). The client's ``output`` collects the service's whole standard
+    output.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
     if env_file is None:
@@ -143,24 +161,10 @@ def launch_service(
             root, base_url, FAKE_ARGON_API_KEY, None, request_timeout, argon_concurrency
         )
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "zotero_translate",
-            "serve",
-            "--port",
-            "0",
-            "--data-dir",
-            str(data_dir),
-            "--env-file",
-            str(env_file),
-            "--argon-env-file",
-            str(argon_env_file),
-            "--concurrency",
-            str(concurrency),
-        ],
+        serve_command(env_file, argon_env_file, data_dir, concurrency=concurrency),
         stdout=subprocess.PIPE,
         text=True,
+        env={**os.environ, **(env or {})},
         # Its own process group, inherited by its task subprocesses: one
         # signal ends them all, and a Ctrl-C reaches only pytest, which then
         # tears the fixtures down.
@@ -168,7 +172,35 @@ def launch_service(
     )
     line = process.stdout.readline()
     assert line, "service exited before announcing its address"
-    return ServiceClient(json.loads(line)["url"], process, data_dir)
+    output = [line.rstrip("\n")]
+    # Keep reading, so that the service never blocks on a full pipe.
+    threading.Thread(
+        target=lambda: output.extend(line.rstrip("\n") for line in process.stdout),
+        daemon=True,
+    ).start()
+    return ServiceClient(json.loads(line)["url"], process, data_dir, output)
+
+
+def serve_command(
+    env_file: Path, argon_env_file: Path, data_dir: Path, port: int = 0, concurrency: int = 4
+) -> list[str]:
+    """The command line that starts the translation service; port 0 picks a free port."""
+    return [
+        sys.executable,
+        "-m",
+        "zotero_translate",
+        "serve",
+        "--port",
+        str(port),
+        "--data-dir",
+        str(data_dir),
+        "--env-file",
+        str(env_file),
+        "--argon-env-file",
+        str(argon_env_file),
+        "--concurrency",
+        str(concurrency),
+    ]
 
 
 def stop_service(client: ServiceClient) -> None:
@@ -247,7 +279,7 @@ def fake_model():
 @pytest.fixture
 def start_service(tmp_path):
     """Return ``start(fake_model, concurrency=4, data_dir=None, request_timeout=None, argon=None,
-    argon_concurrency=None)``; see ``launch_service``."""
+    argon_concurrency=None, env=None)``; see ``launch_service``."""
     started: list[ServiceClient] = []
 
     def start(
@@ -257,6 +289,7 @@ def start_service(tmp_path):
         request_timeout: float | None = None,
         argon=None,
         argon_concurrency: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> ServiceClient:
         client = launch_service(
             model,
@@ -266,6 +299,7 @@ def start_service(tmp_path):
             request_timeout=request_timeout,
             argon=argon,
             argon_concurrency=argon_concurrency,
+            env=env,
         )
         started.append(client)
         return client
