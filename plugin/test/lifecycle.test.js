@@ -419,6 +419,28 @@ test("the query's time limit covers reading the body, and the request is aborted
   assert.deepEqual(env.status(), [DISCONNECTED(1)]);
 });
 
+test("an error status whose body never ends is aborted, and the task's next query starts only after", async () => {
+  // A request is settled once its signal is aborted; the fake body never ends on its own.
+  const signals = [];
+  const unsettledAtStart = [];
+  const env = await submitted({
+    [QUERY("t1")]: (options) => {
+      unsettledAtStart.push(signals.filter((signal) => !signal.aborted).length);
+      signals.push(options.signal);
+      return new Response(new ReadableStream({ start() {} }), { status: 503 });
+    },
+  });
+  await env.clock.advance(2000); // t=2s: the first query gets the 503 headers
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, true);
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, 2000);
+
+  await env.clock.advance(30000);
+  assert.deepEqual(env.times(QUERY("t1")), [2000, 12000, 22000, 32000]);
+  assert.deepEqual(unsettledAtStart, [0, 0, 0, 0]); // each query started with no earlier one still open
+  assert.ok(signals.every((signal) => signal.aborted));
+});
+
 test("a task whose service does not answer does not hold up the queries of other tasks", async () => {
   const env = environment({ routes: { [QUERY("t2")]: status("running") } });
   env.lifecycle.start();

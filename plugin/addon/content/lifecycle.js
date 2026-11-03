@@ -318,8 +318,9 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** One request to the service, with `limitMs` to send it and read the
      *  whole answer: {status, body}, where body is read(response) for a
-     *  success status and null otherwise. Throws Unreachable when there is
-     *  no connection, the time limit passes, or the answer cannot be read. */
+     *  success status and null otherwise (that body is not read; the request
+     *  is aborted). Throws Unreachable when there is no connection, the time
+     *  limit passes, or the answer cannot be read. */
     async function exchange(url, options, limitMs, read) {
       const abort = new AbortController();
       let timer;
@@ -350,7 +351,11 @@ var ZoteroTranslateLifecycle = (() => {
       try {
         return await Promise.race([answer, timeLimit]);
       } finally {
+        // The exchange ends with its request settled: a body read in full is
+        // unaffected; a body not read (an error status) or not read in time
+        // is aborted, so no request of the task stays open.
         clock.clearTimeout(timer);
+        abort.abort();
       }
     }
 
