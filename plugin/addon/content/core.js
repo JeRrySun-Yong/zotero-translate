@@ -56,14 +56,26 @@ var ZoteroTranslateCore = (() => {
     done: "已挂回",
     failed: "失败",
   };
+  const UNFINISHED_STATES = new Set(["submitting", "queued", "running", "waiting_rerun", "attaching"]);
 
   /** What the task window shows for one task; a waiting task shows its
    *  place in the service's queue, a running one its attempt when the
    *  service has started more than one (after a restart or a rerun), one
    *  waiting for an automatic rerun about how many minutes are left, which
    *  rerun comes next and why the last attempt failed, a finished one how
-   *  many paragraphs and algorithms kept their source text. */
-  function taskRow(task) {
+   *  many paragraphs and algorithms kept their source text. An unfinished
+   *  task whose service has not answered since `disconnectedSince` says it
+   *  waits for the service, and for how many whole minutes so far (at `now`). */
+  function taskRow(task, now) {
+    const row = {
+      title: task.title,
+      stage: task.stage || "",
+      percent: task.progress == null ? "" : `${task.progress}%`,
+    };
+    if (task.disconnectedSince != null && UNFINISHED_STATES.has(task.state)) {
+      const minutes = Math.max(0, Math.floor((now - task.disconnectedSince) / 60000));
+      return { ...row, status: `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）` };
+    }
     let status = STATUS_LABELS[task.state] || task.state;
     if (task.state === "queued" && task.queuePosition) {
       status = `${status}（第 ${task.queuePosition} 位）`;
@@ -90,12 +102,7 @@ var ZoteroTranslateCore = (() => {
         status = `${status}（${kept.join("，")}）`;
       }
     }
-    return {
-      title: task.title,
-      stage: task.stage || "",
-      percent: task.progress == null ? "" : `${task.progress}%`,
-      status: task.state === "failed" && task.error ? `${status}：${task.error}` : status,
-    };
+    return { ...row, status: task.state === "failed" && task.error ? `${status}：${task.error}` : status };
   }
 
   return { OUTPUTS, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow };
