@@ -571,13 +571,18 @@ class TaskQueue:
                 self._fail_after_error(task_id, e)
 
     def _fail_after_error(
-        self, task_id: str, error: Exception, what: str = "翻译服务处理任务出错"
+        self,
+        task_id: str,
+        error: Exception,
+        what: str = "翻译服务处理任务出错",
+        category: str = "retryable",
     ) -> None:
         """End a task the service itself could not carry through; ``what`` begins the reason.
 
         An error while an attempt was running ends that attempt as a
-        ``retryable`` failure (spec section 1): the task waits for an
-        automatic rerun while reruns remain, else it fails. An error at any
+        failure of ``category`` (``retryable`` unless the attempt's own
+        result was ``permanent``): a retryable one waits for an automatic
+        rerun while reruns remain (spec section 1), else the task fails. An error at any
         other point (taking over at startup, queueing a due rerun, starting
         an attempt) fails the task.
 
@@ -600,11 +605,15 @@ class TaskQueue:
                 if status.get("state") in td.TERMINAL_STATES:
                     return
                 reruns_used = status.get("reruns_used", 0)
-                rerun = status.get("state") == "running" and reruns_used < RERUNS_MAX
+                rerun = (
+                    category == "retryable"
+                    and status.get("state") == "running"
+                    and reruns_used < RERUNS_MAX
+                )
                 changes = {
                     "state": "failed",
                     "error": reason,
-                    "failure_category": "retryable",
+                    "failure_category": category,
                     "consecutive_interruptions": 0,
                 }
                 if rerun:
@@ -662,6 +671,15 @@ class TaskQueue:
         except Exception as e:  # noqa: BLE001 - reported as this attempt's failure
             result = _failure(f"无法启动论文任务：{e}", "retryable")
         _test_pause(PAUSE_BEFORE_ADOPT, task_id, attempt)
+        try:
+            self._adopt_result(task_id, attempt, result)
+        except Exception as e:  # noqa: BLE001 - the attempt's own category stands
+            failed = result["outcome"] == "failed"
+            category = result.get("category", "retryable") if failed else "retryable"
+            self._fail_after_error(task_id, e, category=category)
+
+    def _adopt_result(self, task_id: str, attempt: int, result: dict) -> None:
+        """End the attempt with its result: succeeded, waiting for a rerun, or failed."""
         if result["outcome"] == "succeeded":
             self._adopt(
                 task_id,

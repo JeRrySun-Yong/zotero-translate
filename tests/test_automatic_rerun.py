@@ -103,6 +103,35 @@ def test_a_credential_error_fails_the_task_at_once_without_a_rerun(
     assert service.report(task_id)["failure_category"] == "permanent"
 
 
+@pytest.mark.parametrize("unwritable", ["attempt report", "task report"])
+def test_a_credential_error_stays_permanent_when_a_report_cannot_be_written(
+    tmp_path, fake_model, start_service, unwritable
+):
+    # The worker's attempt report, or the service's task report, cannot be
+    # written: the 401 must still fail the task at once, without a rerun.
+    pauses = _pauses(tmp_path)
+    fake_model.inject_error("401", kind="dossier")
+    pause = PAUSE_AFTER_MARKER if unwritable == "attempt report" else "ZT_TEST_PAUSE_BEFORE_ADOPT"
+    service = start_service(fake_model, env={WAITS: "0.5,0.5", pause: str(pauses)})
+
+    task_id = service.submit()
+    flag = _wait_for_file(pauses / f"{task_id}-1.paused")
+    task_dir = service.data_dir / "tasks" / task_id
+    if unwritable == "attempt report":
+        (task_dir / "attempts" / "1" / "report.json").mkdir(parents=True)
+    else:
+        (task_dir / "report.json").mkdir()
+    flag.unlink()
+    final = service.wait(task_id)
+    time.sleep(1.5)  # past both waits: nothing is rerun
+
+    assert final["state"] == "failed"
+    assert service.status(task_id)["state"] == "failed"
+    assert service.status(task_id)["reruns_used"] == 0
+    assert _status_file(service, task_id)["failure_category"] == "permanent"
+    assert _events(service, task_id) == ["提交", "开始", "失败"]
+
+
 @pytest.mark.parametrize("breakage", ["not UTF-8", "unreadable", "directory unreadable"])
 def test_settings_the_worker_cannot_read_fail_the_task_at_once_without_a_rerun(tmp_path, breakage):
     env_dir = tmp_path / "env"

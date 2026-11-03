@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -230,8 +231,16 @@ def run_paper_task(
         report.fail(f"论文任务出错：{type(e).__name__}: {e}")
         raise
     finally:
-        report.write(report_path or output_dir / REPORT_FILE)
-        models.close()
+        try:
+            report.write(report_path or output_dir / REPORT_FILE)
+        except Exception:
+            # A report that cannot be written must not replace the task's
+            # own failure (and its category) on the way out.
+            if report.state != "failed":
+                raise
+            traceback.print_exc()
+        finally:
+            models.close()
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):
