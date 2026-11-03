@@ -178,7 +178,7 @@ class TaskQueue:
             try:
                 self._restore_task(task_id)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the service
-                self._fail_after_error(task_id, e, "翻译服务恢复任务出错")
+                self._fail_after_error(task_id, e, "翻译服务接管任务出错")
 
     def _restore_task(self, task_id: str) -> None:
         directory = self.tasks_dir / task_id

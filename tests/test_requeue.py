@@ -447,7 +447,7 @@ def test_a_task_that_cannot_be_restored_fails_alone_and_the_others_are_restored(
             for task_id in (broken, unreadable):
                 status = restarted.status(task_id)
                 assert status["state"] == "failed"
-                assert "翻译服务恢复任务出错" in status["error"], status["error"]
+                assert "翻译服务接管任务出错" in status["error"], status["error"]
                 assert _events(restarted, task_id)[-1] == "失败"
             final = restarted.wait(waiting)
             assert final["state"] == "succeeded", final["error"]
