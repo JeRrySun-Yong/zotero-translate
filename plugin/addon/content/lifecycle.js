@@ -6,9 +6,10 @@
  *
  * When the service cannot be reached (no connection, no full answer within
  * the request's time limit, a non-success status other than 404, an answer
- * that cannot be read), an unfinished task does not fail: it records when
- * the disconnection began, shows how long it has lasted, and tries again
- * every 10 seconds instead of 2. The disconnection ends with a full answer
+ * that cannot be read or has a task state the plugin does not act on), an
+ * unfinished task does not fail: it keeps its state, records when the
+ * disconnection began, shows how long it has lasted, and tries again every
+ * 10 seconds instead of 2. The disconnection ends with a full answer
  * to a query, or when both PDFs are attached. Only the service's `failed`,
  * or a 404 for the task or one of its PDFs, fails the task. An upload that
  * cannot reach the service fails at once, naming the service address.
@@ -51,6 +52,9 @@ var ZoteroTranslateLifecycle = (() => {
   const UPLOAD_LIMIT_MS = 120000;
   const QUERY_LIMIT_MS = 10000;
   const DOWNLOAD_LIMIT_MS = 120000; // each PDF
+  // Task states in the service's answers that the plugin acts on; any other
+  // answer counts as one that cannot be read (a disconnection).
+  const KNOWN_SERVICE_STATES = ["queued", "running", "waiting_rerun", "succeeded", "failed"];
   // Unfinished states (core.js): saved for restarts, and a source PDF with a
   // task in one of them is not submitted again.
   const ACTIVE_STATES = Core.UNFINISHED_STATES;
@@ -367,10 +371,13 @@ var ZoteroTranslateLifecycle = (() => {
       return taskId;
     }
 
+    /** The service's answer about a task; one without a state the plugin
+     *  acts on cannot be read. `cancelled` is not among them until the
+     *  plugin handles cancellation, so it keeps the task as it is. */
     async function readStatus(response) {
       const status = await response.json();
-      if (typeof status?.state !== "string") {
-        throw new Error("没有任务状态");
+      if (!KNOWN_SERVICE_STATES.includes(status?.state)) {
+        throw new Error(`未知的任务状态：${JSON.stringify(status?.state)}`);
       }
       return status;
     }

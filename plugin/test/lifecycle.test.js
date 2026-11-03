@@ -334,6 +334,9 @@ const UNANSWERED_QUERIES = {
   "HTTP 403": () => json(403, { detail: "forbidden" }),
   "an answer that is not JSON": () => new Response("<html>", { status: 200 }),
   "JSON without a task state": () => json(200, { detail: "?" }),
+  "an empty task state": () => status(""),
+  "a task state the plugin does not know": () => status("paused"),
+  "the state cancelled (handled from ticket 08 on)": () => status("cancelled"),
 };
 
 for (const [name, route] of Object.entries(UNANSWERED_QUERIES)) {
@@ -379,6 +382,24 @@ test("the disconnection shows how long it has lasted, keeps its start, and ends 
   const last = env.times(QUERY("t1")).at(-1);
   await env.clock.advance(2000);
   assert.equal(env.times(QUERY("t1")).at(-1), last + 2000); // every 2 seconds again
+});
+
+test("after an answer with a state the plugin does not know, a valid answer brings back polling every 2 seconds", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running", { progress: 10 }) });
+  await env.clock.advance(2000); // t=2s: running
+  env.routes[QUERY("t1")] = status("paused");
+  await env.clock.advance(2000); // t=4s: not understood
+  assert.equal(env.lifecycle.tasks[0].state, "running");
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, 4000);
+  assert.deepEqual(JSON.parse(env.saved).map((t) => [t.taskId, t.state]), [["t1", "running"]]);
+
+  env.routes[QUERY("t1")] = status("running", { progress: 50 });
+  await env.clock.advance(10000); // t=14s
+  assert.deepEqual(env.status(), ["翻译中"]);
+  assert.equal(env.lifecycle.tasks[0].progress, 50);
+  assert.equal(env.lifecycle.tasks[0].disconnectedSince, null);
+  await env.clock.advance(4000);
+  assert.deepEqual(env.times(QUERY("t1")), [2000, 4000, 14000, 16000, 18000]);
 });
 
 test("a disconnection's start survives a Zotero restart", async () => {
