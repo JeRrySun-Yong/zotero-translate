@@ -34,7 +34,8 @@ var ZoteroTranslate = {
       },
       serviceUrl: () => Zotero.Prefs.get(this.SERVICE_URL_PREF, true),
       readSource: (task) => this._readSource(task),
-      importAttachment: (task, output) => this._importAttachment(task, output),
+      attachTarget: (task) => this._attachTarget(task),
+      importAttachment: (task, target, output) => this._importAttachment(task, target, output),
       store: {
         load: () => Zotero.Prefs.get(this.TASKS_PREF, true),
         save: (value) => Zotero.Prefs.set(this.TASKS_PREF, value, true),
@@ -148,11 +149,21 @@ var ZoteroTranslate = {
     return IOUtils.read(path);
   },
 
-  /** Import one output PDF: as a child attachment of the original item, or,
-   *  for a standalone PDF, as a standalone attachment in the same library and
-   *  collections. Zotero copies the file into its own storage. */
-  async _importAttachment(task, output) {
-    const target = task.itemID ? { parentItemID: task.itemID } : await this._standaloneTarget(task);
+  /** Where the PDFs go: the original item (child attachments), or, for a
+   *  standalone PDF, its library and collections (standalone attachments). */
+  async _attachTarget(task) {
+    if (task.itemID) {
+      return { parentItemID: task.itemID };
+    }
+    const source = await Zotero.Items.getAsync(task.sourceItemID);
+    if (!source) {
+      throw new Error("找不到原 PDF 附件");
+    }
+    return { libraryID: source.libraryID, collections: source.getCollections() };
+  },
+
+  /** Import one output PDF at the target; Zotero copies the file into its own storage. */
+  async _importAttachment(task, target, output) {
     const dir = PathUtils.join(PathUtils.tempDir, "zotero-translate", task.taskId);
     await IOUtils.makeDirectory(dir);
     try {
@@ -162,14 +173,6 @@ var ZoteroTranslate = {
     } finally {
       await IOUtils.remove(dir, { recursive: true });
     }
-  },
-
-  async _standaloneTarget(task) {
-    const source = await Zotero.Items.getAsync(task.sourceItemID);
-    if (!source) {
-      throw new Error("找不到原 PDF 附件");
-    }
-    return { libraryID: source.libraryID, collections: source.getCollections() };
   },
 
   openTaskWindow(window) {

@@ -20,6 +20,7 @@ function environment({ routes = {}, saved = null } = {}) {
     saved,
     timers: [],
     routes,
+    missingSources: [],
   };
   env.lifecycle = createTaskLifecycle({
     fetch: async (url, options = {}) => {
@@ -40,9 +41,18 @@ function environment({ routes = {}, saved = null } = {}) {
     },
     serviceUrl: () => SERVICE,
     readSource: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
-    importAttachment: async (task, output) => {
+    attachTarget: async (task) => {
+      if (task.itemID) {
+        return { parentItemID: task.itemID };
+      }
+      if (env.missingSources.includes(task.sourceItemID)) {
+        throw new Error("找不到原 PDF 附件");
+      }
+      return { libraryID: 1, collections: [] };
+    },
+    importAttachment: async (task, target, output) => {
       env.imports.push({
-        itemID: task.itemID,
+        target,
         title: output.title,
         fileName: output.fileName,
         text: new TextDecoder().decode(output.bytes),
@@ -89,8 +99,8 @@ test("after the service succeeds, both PDFs are attached to the original item", 
   await env.lifecycle.submit(SOURCE);
   await env.lifecycle.pollTasks();
   assert.deepEqual(env.imports, [
-    { itemID: 10, title: "中文译文", fileName: "AutoDesign-中文译文.pdf", text: "mono pdf" },
-    { itemID: 10, title: "双语对照", fileName: "AutoDesign-双语对照.pdf", text: "dual pdf" },
+    { target: { parentItemID: 10 }, title: "中文译文", fileName: "AutoDesign-中文译文.pdf", text: "mono pdf" },
+    { target: { parentItemID: 10 }, title: "双语对照", fileName: "AutoDesign-双语对照.pdf", text: "dual pdf" },
   ]);
   assert.deepEqual(env.status(), ["已挂回"]);
   assert.equal(env.saved, "[]"); // a finished task is no longer saved
@@ -181,4 +191,70 @@ test("a connection failure on upload fails at once and names the service address
   env.lifecycle.start();
   await env.lifecycle.submit(SOURCE);
   assert.deepEqual(env.status(), [`失败：无法连接翻译服务（服务地址：${SERVICE}）`]);
+});
+
+test("a standalone PDF whose source is gone fails before anything is downloaded", async () => {
+  const standalone = { ...SOURCE, itemID: null };
+  const env = environment({ routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  await env.lifecycle.submit(standalone);
+  env.missingSources.push(standalone.sourceItemID);
+  await env.lifecycle.pollTasks();
+  assert.deepEqual(env.status(), ["失败：找不到原 PDF 附件"]);
+  assert.deepEqual(env.requests, [`POST ${SERVICE}/tasks`, `GET ${SERVICE}/tasks/t1`]);
+  assert.deepEqual(env.imports, []);
+});
+
+test("a standalone PDF's two outputs go to the same library and collections", async () => {
+  const env = environment({ routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  await env.lifecycle.submit({ ...SOURCE, itemID: null });
+  await env.lifecycle.pollTasks();
+  assert.deepEqual(env.imports.map((i) => i.target), [{ libraryID: 1, collections: [] }, { libraryID: 1, collections: [] }]);
+  assert.equal(env.imports[0].target, env.imports[1].target); // resolved once
+});
+
+test("a task waiting for an automatic rerun is polled, counts as unfinished and is saved across restarts", async () => {
+  const waiting = () => status("waiting_rerun", { reruns_used: 0, reruns_max: 2, next_attempt_in_seconds: 60, error: "HTTP 500" });
+  const env = environment({
+    routes: { [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }), [`GET ${SERVICE}/tasks/t1`]: waiting },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.lifecycle.pollTasks();
+  assert.equal(env.lifecycle.tasks[0].state, "waiting_rerun");
+  await env.lifecycle.pollTasks();
+  assert.equal(env.requests.filter((r) => r === `GET ${SERVICE}/tasks/t1`).length, 2);
+
+  await env.lifecycle.submit(SOURCE);
+  assert.equal(env.lifecycle.tasks.length, 1);
+  assert.deepEqual(env.lifecycle.notices, ["AutoDesign：已在排队或翻译中，本次提交已忽略"]);
+
+  assert.deepEqual(JSON.parse(env.saved).map((t) => t.state), ["waiting_rerun"]);
+  const after = environment({ saved: env.saved, routes: { [`GET ${SERVICE}/tasks/t1`]: waiting } });
+  after.lifecycle.start();
+  await after.timers[0].fn();
+  assert.deepEqual(after.requests, [`GET ${SERVICE}/tasks/t1`]);
+  assert.match(after.status()[0], /^等待自动重跑/);
+});
+
+test("a poll tick while the previous poll is still waiting for an answer does nothing", async () => {
+  let answer;
+  const env = environment({
+    routes: {
+      [`POST ${SERVICE}/tasks`]: json(201, { task_id: "t1" }),
+      [`GET ${SERVICE}/tasks/t1`]: () => new Promise((resolve) => (answer = resolve)),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  const first = env.timers[0].fn();
+  await env.timers[0].fn();
+  await env.timers[0].fn();
+  assert.equal(env.requests.filter((r) => r === `GET ${SERVICE}/tasks/t1`).length, 1);
+  answer(status("running"));
+  await first;
+  assert.deepEqual(env.status(), ["翻译中"]);
+  env.timers[0].fn(); // the next tick after the answer polls again (and waits; not awaited)
+  assert.equal(env.requests.filter((r) => r === `GET ${SERVICE}/tasks/t1`).length, 2);
 });

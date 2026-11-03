@@ -10,8 +10,11 @@
  * - clock: {now(), setInterval(fn, ms), clearInterval(id)}: current time and timers;
  * - serviceUrl(): the service address currently set;
  * - readSource(task): the source PDF's bytes; throws with the reason when unreadable;
- * - importAttachment(task, output): import one PDF, output = {file, title,
- *   fileName, bytes}, as an attachment next to the task's source PDF;
+ * - attachTarget(task): where the task's PDFs go (the original item, or the
+ *   standalone source PDF's library and collections), resolved once before
+ *   any download; throws with the reason when the source is gone;
+ * - importAttachment(task, target, output): import one PDF, output = {file, title,
+ *   fileName, bytes}, as an attachment at that target;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
  * - debug(message), logError(error): logging.
  *
@@ -30,7 +33,17 @@ var ZoteroTranslateLifecycle = (() => {
   // Task fields saved for restarts.
   const SAVED_FIELDS = ["sourceItemID", "itemID", "title", "sourceFileName", "serviceUrl", "taskId", "state"];
 
-  function createTaskLifecycle({ fetch, clock, serviceUrl, readSource, importAttachment, store, debug, logError }) {
+  function createTaskLifecycle({
+    fetch,
+    clock,
+    serviceUrl,
+    readSource,
+    attachTarget,
+    importAttachment,
+    store,
+    debug,
+    logError,
+  }) {
     let nextKey = 1;
     let savedValue = null;
     let pollTimer = null;
@@ -39,7 +52,8 @@ var ZoteroTranslateLifecycle = (() => {
     const lifecycle = {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
       // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
-      // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error}
+      // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
+      // keptSourceParagraphs, keptSourceAlgorithms}
       tasks: [],
       // Why items of the latest submission were skipped; shown in the task window.
       notices: [],
@@ -71,8 +85,7 @@ var ZoteroTranslateLifecycle = (() => {
       /** Upload a source PDF, {sourceItemID, itemID, title, sourceFileName},
        *  unless it already has an unfinished task. */
       async submit(source) {
-        if (activeTask(source.sourceItemID)) {
-          lifecycle.notice(`${source.title}：已在排队或翻译中，本次提交已忽略`);
+        if (skippedAsActive(source.sourceItemID, source.title)) {
           return;
         }
         const task = {
@@ -92,8 +105,7 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || task.state !== "failed") {
           return;
         }
-        if (activeTask(task.sourceItemID)) {
-          lifecycle.notice(`${task.title}：已在排队或翻译中，本次提交已忽略`);
+        if (skippedAsActive(task.sourceItemID, task.title)) {
           return;
         }
         await upload(task);
@@ -124,8 +136,13 @@ var ZoteroTranslateLifecycle = (() => {
       },
     };
 
-    function activeTask(sourceItemID) {
-      return lifecycle.tasks.find((t) => t.sourceItemID === sourceItemID && ACTIVE_STATES.includes(t.state));
+    /** A source PDF with an unfinished task is not submitted again; the notice says so. */
+    function skippedAsActive(sourceItemID, title) {
+      const active = lifecycle.tasks.some((t) => t.sourceItemID === sourceItemID && ACTIVE_STATES.includes(t.state));
+      if (active) {
+        lifecycle.notice(`${title}：已在排队或翻译中，本次提交已忽略`);
+      }
+      return active;
     }
 
     /** Send the task's source PDF to the service address currently set. */
@@ -209,8 +226,10 @@ var ZoteroTranslateLifecycle = (() => {
       changed();
     }
 
-    /** Download both PDFs, then import them one by one; existing attachments stay as they are. */
+    /** Resolve where the PDFs go, download both, then import them one by one;
+     *  existing attachments stay as they are. */
     async function attachOutputs(task) {
+      const target = await attachTarget(task);
       const outputs = [];
       for (const output of Core.OUTPUTS) {
         const url = Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "files", output.file);
@@ -226,7 +245,7 @@ var ZoteroTranslateLifecycle = (() => {
         });
       }
       for (const output of outputs) {
-        await importAttachment(task, output);
+        await importAttachment(task, target, output);
       }
     }
 
@@ -268,7 +287,7 @@ var ZoteroTranslateLifecycle = (() => {
     return lifecycle;
   }
 
-  return { POLL_INTERVAL_MS, SAVED_FIELDS, createTaskLifecycle };
+  return { createTaskLifecycle };
 })();
 
 if (typeof module !== "undefined") {
