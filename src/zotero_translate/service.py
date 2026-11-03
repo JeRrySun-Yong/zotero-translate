@@ -238,7 +238,9 @@ class TaskQueue:
             self._enqueue(task_id, status["queue_class"], status["queue_key"])
         elif state == "waiting_rerun":
             # Its saved due time stands; a rerun already queued is "queued".
-            self._schedule_rerun(task_id, status["next_attempt_at"], _submitted_at(directory))
+            self._schedule_rerun(
+                task_id, float(status["next_attempt_at"]), _submitted_at(directory)
+            )
         elif state == "running":
             interruptions = status.get("consecutive_interruptions", 0) + 1
             if interruptions < MAX_INTERRUPTIONS:
