@@ -228,7 +228,7 @@ def test_process_marker_is_saved_before_the_worker_starts_and_passed_to_it(tmp_p
             stop_service(service)
 
 
-def test_worker_result_waits_for_the_service_and_a_stale_one_is_dropped(tmp_path):
+def test_worker_does_not_write_state_and_a_restart_still_fails_the_task(tmp_path):
     pauses = tmp_path / "pauses"
     pauses.mkdir()
     with FakeModel() as model:
