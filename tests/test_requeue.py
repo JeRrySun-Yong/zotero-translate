@@ -332,9 +332,11 @@ def test_a_killed_workers_child_is_reaped_before_the_new_attempt_starts(tmp_path
         try:
             task_id = service.submit()
             worker, children = _worker_and_children(service, task_id)
-            # The worker dies first, so it cannot end its child; then the service.
+            # The service dies first, so no live service reaps the child; then
+            # the worker, before its orphan check (every 0.5 s) can end the child.
+            service.process.kill()
             worker.kill()
-            _kill(service)
+            service.process.wait(timeout=10)
             time.sleep(1)
             assert all(_alive(pid) for pid in children), "the child did not outlive its worker"
 
