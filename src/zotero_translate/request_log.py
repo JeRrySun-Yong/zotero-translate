@@ -14,11 +14,13 @@ A record has these fields:
 - ``request``: the logical request, numbered from 1 within the attempt; the
   resends of one request share it;
 - ``kind``: the request kind, one of ``KINDS``;
-- ``stage``: the stage of the paper task when the request was made;
+- ``stage``: the stage of the paper task when the request started (its
+  resends keep it);
 - ``page``: the page (1-based) the request comes from, or None;
 - ``send``: which send of the request this is, from 1; None for a cache hit;
 - ``endpoint`` and ``model``: the endpoint role (``flash`` or ``argon``) and
-  model name the send went to;
+  model name the send went to; for a cache hit, those that gave the cached
+  answer (the client's own for an entry cached before these records);
 - ``started_at``: the wall-clock time (Unix seconds) the send went out;
 - ``slot_wait_seconds``: the time spent waiting for a concurrency slot;
 - ``seconds``: from sending to the end (last byte read, timeout, error);
@@ -56,9 +58,18 @@ KINDS = (
 
 # Send results: an answer the caller accepted; a send cut off at the request
 # timeout; an HTTP error status; a network error before an answer; an answer
-# that was empty, did not parse or that the caller's check rejected; an
-# answer from the cache (no send).
-RESULTS = ("succeeded", "timeout", "http_error", "network_error", "invalid_answer", "cache_hit")
+# that was empty, did not parse or that the caller's check rejected; any other
+# error that ended the send (e.g. a closed client), which the caller then
+# sees unchanged; an answer from the cache (no send).
+RESULTS = (
+    "succeeded",
+    "timeout",
+    "http_error",
+    "network_error",
+    "invalid_answer",
+    "error",
+    "cache_hit",
+)
 
 
 class RequestLog:

@@ -13,18 +13,26 @@ fake model's requests.
 """
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
+from tests.conftest import EXCERPT
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
+from tests.conftest import FAKE_MODEL_NAME
 from tests.conftest import launch_service
 from tests.conftest import stop_service
+from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 from zotero_translate.model_client import PipelineModels
+from zotero_translate.model_client import ResponseCache
 from zotero_translate.request_log import KINDS
 from zotero_translate.request_log import REQUESTS_FILE
 from zotero_translate.request_log import RESULTS
@@ -120,6 +128,7 @@ def test_an_answer_the_caller_rejects_and_a_permanent_http_error_are_recorded(tm
         def validate(content: str) -> None:
             seen.append(content)
             if len(seen) == 1:
+                log.stage = "排版"  # the paper task moves on while the request runs
                 raise ValueError("first answer rejected")
 
         try:
@@ -134,11 +143,43 @@ def test_an_answer_the_caller_rejects_and_a_permanent_http_error_are_recorded(tm
             client.close()
             log.close()
 
-    assert _summary(load_records(log.path)) == [
+    records = load_records(log.path)
+    assert _summary(records) == [
         (1, 1, "flash", "invalid_answer", 200),
         (1, 2, "flash", "succeeded", 200),
         (2, 1, "flash", "http_error", 401),
     ]
+    # The stage is the one the request started in, for each of its sends.
+    assert [r["stage"] for r in records] == ["翻译与审校", "翻译与审校", "排版"]
+
+
+def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tmp_path):
+    error = RuntimeError("client closed")
+    with FakeModel() as model:
+        client, log = _client(model, tmp_path)
+
+        def broken_post(body: dict):
+            time.sleep(0.05)
+            raise error
+
+        client._post = broken_post
+        try:
+            with pytest.raises(RuntimeError) as raised:
+                client.complete(MESSAGES, page=5, kind="review")
+        finally:
+            client.close()
+            log.close()
+
+    assert raised.value is error
+    (record,) = load_records(log.path)
+    assert (record["request"], record["send"], record["result"], record["http_status"]) == (
+        1,
+        1,
+        "error",
+        None,
+    )
+    assert record["seconds"] >= 0.05 and record["started_at"] > 0
+    assert client._in_flight == 0  # the send's slot and count were given back
 
 
 def test_a_cache_hit_gets_a_record_with_time_zero(tmp_path):
@@ -208,6 +249,8 @@ def test_timeouts_and_the_forward_to_argon_are_recorded_by_endpoint(tmp_path):
         )
         try:
             models.flash.complete(MESSAGES, page=4, kind="translation_batch")
+            # The same request again: argon's answer, cached under flash's request.
+            models.flash.complete(MESSAGES, page=4, kind="translation_batch")
         finally:
             models.close()
             log.close()
@@ -217,11 +260,31 @@ def test_timeouts_and_the_forward_to_argon_are_recorded_by_endpoint(tmp_path):
         (1, 1, "flash", "timeout", None),
         (1, 2, "flash", "timeout", None),
         (1, 3, "argon", "succeeded", 200),
+        (2, None, "argon", "cache_hit", None),
     ]
-    assert [r["model"] for r in records] == ["fake-flash", "fake-flash", "fake-argon"]
+    assert [r["model"] for r in records] == ["fake-flash", "fake-flash", "fake-argon", "fake-argon"]
     assert all(0.5 <= r["seconds"] < 2 for r in records[:2])
     text = log.path.read_text("utf-8")
     assert FAKE_API_KEY not in text and FAKE_ARGON_API_KEY not in text
+
+
+def test_a_cache_entry_from_before_the_records_is_recorded_as_this_clients(tmp_path):
+    with FakeModel() as model:
+        client, log = _client(model, tmp_path)
+        cache = ResponseCache(tmp_path / "cache")
+        key = ResponseCache.key(client._body(MESSAGES))
+        path = cache.directory / key[:2] / f"{key}.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"content": "old answer"}), encoding="utf-8")
+        try:
+            assert client.complete(MESSAGES, kind="review") == "old answer"
+        finally:
+            client.close()
+            log.close()
+
+    (hit,) = load_records(log.path)
+    assert (hit["result"], hit["endpoint"], hit["model"]) == ("cache_hit", "flash", "fake-flash")
+    assert model.requests == []
 
 
 def test_a_torn_last_line_is_skipped(tmp_path):
@@ -229,6 +292,33 @@ def test_a_torn_last_line_is_skipped(tmp_path):
     path.write_text('{"request": 1}\n{"request": 2, "kin', encoding="utf-8")
     assert load_records(path) == [{"request": 1}]
     assert load_records(tmp_path / "missing.jsonl") == []
+
+
+def test_run_writes_the_records_next_to_its_report(tmp_path):
+    with FakeModel() as model:
+        model.inject_error("401", kind="term_list")  # a short run: dossier, then a failure
+        output_dir = tmp_path / "out"
+        command = Path(sys.executable).with_name("zotero-translate")
+        subprocess.run(
+            [str(command), "run", str(EXCERPT), "--output-dir", str(output_dir)]
+            + ["--env-file", str(write_env_file(tmp_path, model.base_url, FAKE_API_KEY, FAKE_MODEL_NAME))]
+            + ["--argon-env-file", str(write_env_file(tmp_path, model.base_url, FAKE_ARGON_API_KEY))]
+            + ["--data-dir", str(tmp_path / "data")],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    report = json.loads((output_dir / "report.json").read_text("utf-8"))
+    assert report["state"] == "failed"
+    records = load_records(output_dir / REQUESTS_FILE)
+    assert report["requests"] == records
+    assert [(r["kind"], r["result"], r["http_status"]) for r in records] == [
+        ("dossier", "succeeded", 200),
+        ("term_list", "http_error", 401),
+    ]
+    assert {r["attempt"] for r in records} == {None}
+    assert {r["endpoint"] for r in records} == {"argon"}
 
 
 def _attempt_dir(service, task_id: str, attempt: int) -> Path:
