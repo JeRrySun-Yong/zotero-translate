@@ -17,9 +17,18 @@ one JSON object per line, each with the attempt number:
 The attempt's task report goes to ``attempts/<n>/report.json``. Neither API
 key reaches a report, the log or the pipe.
 
-The subprocess ends itself as soon as the translation service that started
-it is gone (its parent changes, or the pipe is closed), and reports nothing
-after that.
+The service starts the subprocess in its own process group, which the
+processes it starts inherit (the engine's spawned subprocesses, the
+resource tracker). As soon as the translation service that started it is
+gone (its parent changes, or the pipe is closed), the subprocess ends the
+other processes of its group (termination signal, a limited wait, forced
+kill), then itself, and reports nothing after that. Whatever survives, for
+example when the subprocess itself is killed, the service reaps by process
+marker (``zotero_translate.processes``).
+
+Test only: ``ZT_TEST_WORKER_SPAWN_CHILD=1`` makes the subprocess start a
+long-running child the way the engine does (``multiprocessing``, spawn);
+``ZT_TEST_WORKER_BAD_REPORTS=1``, see ``BAD_REPORTS``.
 """
 
 from __future__ import annotations
@@ -27,12 +36,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import threading
 import time
 import traceback
 from pathlib import Path
 
+from zotero_translate import processes
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import PaperTaskError
 from zotero_translate.paper_task import run_paper_task
@@ -42,6 +53,9 @@ from zotero_translate.settings import load_pipeline_settings
 # Test only: when set, the subprocess first sends a line that is not JSON and
 # a progress report without a stage, which the service must drop.
 BAD_REPORTS = "ZT_TEST_WORKER_BAD_REPORTS"
+# Test only: when set, the subprocess starts a child that sleeps for an
+# hour, by multiprocessing's spawn method like the engine's subprocesses.
+SPAWN_CHILD = "ZT_TEST_WORKER_SPAWN_CHILD"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,7 +85,12 @@ def main(argv: list[str] | None = None) -> int:
                 pipe.write(line + "\n")
                 pipe.flush()
             except OSError:  # the service is gone
-                os._exit(3)
+                _exit_orphaned()
+
+    if os.environ.get(SPAWN_CHILD):  # test only: a child like the engine's
+        # Daemonic: a normal exit of this process ends it; only a killed
+        # subprocess leaves it behind.
+        multiprocessing.get_context("spawn").Process(target=_sleep_for_an_hour, daemon=True).start()
 
     if os.environ.get(BAD_REPORTS):  # test only: two reports the service must drop
         with pipe_lock:
@@ -130,7 +149,25 @@ def main(argv: list[str] | None = None) -> int:
 
 def _exit_if_orphaned(parent: int) -> None:
     if os.getppid() != parent:
+        _exit_orphaned()
+
+
+_orphan_lock = threading.Lock()
+
+
+def _exit_orphaned() -> None:
+    """The service is gone: end the other processes of this group, then this one."""
+    with _orphan_lock:  # once, whichever thread notices first
+        if os.getpgid(0) == os.getpid():  # the leader of its own group, as the service starts it
+            try:
+                processes.end(processes.group_members())
+            except Exception:  # noqa: BLE001 - exit anyway; the service reaps by marker
+                traceback.print_exc()
         os._exit(3)
+
+
+def _sleep_for_an_hour() -> None:
+    time.sleep(3600)
 
 
 def _exit_when_orphaned(parent: int) -> None:
