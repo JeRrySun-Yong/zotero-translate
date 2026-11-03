@@ -127,7 +127,7 @@ class BatchReviewer:
             content = self.client.complete(messages, validate=judge, page=items[0]["page"])
         except ModelCallError as e:
             if not e.answered:  # the request failed for good: the task fails
-                raise TranslationRequestError(str(e)) from e
+                raise TranslationRequestError(str(e), category=e.category) from e
             verdicts = rejected or {
                 item["id"]: _decide(item, None, translated) for item in items
             }  # no answer parsed: judge the drafts alone

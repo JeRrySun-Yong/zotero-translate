@@ -49,11 +49,22 @@ ProgressCallback = Callable[[str, int], None]
 
 
 class PaperTaskError(Exception):
-    """The paper task failed; the message is a readable Chinese reason."""
+    """The paper task failed; the message is a readable Chinese reason.
 
-    def __init__(self, message: str, failed_batches: list[dict] | None = None):
+    ``category`` is the failure category (spec section 1), carried from the
+    model call error that caused it: ``permanent`` for a credential error,
+    which a rerun cannot fix; ``retryable`` otherwise.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        failed_batches: list[dict] | None = None,
+        category: str = "retryable",
+    ):
         super().__init__(message)
         self.failed_batches = failed_batches or []
+        self.category = category
 
 
 @dataclass
@@ -134,7 +145,7 @@ def run_paper_task(
         try:
             dossier = request_dossier(models.argon, full_text)
         except ModelCallError as e:
-            raise PaperTaskError(f"生成论文档案失败：{e}") from e
+            raise PaperTaskError(f"生成论文档案失败：{e}", category=e.category) from e
         (output_dir / DOSSIER_FILE).write_text(
             json.dumps(dossier, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -142,7 +153,7 @@ def run_paper_task(
         try:
             term_list = request_term_list(models.argon, full_text, dossier)
         except ModelCallError as e:
-            raise PaperTaskError(f"生成本篇术语清单失败：{e}") from e
+            raise PaperTaskError(f"生成本篇术语清单失败：{e}", category=e.category) from e
         report.terms = term_list.report()
         (output_dir / TERMS_FILE).write_text(
             json.dumps(term_list.to_json(), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -213,7 +224,7 @@ def run_paper_task(
             kept_source_algorithms=algorithms.kept_source,
         )
     except PaperTaskError as e:
-        report.fail(str(e), e.failed_batches)
+        report.fail(str(e), e.failed_batches, e.category)
         raise
     except BaseException as e:
         report.fail(f"论文任务出错：{type(e).__name__}: {e}")
@@ -224,6 +235,7 @@ def run_paper_task(
 
 
 async def _drive_engine(high_level, config, on_progress: ProgressCallback):
+    from babeldoc.babeldoc_exception.BabelDOCException import TranslationRequestError
     from babeldoc.babeldoc_exception.BabelDOCException import (
         TranslationRequestsFailedError,
     )
@@ -235,15 +247,20 @@ async def _drive_engine(high_level, config, on_progress: ProgressCallback):
         if event["type"] == "error":
             error = event["error"]
             if isinstance(error, TranslationRequestsFailedError):
-                first = error.failures[0]
-                where = f"第 {first.page_number} 页附近" if first.page_number else "页码未知"
+                # Any credential error among the failures makes the whole
+                # attempt permanent, and its message is the reason given.
+                cause = error.cause
+                where = f"第 {cause.page_number} 页附近" if cause.page_number else "页码未知"
                 raise PaperTaskError(
-                    f"管线模型请求失败（{where}）：{first.message}",
+                    f"管线模型请求失败（{where}）：{cause.message}",
                     failed_batches=[
-                        {"page": f.page_number, "error": f.message} for f in error.failures
+                        {"page": f.page_number, "error": f.message, "category": f.category}
+                        for f in error.failures
                     ],
+                    category=error.category,
                 )
-            raise PaperTaskError(f"引擎运行出错：{error}")
+            category = error.category if isinstance(error, TranslationRequestError) else "retryable"
+            raise PaperTaskError(f"引擎运行出错：{error}", category=category)
         if event["type"] == "finish":
             return event["translate_result"]
         new_stage = max(

@@ -12,7 +12,9 @@ one JSON object per line, each with the attempt number:
   "kept_source_paragraphs": ..., "kept_source_algorithms": ...}``;
 - ``{"attempt": n, "type": "result", "outcome": "failed", "error": ...,
   "category": "permanent" | "retryable"}``: ``permanent`` when the settings
-  cannot be read, ``retryable`` otherwise.
+  cannot be read, or when the paper task failed with that category (a
+  credential error, carried from the model call through the engine's
+  failure summary); ``retryable`` otherwise.
 
 The attempt's task report goes to ``attempts/<n>/report.json``. Neither API
 key reaches a report, the log or the pipe.
@@ -118,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             attempt=args.attempt,
         )
     except PaperTaskError as e:
-        send("result", outcome="failed", error=str(e), category="retryable")
+        send("result", outcome="failed", error=str(e), category=e.category)
         return 1
     except Exception as e:  # noqa: BLE001 - every failure must reach the service
         traceback.print_exc()

@@ -55,6 +55,7 @@ class TaskReport:
         self._stages: list[list] = []
         self.state = "succeeded"
         self.error: str | None = None
+        self.failure_category: str | None = None  # "permanent" or "retryable" once failed
         self.failed_batches: list[dict] = []
         self.terms: dict | None = None
         self.first_mentions: list[dict] | None = None
@@ -74,9 +75,12 @@ class TaskReport:
             self._stages[-1][4] = usage
         self._stages.append([stage, now, None, usage, None])
 
-    def fail(self, error: str, failed_batches: list[dict] | None = None) -> None:
+    def fail(
+        self, error: str, failed_batches: list[dict] | None = None, category: str = "retryable"
+    ) -> None:
         self.state = "failed"
         self.error = error
+        self.failure_category = category
         self.failed_batches = failed_batches or []
 
     def write(self, path: Path) -> None:
@@ -89,6 +93,7 @@ class TaskReport:
             **({"attempt": self.attempt} if self.attempt is not None else {}),
             "state": self.state,
             "error": self.error,
+            "failure_category": self.failure_category,
             "total_seconds": round(now - self._started, 1),
             "stages": [
                 {
