@@ -90,6 +90,10 @@ class ServiceClient:
 
         return self.wait_for(task_id, finished, timeout)
 
+    def wait_first_failure(self, task_id: str, timeout: float = 300) -> dict:
+        """Poll until the task's attempt has failed: it waits for a rerun, or failed for good."""
+        return self.wait_for(task_id, lambda s: s["state"] in ("waiting_rerun", "failed"), timeout)
+
     def wait_for(self, task_id: str, condition, timeout: float = 300) -> dict:
         """Poll until ``condition(status)`` holds; return that status."""
         deadline = time.monotonic() + timeout

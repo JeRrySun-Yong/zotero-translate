@@ -361,9 +361,10 @@ def test_the_children_of_a_worker_killed_under_a_live_service_are_reaped(tmp_pat
             worker, children = _worker_and_children(service, task_id)
 
             worker.kill()
-            final = service.wait(task_id, timeout=60)
+            final = service.wait_first_failure(task_id, timeout=60)
 
-            assert final["state"] == "failed"
+            # No result from the worker: retryable (M3 ticket 05).
+            assert final["state"] == "waiting_rerun"
             assert "论文任务进程异常退出" in final["error"]
             assert [pid for pid in children if _alive(pid)] == []
             assert _marked(task_id) == []
