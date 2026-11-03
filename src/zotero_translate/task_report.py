@@ -3,7 +3,9 @@
 In the translation service each attempt has its own report, which starts
 with the attempt number; the service copies the last one to the task's
 ``report.json`` with a summary of all attempts (``zotero_translate.service``).
-``run`` has one attempt and no attempt number. It records the time spent in each stage with the requests sent and the
+``run`` has one attempt and no attempt number.
+
+It records the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
