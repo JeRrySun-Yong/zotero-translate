@@ -461,7 +461,6 @@ class TaskQueue:
             return _failure(f"论文任务进程异常退出（退出码 {exit_code}）", "retryable")
         return result
 
-
     def _take_report(self, task_id: str, attempt: int, line: str) -> dict | None:
         """Adopt a progress report, or return a valid result of this attempt.
 
