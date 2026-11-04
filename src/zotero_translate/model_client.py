@@ -738,7 +738,10 @@ class _Hedged:
         elif candidate.number > 1:
             with self.flash._lock:
                 self.flash.retry_count += 1
-        threading.Thread(target=self._run_send, args=(candidate,), name="model-hedge", daemon=True).start()
+        # Not a daemon: a loser ends, and writes its record, after the request
+        # has returned; the process's exit joins it (``process_exit``). It
+        # ends soon: a loser is cancelled, and closing the client cancels all.
+        threading.Thread(target=self._run_send, args=(candidate,), name="model-hedge", daemon=False).start()
 
     def _run_send(self, candidate: _Candidate) -> None:
         client, timing = candidate.client, candidate.timing

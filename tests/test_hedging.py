@@ -553,3 +553,55 @@ def test_the_loser_is_cancelled_before_the_winners_record_is_written(tmp_path):
             caller.join()
         finally:
             models.close()
+
+
+# Independent acceptance, round 2: spec section 7, 「每次模型请求发送记一条」:
+# a loser's record is written after the request returned; a worker or
+# ``run`` that exits right then (``process_exit``) still writes it.
+LOSER_RECORD_AT_EXIT = """
+import sys, time
+from pathlib import Path
+from zotero_translate import process_exit
+from zotero_translate.model_client import PipelineModels
+from zotero_translate.request_log import RequestLog
+from zotero_translate.settings import ModelSettings, PipelineSettings
+
+flash_url, argon_url, directory = sys.argv[1:4]
+log = RequestLog(Path(directory) / "requests.jsonl", attempt=1)
+append = log.append
+
+def slow_loser_record(**fields):
+    if fields["result"] == "cancelled_for_winner":
+        time.sleep(1.0)
+    append(**fields)
+
+log.append = slow_loser_record
+settings = PipelineSettings(
+    flash=ModelSettings(base_url=flash_url, api_key="flash-key", model="fake-flash", timeout_seconds=30),
+    argon=ModelSettings(base_url=argon_url, api_key="argon-key", model="fake-argon", timeout_seconds=30),
+    hedge_after_seconds=%r,
+)
+models = PipelineModels(settings, log)
+models.flash.complete([{"role": "user", "content": "hello"}], kind="translation_batch")
+process_exit.run_then_exit(lambda: 0)  # at once, as the worker does after its last report
+"""
+
+
+def test_a_losers_record_is_written_even_when_the_process_exits_right_after(tmp_path):
+    import subprocess
+    import sys
+
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")
+        done = subprocess.run(
+            [sys.executable, "-c", LOSER_RECORD_AT_EXIT % HEDGE, flash.base_url, argon.base_url, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    assert done.returncode == 0, done.stderr
+    records = sorted(load_records(tmp_path / REQUESTS_FILE), key=lambda r: r["send"])
+    assert _summary(records) == [
+        (1, "flash", "cancelled_for_winner", False),
+        (2, "argon", "succeeded", True),
+    ]
