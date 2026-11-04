@@ -31,6 +31,7 @@ from tests.conftest import stop_service
 from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
 from tests.fake_model import pseudo_translate_algorithm
+from zotero_translate.endpoint import Endpoint
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 from zotero_translate.model_client import PipelineModels
@@ -187,14 +188,16 @@ def test_an_engine_request_is_recorded_in_the_translation_stage_while_progress_l
 
 def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tmp_path):
     error = RuntimeError("client closed")
+
+    def broken_connector(host, port, timeout, cancelled):
+        time.sleep(0.05)
+        raise error
+
     with FakeModel() as model:
-        client, log = _client(model, tmp_path)
-
-        def broken_post(body: dict, timing):
-            time.sleep(0.05)
-            raise error
-
-        client._post = broken_post
+        settings = _settings(model, tmp_path)
+        log = RequestLog(tmp_path / "attempt" / REQUESTS_FILE, attempt=3)
+        endpoint = Endpoint(settings, connector=broken_connector)
+        client = ModelClient(settings, role="flash", request_log=log, endpoint=endpoint)
         try:
             with pytest.raises(RuntimeError) as raised:
                 client.complete(MESSAGES, page=5, kind="review")
@@ -210,7 +213,7 @@ def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tm
         None,
     )
     assert record["seconds"] >= 0.05 and record["started_at"] > 0
-    assert client._in_flight == 0  # the send's slot and count were given back
+    assert client._in_flight == 0 and endpoint.in_flight == 0  # slot and count given back
 
 
 def test_a_cache_hit_gets_a_record_with_time_zero(tmp_path):
@@ -513,13 +516,13 @@ def test_an_interrupted_attempt_keeps_the_records_from_before_the_interruption(t
 def test_a_send_that_ends_after_the_task_failed_is_in_the_attempts_records(tmp_path):
     # The algorithm request starts before the batches and answers late; a
     # batch fails the task with HTTP 401 meanwhile. The worker writes its
-    # failure report while the algorithm send is still in flight, and that
-    # send ends afterwards. (Closing the client then leaves that send waiting
-    # until the request timeout, which is therefore small here; see backlog.)
+    # failure report while the algorithm send is still in flight; closing
+    # the clients then cancels that send (M3 ticket 13), long before its
+    # answer or the request timeout, and its record comes afterwards.
     with FakeModel() as model:
         model.respond("algorithm", _late_algorithm)
         model.inject_error("401", kind="translate_batch")
-        service = launch_service(model, tmp_path, request_timeout=LATE_SECONDS * 2)
+        service = launch_service(model, tmp_path, request_timeout=LATE_SECONDS * 15)
         try:
             task_id = service.submit(FIXTURES / "maliang-p6.pdf")
             final = service.wait(task_id)
@@ -532,9 +535,12 @@ def test_a_send_that_ends_after_the_task_failed_is_in_the_attempts_records(tmp_p
             failed = [r for r in records if r["http_status"] == 401]
             late = [r for r in records if r["kind"] == "algorithm_translation" and r["send"] == 1]
             assert len(failed) == 1 and len(late) == 1, records
-            # The algorithm send started before the failure and ended after it.
+            # The algorithm send started before the failure and was cut off
+            # after it, as the task failed: no answer, no wait for the timeout.
             assert late[0]["started_at"] < failed[0]["started_at"]
-            assert late[0]["seconds"] > 1
+            assert late[0]["started_at"] + late[0]["seconds"] > failed[0]["started_at"]
+            assert late[0]["result"] == "error"
+            assert late[0]["seconds"] < LATE_SECONDS
             report = json.loads((directory / "report.json").read_text("utf-8"))
             assert report["state"] == "failed"
             assert report["requests"] == records

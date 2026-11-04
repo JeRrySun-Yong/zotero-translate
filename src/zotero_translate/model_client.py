@@ -2,12 +2,14 @@
 
 It calls an OpenAI-compatible chat completions endpoint with the configured
 model, reasoning effort, temperature and timeout, and caps the number of
-requests in flight with one limit shared by the whole paper task.
+requests in flight with the endpoint's budget, shared by the whole paper
+task (``zotero_translate.endpoint``).
 
 Reliability (ADR 0002):
 
 - The request timeout bounds the whole request, from sending it to reading
-  the last byte of the response (see ``_post``).
+  the last byte of the response (see ``_post``). A send that runs past it
+  is cancelled; its slot comes back once its connection has closed.
 - Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
   answers the caller's ``validate`` rejects are retried, at most
   ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
@@ -45,11 +47,19 @@ its remaining attempts to argon (its ``fallback``):
 - Only timeouts count; any other failed attempt (HTTP 400, 429 or 5xx, a
   network error, empty content, a rejected answer) sets the count back to 0.
 - A forwarded request stays on argon, and its attempts stay ``1 +
-  max_retries`` in total. Argon's attempts take a slot of argon's own
-  concurrency limit, which all argon requests share.
+  max_retries`` in total. Argon's attempts take a slot of argon's
+  endpoint budget, which all argon requests share.
 - A forwarded answer is cached under the flash request, so a resubmitted
   paper finds it without sending anything. A cache entry names the endpoint
   role and model that gave the answer.
+
+One budget per endpoint (spec section 7): when flash and argon have the
+same address and API key, they are one endpoint and share one budget, of
+flash's concurrency setting; argon's own setting is ignored, and the log
+says so. The engine's own concurrency still comes from flash's setting.
+
+Closing a client cancels its sends in flight (a failed paper task does not
+wait for its algorithm requests to time out); they raise ``SendCancelled``.
 
 Request latency records (spec section 7, ``zotero_translate.request_log``):
 with a ``request_log``, every send gets a record when it ends, and so does
@@ -72,6 +82,7 @@ from typing import Callable
 
 import httpx
 
+from zotero_translate.endpoint import Endpoint
 from zotero_translate.request_log import KIND_STAGES
 from zotero_translate.request_log import RequestLog
 from zotero_translate.settings import ModelSettings
@@ -139,6 +150,8 @@ class ModelClient:
     ``FORWARD_AFTER_TIMEOUTS`` timeouts in a row; None never forwards.
     ``role`` (``flash`` or ``argon``) names the endpoint in the request
     records, which go to ``request_log``; None records nothing.
+    ``endpoint`` holds the HTTP client and the concurrency budget; by default
+    the client has one of its own, with ``settings.concurrency`` slots.
     """
 
     def __init__(
@@ -147,37 +160,31 @@ class ModelClient:
         fallback: ModelClient | None = None,
         role: str | None = None,
         request_log: RequestLog | None = None,
+        endpoint: Endpoint | None = None,
     ):
         self.settings = settings
         self.fallback = fallback
         self.role = role
         self.request_log = request_log
+        self.endpoint = endpoint if endpoint is not None else Endpoint(settings)
         self._cache = ResponseCache(settings.cache_dir) if settings.cache_dir else None
-        self._slots = threading.BoundedSemaphore(settings.concurrency)
         self._lock = threading.Lock()
-        self._in_flight = 0
+        self._in_flight = 0  # this client's sends whose connection has not ended
         self.request_count = 0  # HTTP requests sent to this endpoint, resends included
         self.timeout_count = 0  # of those, the ones that ran past the request timeout
         self.cache_hits = 0
         self.retry_count = 0
         self.max_in_flight = 0
         self.forwarded_pages: list[int | None] = []  # one per request sent on to ``fallback``
-        self._http = httpx.Client(
-            base_url=settings.base_url,
-            headers={"Authorization": f"Bearer {settings.api_key}"},
-            timeout=settings.timeout_seconds,
-            # ``_slots`` caps the requests in flight. The pool is not capped,
-            # so a connection that an abandoned request still holds (see
-            # ``_post``) never makes a new request wait.
-            limits=httpx.Limits(
-                max_connections=None,
-                max_keepalive_connections=settings.concurrency,
-            ),
-        )
 
     @property
     def model(self) -> str:
         return self.settings.model
+
+    @property
+    def concurrency(self) -> int:
+        """The size of the endpoint's budget, which another client may share."""
+        return self.endpoint.concurrency
 
     def complete(
         self,
@@ -322,31 +329,21 @@ class ModelClient:
 
     def _send(self, body: dict, timing: _SendTiming) -> str:
         """Send ``body`` once; fill ``timing`` as it goes, also when this raises."""
-        waiting = time.monotonic()
-        with self._slots:
-            timing.sent = time.monotonic()
-            timing.slot_wait_seconds = timing.sent - waiting
-            timing.started_at = time.time()  # ``_post`` sets both again as the request goes out
-            with self._lock:
-                self._in_flight += 1
-                self.request_count += 1
-                self.max_in_flight = max(self.max_in_flight, self._in_flight)
-            try:
-                status_code, data = self._post(body, timing)
-            except _Timeout:
-                self._count_timeout()
-                raise
-            except httpx.ConnectError as e:
-                raise _NetworkError("无法连接管线模型") from e
-            except httpx.TimeoutException as e:
-                self._count_timeout()
-                raise _Timeout(self._timeout_reason()) from e
-            except httpx.TransportError as e:
-                raise _NetworkError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
-            finally:
+        try:
+            status_code, data = self._post(body, timing)
+        except _Timeout:
+            self._count_timeout()
+            raise
+        except httpx.ConnectError as e:
+            raise _NetworkError("无法连接管线模型") from e
+        except httpx.TimeoutException as e:
+            self._count_timeout()
+            raise _Timeout(self._timeout_reason()) from e
+        except httpx.TransportError as e:
+            raise _NetworkError(f"与管线模型的网络连接出错：{type(e).__name__}") from e
+        finally:
+            if timing.started_at is not None:
                 timing.seconds = time.monotonic() - timing.sent
-                with self._lock:
-                    self._in_flight -= 1
         timing.http_status = status_code
         if status_code == 429:
             raise _HttpError("管线模型限流（HTTP 429）" + self._body_excerpt(data))
@@ -375,43 +372,45 @@ class ModelClient:
     def _post(self, body: dict, timing: _SendTiming) -> tuple[int, bytes]:
         """Send one chat completion; return its status code and whole body.
 
-        The request's thread sets ``timing.started_at`` and ``timing.sent``
-        right before the HTTP call, so that a send's time leaves out the
-        thread's start.
+        The endpoint gives the send a slot and sends it in its own thread,
+        which sets the send's start right before the HTTP call, so that a
+        send's time leaves out the wait for the slot and the thread's start.
 
         httpx's timeout bounds each network operation, e.g. each wait for
         the next bytes, not the whole request: a response that trickles in
-        can run far longer than the timeout. So the request runs in its own
-        thread, and this method stops waiting when the request timeout has
-        passed since it started. The abandoned request closes its connection
-        at its next read, or at httpx's timeout if no more bytes arrive.
+        can run far longer than the timeout. So this method waits for the
+        send for the request timeout and then cancels it (``_Timeout``);
+        the send keeps its slot, and counts as in flight, until its
+        connection has closed. ``SendCancelled`` means the client was closed.
         """
-        outcome: dict = {}
-        abandoned = threading.Event()
-
-        def run() -> None:
-            timing.started_at = time.time()
-            timing.sent = time.monotonic()
-            try:
-                with self._http.stream("POST", "/chat/completions", json=body) as response:
-                    chunks = []
-                    for chunk in response.iter_bytes():
-                        if abandoned.is_set():
-                            return
-                        chunks.append(chunk)
-                    outcome["response"] = (response.status_code, b"".join(chunks))
-            except Exception as e:  # noqa: BLE001 - re-raised in the caller's thread
-                outcome["error"] = e
-
-        request = threading.Thread(target=run, name="model-request", daemon=True)
-        request.start()
-        request.join(self.settings.timeout_seconds)
-        if request.is_alive():
-            abandoned.set()
+        send = self.endpoint.start(
+            "/chat/completions",
+            body,
+            timeout=self.settings.timeout_seconds,
+            on_start=self._send_started,
+            on_end=self._send_ended,
+        )
+        timing.slot_wait_seconds = send.slot_wait_seconds
+        timing.started_at, timing.sent = send.started_at, send.sent
+        try:
+            ended = send.wait(self.settings.timeout_seconds)
+            if not ended:
+                send.cancel()
+        finally:
+            timing.started_at, timing.sent = send.started_at, send.sent
+        if not ended:
             raise _Timeout(self._timeout_reason())
-        if "error" in outcome:
-            raise outcome["error"]
-        return outcome["response"]
+        return send.result()
+
+    def _send_started(self) -> None:
+        with self._lock:
+            self._in_flight += 1
+            self.request_count += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+
+    def _send_ended(self) -> None:
+        with self._lock:
+            self._in_flight -= 1
 
     def _body_excerpt(self, data: bytes) -> str:
         """``：`` and the start of an error response ``data`` on one line, keys redacted; "" if empty."""
@@ -435,7 +434,8 @@ class ModelClient:
             return self.request_count, self.timeout_count
 
     def close(self) -> None:
-        self._http.close()
+        """Cancel the endpoint's sends in flight and close it (also for a client sharing it)."""
+        self.endpoint.close()
 
 
 def _result_of(error: _RetryableError) -> str:
@@ -455,14 +455,33 @@ class PipelineModels:
     ``argon`` takes the paper dossier, the term list and the promoted glosses
     request; ``flash`` takes everything else and forwards to ``argon``. Both
     write their request records to ``request_log``.
+
+    When both have the same address and API key they share one endpoint,
+    with one budget of flash's concurrency setting (spec section 7).
     """
 
     def __init__(self, settings: PipelineSettings, request_log: RequestLog | None = None):
         self.request_log = request_log
-        self.argon = ModelClient(settings.argon, role="argon", request_log=request_log)
+        flash, argon = settings.flash, settings.argon
+        flash_endpoint = Endpoint(flash)
+        argon_endpoint = None
+        if (flash.base_url, flash.api_key) == (argon.base_url, argon.api_key):
+            argon_endpoint = flash_endpoint
+            logger.info(
+                "flash and argon have the same address and API key: they share one budget "
+                "of %d requests in flight (flash's setting); argon's concurrency setting "
+                "(%d) is ignored",
+                flash.concurrency,
+                argon.concurrency,
+            )
+        self.argon = ModelClient(argon, role="argon", request_log=request_log, endpoint=argon_endpoint)
         self.flash = ModelClient(
-            settings.flash, fallback=self.argon, role="flash", request_log=request_log
+            flash, fallback=self.argon, role="flash", request_log=request_log, endpoint=flash_endpoint
         )
+
+    @property
+    def shared_budget(self) -> bool:
+        return self.flash.endpoint is self.argon.endpoint
 
     def endpoints(self) -> dict[str, ModelClient]:
         return {"flash": self.flash, "argon": self.argon}
