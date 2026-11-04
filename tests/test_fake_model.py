@@ -1,6 +1,7 @@
 """The fake pipeline model fixture itself: recording, responders, faults, in-flight count."""
 
 import json
+import socket
 import threading
 import time
 
@@ -124,3 +125,37 @@ def test_term_list_request_gets_the_default_term_list(fake_model):
     content = response.json()["choices"][0]["message"]["content"]
     assert json.loads(content) == FAKE_TERM_LIST
     assert fake_model.requests[0].kind == "term_list"
+
+
+def _wait_until(condition, timeout: float = 5.0) -> float:
+    """Seconds until ``condition()`` held; fails after ``timeout``."""
+    started = time.monotonic()
+    while not condition():
+        assert time.monotonic() - started < timeout, "condition never held"
+        time.sleep(0.01)
+    return time.monotonic() - started
+
+
+@pytest.mark.parametrize("error, headers", [("timeout", False), ("hang_after_headers", True)])
+def test_sees_a_client_disconnect_and_counts_it_out_of_flight_at_once(fake_model, error, headers):
+    # "timeout" hangs before the response headers, "hang_after_headers"
+    # sends a 200 header and then nothing; both end as the client goes.
+    fake_model.inject_error(error)
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": BATCH_PROMPT}]}).encode()
+    host, port = fake_model.base_url.split("//")[1].split("/")[0].split(":")
+    sock = socket.create_connection((host, int(port)), timeout=5)
+    sock.sendall(
+        b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    _wait_until(lambda: fake_model.in_flight == 1)
+    if headers:
+        assert sock.recv(1024).startswith(b"HTTP/1.0 200")
+    time.sleep(0.2)
+    assert fake_model.in_flight == 1 and not fake_model.requests[0].disconnected
+
+    sock.close()  # in this thread, which nothing else holds
+
+    assert _wait_until(lambda: fake_model.in_flight == 0) < 1.0
+    assert fake_model.requests[0].disconnected
