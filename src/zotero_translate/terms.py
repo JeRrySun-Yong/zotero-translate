@@ -307,7 +307,7 @@ def request_term_list(client: ModelClient, full_text: str, dossier: dict) -> Ter
             + full_text,
         },
     ]
-    entries = parse_term_list(client.complete(messages, validate=parse_term_list))
+    entries = parse_term_list(client.complete(messages, validate=parse_term_list, kind="term_list"))
     term_list = limit_key_concepts(promote_basic_terms(check_against_source(entries, full_text)))
     term_list = request_promoted_glosses(client, term_list, dossier)
     return rewrite_glosses(client, term_list, dossier)
@@ -493,7 +493,7 @@ def request_promoted_glosses(client: ModelClient, term_list: TermList, dossier: 
 
     record: dict = {"promoted": names}
     try:
-        glosses, renderings = parse(client.complete(messages, validate=parse))
+        glosses, renderings = parse(client.complete(messages, validate=parse, kind="promoted_glosses"))
     except ModelCallError as e:
         record.update({"succeeded": False, "error": str(e), "glosses": [], "rewritten": []})
         return dataclasses.replace(term_list, gloss_request=record)
@@ -625,7 +625,8 @@ def rewrite_glosses(client: ModelClient, term_list: TermList, dossier: dict) -> 
     record: dict = {"requested": listed["rewrite"]}
     try:
         # A cached answer skips ``validate``: it passed when it was cached.
-        glosses, error = _parse_rewritten_glosses(client.complete(messages, validate=validate), names), None
+        content = client.complete(messages, validate=validate, kind="gloss_rewrite")
+        glosses, error = _parse_rewritten_glosses(content, names), None
     except ModelCallError as e:
         glosses, error = dict(last), str(e)
     terms, rewritten, kept = [], [], []

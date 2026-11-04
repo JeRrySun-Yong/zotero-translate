@@ -63,7 +63,7 @@ def request_dossier(client: ModelClient, full_text: str) -> dict:
         {"role": "system", "content": INSTRUCTIONS},
         {"role": "user", "content": "Full text of the paper:\n\n" + full_text},
     ]
-    return parse_dossier(client.complete(messages, validate=parse_dossier))
+    return parse_dossier(client.complete(messages, validate=parse_dossier, kind="dossier"))
 
 
 def parse_dossier(content: str) -> dict:

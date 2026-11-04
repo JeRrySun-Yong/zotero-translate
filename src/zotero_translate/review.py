@@ -124,7 +124,9 @@ class BatchReviewer:
 
         try:
             # A cached answer skips ``judge``: it is judged below like a fresh one.
-            content = self.client.complete(messages, validate=judge, page=items[0]["page"])
+            content = self.client.complete(
+                messages, validate=judge, page=items[0]["page"], kind="review"
+            )
         except ModelCallError as e:
             if not e.answered:  # the request failed for good: the task fails
                 raise TranslationRequestError(str(e), category=e.category) from e

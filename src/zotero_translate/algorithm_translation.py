@@ -330,7 +330,10 @@ class AlgorithmTranslator:
 
         try:
             content = self.client.complete(
-                [{"role": "user", "content": prompt}], validate=validate, page=page
+                [{"role": "user", "content": prompt}],
+                validate=validate,
+                page=page,
+                kind="algorithm_translation",
             )
         except ModelCallError as e:
             reason = str(e) if e.answered else f"请求失败：{e}"
@@ -345,7 +348,10 @@ class AlgorithmTranslator:
         review_prompt = self._prompt(REVIEW_INSTRUCTIONS, unit, section, entries, review_items)
         try:
             reviewed_content = self.client.complete(
-                [{"role": "user", "content": review_prompt}], validate=validate, page=page
+                [{"role": "user", "content": review_prompt}],
+                validate=validate,
+                page=page,
+                kind="algorithm_review",
             )
             reviewed, found = structure_problems(parts, reviewed_content)
             if found:
