@@ -662,18 +662,16 @@ class _Hedged:
                 self._active.remove(candidate)
                 with self._lock:
                     winner = self._winner
+                if winner is not None and winner is not candidate:
+                    # A loser's end that got here before the winner's: the
+                    # losers are cancelled already (by the winner's thread);
+                    # wait for the winner's end, i.e. its record written.
+                    continue
                 if candidate.record_error is not None:
-                    if winner is None or winner is candidate:
-                        # As without hedging: a record that cannot be written
-                        # fails the request with that error.
-                        raise candidate.record_error
-                    logger.warning(
-                        "the record of a losing model request send could not be written: %s",
-                        candidate.record_error,
-                    )
-                if winner is not None:
-                    # The winner's end, or a loser's that got here first: the
-                    # winner's answer is already there.
+                    # As without hedging: a record that cannot be written
+                    # fails the request with that error.
+                    raise candidate.record_error
+                if winner is not None:  # the winner's end
                     self._cancel_others(winner)
                     cache = self.flash._cache
                     if cache is not None:
@@ -799,6 +797,11 @@ class _Hedged:
                 self.record(client.role, client.model, candidate.number, timing, result, candidate.hedge)
         except BaseException as e:  # noqa: BLE001 - the coordinator raises it
             candidate.record_error = e
+            if result == "cancelled_for_winner":
+                # Nobody waits for a loser's end: say it here.
+                logger.warning(
+                    "the record of a losing model request send could not be written: %s", e
+                )
         finally:  # every send that went for a slot ends exactly once
             self._events.put(("ended", candidate))
 

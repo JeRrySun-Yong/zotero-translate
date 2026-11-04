@@ -679,3 +679,54 @@ def test_a_copy_with_a_slot_but_not_yet_sent_is_not_sent_once_the_original_wins(
             models.close()
 
     assert argon.requests == []
+
+
+# Batch acceptance, targeted check: the loser ends first and the winner's
+# record then cannot be written: the request fails with that error, as it
+# does without hedging (the coordinator returns only after the winner's end).
+def test_a_winners_record_failing_after_the_loser_ended_fails_the_request(tmp_path):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")  # the loser; cancelled as the copy wins
+        models, log = _models(flash, argon, tmp_path)
+        append = log.append
+
+        def failing_winner_record(**fields) -> None:
+            if fields["result"] == "succeeded":
+                time.sleep(1.0)  # the cancelled loser's end comes first
+                raise OSError("disk full")
+            append(**fields)
+
+        log.append = failing_winner_record
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                models.flash.complete(MESSAGES, kind="translation_batch")
+        finally:
+            models.close()
+
+    assert _summary(load_records(log.path)) == [(1, "flash", "cancelled_for_winner", False)]
+
+
+# A loser whose record cannot be written after the request has returned
+# leaves a warning; the caller does not wait for it.
+def test_a_losers_record_failing_after_the_request_returned_is_logged(tmp_path, caplog):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")
+        models, log = _models(flash, argon, tmp_path)
+        append = log.append
+
+        def failing_loser_record(**fields) -> None:
+            if fields["result"] == "cancelled_for_winner":
+                time.sleep(0.5)  # after the request has returned
+                raise OSError("disk full")
+            append(**fields)
+
+        log.append = failing_loser_record
+        try:
+            with caplog.at_level("WARNING", logger="zotero_translate.model_client"):
+                started = time.monotonic()
+                assert models.flash.complete(MESSAGES, kind="translation_batch") == "ok"
+                assert time.monotonic() - started < HEDGE + 0.4  # did not wait for the loser
+                assert _wait_until(lambda: "could not be written" in caplog.text, timeout=3.0)
+        finally:
+            models.close()
+    assert "disk full" in caplog.text
