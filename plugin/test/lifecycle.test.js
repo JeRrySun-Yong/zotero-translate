@@ -63,8 +63,13 @@ function fakeClock(time = 0) {
  *  or function of the request options; a missing route is a refused
  *  connection), records requests (with the time) and imports, keeps temporary
  *  files in memory (`files`, path -> text), logs every file step in `steps`,
- *  keeps the saved state. `failWrite` (a file name) and `failRemove` inject errors. */
-function environment({ routes = {}, saved = null, time = 0 } = {}) {
+ *  keeps the saved state, and keeps the attachments in `library` ({id,
+ *  target, title, text, addedAt, identity ("t1/mono") or null, deleted}),
+ *  which a restart passes on. `failWrite` (a file name), `failRemove`,
+ *  `failImport` and `failMark` (a reason) inject errors; `quitAfterImport`
+ *  and `quitAfterMark` make Zotero quit there: the attachment is saved (with
+ *  its identity, after mark) and the lifecycle never goes on. */
+function environment({ routes = {}, saved = null, time = 0, library = [] } = {}) {
   const env = {
     clock: fakeClock(time),
     requests: [],
@@ -77,7 +82,15 @@ function environment({ routes = {}, saved = null, time = 0 } = {}) {
     steps: [],
     failWrite: null,
     failRemove: false,
+    failImport: null,
+    failMark: null,
+    quitAfterImport: false,
+    quitAfterMark: false,
+    findHold: null, // a held() whose route each look-up waits for
+    writeHold: null, // the same for writing a temporary file
+    library,
   };
+  const identityOf = ({ taskId, output }) => `${taskId}/${output}`;
   env.lifecycle = createTaskLifecycle({
     fetch: async (url, options = {}) => {
       const key = `${options.method || "GET"} ${url}`;
@@ -111,6 +124,9 @@ function environment({ routes = {}, saved = null, time = 0 } = {}) {
         if (fileName === env.failWrite) {
           throw new Error("磁盘已满");
         }
+        if (env.writeHold) {
+          await env.writeHold.route();
+        }
         const path = `${dir}/${fileName}`;
         env.files.set(path, new TextDecoder().decode(bytes));
         return path;
@@ -127,7 +143,43 @@ function environment({ routes = {}, saved = null, time = 0 } = {}) {
     },
     importAttachment: async (target, { path, title }) => {
       env.steps.push(`import ${title}`);
-      env.imports.push({ target, title, fileName: path.split("/").pop(), text: env.files.get(path) });
+      if (env.failImport) {
+        throw new Error(env.failImport);
+      }
+      const text = env.files.get(path);
+      env.imports.push({ target, title, fileName: path.split("/").pop(), text });
+      const id = 100 + env.library.length;
+      env.library.push({ id, target, title, text, addedAt: env.clock.now(), identity: null, deleted: false });
+      if (env.quitAfterImport) {
+        return never();
+      }
+      return id;
+    },
+    attachments: {
+      find: async (target, identity) => {
+        env.steps.push(`find ${identityOf(identity)}`);
+        if (env.findHold) {
+          await env.findHold.route();
+        }
+        return env.library.find((a) => a.identity === identityOf(identity) && !a.deleted)?.id ?? null;
+      },
+      mark: async (id, identity) => {
+        env.steps.push(`mark ${id} ${identityOf(identity)}`);
+        if (env.failMark) {
+          throw new Error(env.failMark);
+        }
+        env.library.find((a) => a.id === id).identity = identityOf(identity);
+        if (env.quitAfterMark) {
+          return never();
+        }
+      },
+      unmarked: async (target, { title, since }) => {
+        env.steps.push(`unmarked ${title} ${since}`);
+        const found = env.library.find(
+          (a) => !a.identity && !a.deleted && a.title === title && a.addedAt >= since && JSON.stringify(a.target) === JSON.stringify(target),
+        );
+        return found ? found.id : null;
+      },
     },
     store: {
       load: () => env.saved,
@@ -141,6 +193,8 @@ function environment({ routes = {}, saved = null, time = 0 } = {}) {
     },
   });
   env.status = () => env.lifecycle.rows().map((row) => row.status);
+  /** The attachments the user sees: [title, text, identity]. */
+  env.attached = () => env.library.filter((a) => !a.deleted).map((a) => [a.title, a.text, a.identity]);
   /** When (clock time) each request for `key` was sent. */
   env.times = (key) => env.requestTimes.filter(([k]) => k === key).map(([, t]) => t);
   return env;
@@ -216,7 +270,16 @@ test("after Zotero restarts, saved tasks are queried again and still attached", 
   before.lifecycle.stop();
   assert.equal(before.clock.timers.size, 0);
   assert.deepEqual(JSON.parse(before.saved), [
-    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running", disconnectedSince: null, generation: 0 },
+    {
+      ...SOURCE,
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "running",
+      disconnectedSince: null,
+      generation: 0,
+      attached: {},
+      importIntent: null,
+    },
   ]);
 
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1") });
@@ -252,14 +315,14 @@ test("a PDF that already has an unfinished task is not submitted again", async (
   assert.deepEqual(env.lifecycle.notices, []);
 });
 
-test("a standalone PDF whose source is gone fails before anything is downloaded", async () => {
+test("a standalone PDF whose source is gone fails to attach before anything is downloaded", async () => {
   const standalone = { ...SOURCE, itemID: null };
   const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
   env.lifecycle.start();
   await env.lifecycle.submit(standalone);
   env.missingSources.push(standalone.sourceItemID);
   await env.clock.advance(2000);
-  assert.deepEqual(env.status(), ["失败：找不到原 PDF 附件"]);
+  assert.deepEqual(env.status(), ["挂回失败：找不到原 PDF 附件"]);
   assert.deepEqual(env.requests, [UPLOAD, QUERY("t1")]);
   assert.deepEqual(env.imports, []);
 });
@@ -293,36 +356,66 @@ test("a task waiting for an automatic rerun is queried, counts as unfinished and
   assert.match(after.status()[0], /^等待自动重跑/);
 });
 
-test("both PDFs are downloaded and written before either is imported; the temporary directory is removed", async () => {
+test("each PDF in turn is looked for, downloaded, imported with an intent saved, given its identity and recorded", async () => {
   const env = await submitted(succeededRoutes("t1"));
+  const seen = [];
+  env.routes[DUAL("t1")] = () => {
+    seen.push(["download dual", savedOf(env)[0].importIntent, savedOf(env)[0].attached]);
+    return pdfBytes("dual pdf");
+  };
   await env.clock.advance(2000);
   assert.deepEqual(env.steps, [
+    "find t1/mono",
     "mkdir t1",
     "write AutoDesign-中文译文.pdf",
-    "write AutoDesign-双语对照.pdf",
     "import 中文译文",
+    "mark 100 t1/mono",
+    "find t1/dual",
+    "write AutoDesign-双语对照.pdf",
     "import 双语对照",
+    "mark 101 t1/dual",
     "remove /tmp/zotero-translate/t1",
   ]);
+  // When dual was downloaded, mono was recorded and its intent cleared.
+  assert.deepEqual(seen, [["download dual", null, { mono: 100 }]]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+  assert.deepEqual(env.status(), ["已挂回"]);
   assert.deepEqual(env.files, new Map());
 });
 
-test("when writing the second PDF fails, nothing is attached and the temporary directory is removed", async () => {
+test("the import intent is saved before the import, and the identity is written before the record", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.quitAfterImport = true;
+  await env.clock.advance(2000);
+  const [saved] = savedOf(env);
+  assert.deepEqual(saved.importIntent, { taskId: "t1", output: "mono", startedAt: 2000 });
+  assert.deepEqual(saved.attached, {});
+  assert.equal(rowOf(env).canCancel, false); // no 取消 while importing
+
+  const marked = await submitted(succeededRoutes("t1"));
+  marked.quitAfterMark = true;
+  await marked.clock.advance(2000);
+  assert.deepEqual(marked.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
+  assert.deepEqual(savedOf(marked)[0].attached, {}); // not yet recorded
+  assert.equal(savedOf(marked)[0].importIntent.output, "mono");
+});
+
+test("when writing the second PDF fails, the first stays attached, the task fails to attach and the temporary directory is removed", async () => {
   const env = await submitted(succeededRoutes("t1"));
   env.failWrite = "AutoDesign-双语对照.pdf";
   await env.clock.advance(2000);
-  assert.deepEqual(env.imports, []);
-  assert.deepEqual(env.status(), ["失败：磁盘已满"]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
+  assert.deepEqual(env.status(), ["挂回失败：磁盘已满"]);
   assert.equal(env.steps.at(-1), "remove /tmp/zotero-translate/t1");
   assert.deepEqual(env.files, new Map());
 });
 
-test("when removing the temporary directory fails, both PDFs stay attached and the task fails", async () => {
+test("when removing the temporary directory fails, both PDFs stay attached and the task fails to attach", async () => {
   const env = await submitted(succeededRoutes("t1"));
   env.failRemove = true;
   await env.clock.advance(2000);
   assert.deepEqual(env.imports.map((i) => i.title), ["中文译文", "双语对照"]);
-  assert.deepEqual(env.status(), ["失败：无法删除临时目录"]);
+  assert.deepEqual(env.status(), ["挂回失败：无法删除临时目录"]);
 });
 
 // ---- the service cannot be reached while querying ----
@@ -530,7 +623,17 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
   before.lifecycle.submit(SOURCE);
   await settle();
   assert.deepEqual(JSON.parse(before.saved), [
-    { ...SOURCE, serviceUrl: SERVICE, taskId: null, state: "submitting", disconnectedSince: null, generation: 0 },
+    {
+      ...SOURCE,
+      serviceUrl: SERVICE,
+      taskId: null,
+      state: "submitting",
+      disconnectedSince: null,
+      generation: 0,
+      error: null,
+      attached: {},
+      importIntent: null,
+    },
   ]);
   before.lifecycle.stop();
 
@@ -565,14 +668,15 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     assert.equal(env.lifecycle.tasks[0].state, "attaching");
     assert.ok(env.lifecycle.tasks[0].disconnectedSince != null);
     assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
-    assert.deepEqual(env.imports, []); // nothing imported before both are written
+    assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // the first is attached
     assert.deepEqual(env.files, new Map());
-    assert.deepEqual(JSON.parse(env.saved).map((t) => t.state), ["attaching"]);
+    assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntent]), [["attaching", { mono: 100 }, null]]);
 
     env.routes[DUAL("t1")] = pdfBytes("dual pdf");
     await env.clock.advance(10000);
     assert.deepEqual(env.status(), ["已挂回"]);
     assert.deepEqual(env.imports.map((i) => [i.title, i.text]), [["中文译文", "mono pdf"], ["双语对照", "dual pdf"]]);
+    assert.equal(env.times(MONO("t1")).length, 1); // found with its identity, not downloaded again
     assert.equal(env.times(QUERY("t1")).length, 1); // the service is not asked again; the downloads are
   });
 }
@@ -987,4 +1091,254 @@ test("a source PDF in any unfinished state is not submitted again; once cancelle
   assert.equal(env.lifecycle.tasks[0].state, "cancelled");
   assert.deepEqual(env.lifecycle.notices, [ALREADY_ACTIVE("AutoDesign")]);
   assert.equal(env.requests.filter((r) => r === UPLOAD).length, 2);
+});
+
+// ---- attaching without duplicates, 继续挂回, cancel while attaching (ticket 10) ----
+
+const ATTACH_FAILED = (reason) => `挂回失败：${reason}`;
+const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
+
+/** A task whose service has succeeded, attached as far as `setup(env)` lets it go, then Zotero quits. */
+async function quitWhileAttaching(setup) {
+  const before = await submitted(succeededRoutes("t1"));
+  setup(before);
+  await before.clock.advance(2000);
+  before.lifecycle.stop();
+  return before;
+}
+
+test("Zotero quit after an import was identified but before it was recorded: after a restart it is found, not imported again", async () => {
+  const before = await quitWhileAttaching((env) => {
+    env.quitAfterMark = true;
+  });
+  assert.deepEqual(savedOf(before).map((t) => [t.state, t.attached, t.importIntent?.output]), [["attaching", {}, "mono"]]);
+
+  const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
+  after.lifecycle.start();
+  await after.clock.advance(2000);
+  assert.deepEqual(after.status(), ["已挂回"]);
+  assert.deepEqual(after.requests, [DUAL("t1")]); // mono is not downloaded again
+  assert.deepEqual(after.imports.map((i) => i.title), ["双语对照"]);
+  assert.deepEqual(after.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+});
+
+test("Zotero quit after an attachment was saved but before its identity was written: after a restart the intent claims it", async () => {
+  const before = await quitWhileAttaching((env) => {
+    env.quitAfterImport = true;
+  });
+  assert.deepEqual(before.attached(), [["中文译文", "mono pdf", null]]);
+  assert.deepEqual(savedOf(before)[0].importIntent, { taskId: "t1", output: "mono", startedAt: 2000 });
+
+  const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
+  after.lifecycle.start();
+  await after.clock.advance(2000);
+  assert.deepEqual(after.status(), ["已挂回"]);
+  assert.ok(after.steps.includes("unmarked 中文译文 2000"));
+  assert.ok(after.steps.includes("mark 100 t1/mono")); // the identity is written on the saved attachment
+  assert.deepEqual(after.requests, [DUAL("t1")]);
+  assert.deepEqual(after.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+  assert.equal(savedOf(after).length, 0);
+});
+
+test("the intent claims only an attachment of its output's title, without identity, added no earlier than the intent", async () => {
+  // Earlier attachments with the same title: one added before the intent, one with another task's identity.
+  const library = [
+    { id: 1, target: { parentItemID: 10 }, title: "中文译文", text: "old", addedAt: 0, identity: null, deleted: false },
+    { id: 2, target: { parentItemID: 10 }, title: "中文译文", text: "other", addedAt: 5000, identity: "t0/mono", deleted: false },
+    { id: 3, target: { parentItemID: 10 }, title: "双语对照", text: "dual?", addedAt: 5000, identity: null, deleted: false },
+  ];
+  const saved = JSON.stringify([
+    {
+      ...SOURCE,
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "attaching",
+      disconnectedSince: null,
+      generation: 0,
+      error: null,
+      attached: {},
+      importIntent: { taskId: "t1", output: "mono", startedAt: 4000 },
+    },
+  ]);
+  const env = environment({ saved, routes: succeededRoutes("t1"), library, time: 60000 });
+  env.lifecycle.start();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.imports.map((i) => i.title), ["中文译文", "双语对照"]); // none was claimed
+  assert.ok(!env.steps.includes("unmarked 双语对照 4000")); // dual had no intent
+  assert.deepEqual(library.slice(0, 3).map((a) => a.identity), [null, "t0/mono", null]);
+});
+
+test("a recorded attachment the user has deleted is imported again when attaching goes on", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.failWrite = "AutoDesign-双语对照.pdf";
+  await env.clock.advance(2000);
+  assert.deepEqual(savedOf(env)[0].attached, { mono: 100 });
+  env.library[0].deleted = true; // the user deletes the attached mono
+  env.failWrite = null;
+
+  await env.lifecycle.continueAttach(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+  assert.deepEqual(env.library.map((a) => [a.id, a.title, a.deleted]), [[100, "中文译文", true], [101, "中文译文", false], [102, "双语对照", false]]);
+  assert.deepEqual(env.times(MONO("t1")).length, 2);
+});
+
+test("a local import error makes the row 挂回失败 with the reason; 继续挂回 attaches the rest without duplicates", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.routes[DUAL("t1")] = () => {
+    env.failImport = "无法写入 Zotero 存储目录"; // mono is imported; dual is not
+    return pdfBytes("dual pdf");
+  };
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("无法写入 Zotero 存储目录")]);
+  const row = rowOf(env);
+  assert.deepEqual([row.canContinue, row.canCancel, row.canRetry], [true, true, false]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
+  assert.deepEqual(savedOf(env).map((t) => [t.state, t.error, t.attached]), [["attach_failed", "无法写入 Zotero 存储目录", { mono: 100 }]]);
+
+  const requests = env.requests.length;
+  await env.clock.advance(60000); // nothing happens until the user acts
+  assert.equal(env.requests.length, requests);
+  await env.lifecycle.submit(SOURCE); // unfinished: no second task
+  assert.deepEqual(env.lifecycle.notices, [ALREADY_ACTIVE("AutoDesign")]);
+
+  // It survives a Zotero restart.
+  env.lifecycle.stop();
+  const after = environment({ saved: env.saved, routes: succeededRoutes("t1"), library: env.library, time: env.clock.now() });
+  after.lifecycle.start();
+  assert.deepEqual(after.status(), [ATTACH_FAILED("无法写入 Zotero 存储目录")]);
+  await after.clock.advance(60000);
+  assert.deepEqual(after.requests, []);
+
+  assert.equal(after.failImport, null);
+  await after.lifecycle.continueAttach(rowOf(after).key);
+  assert.deepEqual(after.status(), ["已挂回"]);
+  assert.deepEqual(after.requests, [DUAL("t1")]);
+  assert.deepEqual(after.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+  assert.equal(after.saved, "[]");
+});
+
+test("an identity that cannot be written makes the row 挂回失败; 继续挂回 claims that attachment instead of importing it again", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.failMark = "数据库已锁定";
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("数据库已锁定")]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", null]]);
+  assert.equal(savedOf(env)[0].importIntent.output, "mono");
+
+  env.failMark = null;
+  await env.lifecycle.continueAttach(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.imports.map((i) => i.title), ["中文译文", "双语对照"]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+});
+
+test("取消 while a download is under way aborts it; the download that comes back afterwards is not imported", async () => {
+  const dual = held();
+  let signal = null;
+  const env = await submitted({
+    ...succeededRoutes("t1"),
+    [DUAL("t1")]: (options) => {
+      signal = options.signal;
+      return dual.route();
+    },
+  });
+  await env.clock.advance(2000);
+  assert.equal(dual.count, 1);
+  assert.equal(rowOf(env).canCancel, true);
+
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(rowOf(env).canRetry, true);
+  assert.equal(env.saved, "[]");
+  dual.answer(pdfBytes("dual pdf")); // the download succeeds after the click
+  await env.clock.advance(60000);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // kept; dual not imported
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.ok(!env.requests.includes(CANCEL("t1"))); // the service has succeeded: no cancel request
+  assert.equal(env.clock.timers.size, 0);
+});
+
+test("取消 while waiting to download again ends the task; nothing is downloaded after it", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  delete env.routes[DUAL("t1")];
+  await env.clock.advance(2000);
+  assert.match(env.status()[0], /^翻译服务暂时连不上/);
+  assert.equal(rowOf(env).canCancel, true);
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  env.routes[DUAL("t1")] = pdfBytes("dual pdf");
+  await env.clock.advance(60000);
+  assert.equal(env.times(DUAL("t1")).length, 1);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
+});
+
+test("取消 during a look-up: once it returns, nothing is downloaded or imported", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.findHold = held();
+  await env.clock.advance(2000);
+  assert.equal(env.findHold.count, 1);
+  await env.lifecycle.cancel(rowOf(env).key);
+  env.findHold.answer();
+  await env.clock.advance(60000);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.ok(!env.requests.includes(MONO("t1")));
+  assert.deepEqual(env.imports, []);
+});
+
+test("取消 while the downloaded PDF is being written: once written, it is not imported", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.writeHold = held();
+  await env.clock.advance(2000);
+  assert.equal(env.writeHold.count, 1);
+  await env.lifecycle.cancel(rowOf(env).key);
+  env.writeHold.answer();
+  await env.clock.advance(60000);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.imports, []);
+  assert.equal(env.steps.at(-1), "remove /tmp/zotero-translate/t1");
+});
+
+test("取消 on 挂回失败 ends the task; attachments already added stay", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.failWrite = "AutoDesign-双语对照.pdf";
+  await env.clock.advance(2000);
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual([rowOf(env).canRetry, rowOf(env).canContinue], [true, false]);
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
+  assert.ok(!env.requests.includes(CANCEL("t1")));
+  await env.lifecycle.continueAttach(rowOf(env).key); // not offered: nothing happens
+  assert.deepEqual(env.status(), ["已取消"]);
+});
+
+test("an attaching task saved before attach records existed becomes 挂回失败, asking to check the attachments first", async () => {
+  const saved = JSON.stringify([
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attaching" },
+    { ...SOURCE, sourceItemID: 12, serviceUrl: SERVICE, taskId: "t2", state: "running" },
+  ]);
+  const env = environment({ saved, routes: { ...succeededRoutes("t1"), [QUERY("t2")]: status("running") } });
+  env.lifecycle.start();
+  assert.deepEqual(env.status(), [ATTACH_FAILED(UPGRADE_ATTACH_ERROR), "翻译中"]);
+  const row = rowOf(env);
+  assert.deepEqual([row.canContinue, row.canCancel], [true, true]);
+  assert.deepEqual(savedOf(env).map((t) => [t.state, t.error]), [["attach_failed", UPGRADE_ATTACH_ERROR], ["running", null]]);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.requests, [QUERY("t2")]); // nothing downloaded for t1
+
+  await env.lifecycle.continueAttach(row.key);
+  assert.equal(env.lifecycle.tasks[0].state, "done");
+  assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+});
+
+test("a retry starts with no attach records or import intent of the old task", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.failImport = "x";
+  await env.clock.advance(2000);
+  await env.lifecycle.cancel(rowOf(env).key);
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.retry(rowOf(env).key);
+  assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.attached, t.importIntent]), [["t2", {}, null]]);
 });

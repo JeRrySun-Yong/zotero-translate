@@ -109,6 +109,8 @@ while it exists, scanning for a task's processes fails, so reaping fails
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
 makes it start a child that sleeps for an hour, by multiprocessing's spawn
 method like the engine (``zotero_translate.worker``).
+``ZT_TEST_DOWNLOAD_DELAY_SECONDS`` ("<file>=<seconds>[,...]", e.g.
+"dual=30") waits that long before sending that file of any task.
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
@@ -161,6 +163,7 @@ PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
+DOWNLOAD_DELAY_SETTING = "ZT_TEST_DOWNLOAD_DELAY_SECONDS"  # "<file>=<seconds>[,...]"
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Queue classes (spec section 1, "排队顺序"), in the order they run: tasks
@@ -967,6 +970,15 @@ def _rerun_waits() -> tuple[float, float]:
     return first, second
 
 
+def _download_delay(name: str) -> float:
+    """Test only: seconds to wait before sending the file ``name`` (``ZT_TEST_DOWNLOAD_DELAY_SECONDS``)."""
+    for part in filter(None, os.environ.get(DOWNLOAD_DELAY_SETTING, "").split(",")):
+        file, _, seconds = part.partition("=")
+        if file.strip() == name:
+            return float(seconds)
+    return 0.0
+
+
 def _test_pause(setting: str, task_id: str, attempt: int) -> None:
     """Test only: wait at a pause point while ``<dir>/<task_id>-<attempt>.paused`` exists."""
     directory = os.environ.get(setting)
@@ -1022,6 +1034,7 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             file = td.DOWNLOAD_FILES.get(name)
             if directory is None or file is None or not (directory / file).is_file():
                 return self._not_found()
+            time.sleep(_download_delay(name))
             data = (directory / file).read_bytes()
             self.send_response(200)
             self.send_header(

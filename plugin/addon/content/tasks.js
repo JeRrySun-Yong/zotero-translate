@@ -1,6 +1,7 @@
 /* The "翻译任务" window: one row per task, updated after every poll, with a
  * "取消" button on rows that can be cancelled (no confirmation), a "重试"
- * button on failed and cancelled rows, and the notices of the latest
+ * button on failed and cancelled rows, a "继续挂回" button on rows whose
+ * attaching failed, and the notices of the latest
  * submission. Zotero's include.js, loaded before this script, defines `Zotero`. */
 var { lifecycle } = Zotero.ZoteroTranslate;
 const XHTML = "http://www.w3.org/1999/xhtml";
@@ -15,7 +16,7 @@ function rowElement(key) {
     for (let i = 0; i < 5; i++) {
       tr.append(document.createElementNS(XHTML, "td"));
     }
-    for (const [action, label] of [["cancel", "取消"], ["retry", "重试"]]) {
+    for (const [action, label] of [["cancel", "取消"], ["retry", "重试"], ["continueAttach", "继续挂回"]]) {
       const button = document.createElementNS(XHTML, "button");
       button.textContent = label;
       button.dataset.action = action;
@@ -39,6 +40,7 @@ function render() {
     });
     tr.querySelector('button[data-action="cancel"]').hidden = !row.canCancel;
     tr.querySelector('button[data-action="retry"]').hidden = !row.canRetry;
+    tr.querySelector('button[data-action="continueAttach"]').hidden = !row.canContinue;
   }
   document.getElementById("zotero-translate-empty").hidden = rows.length > 0;
   const notices = document.getElementById("zotero-translate-notices");

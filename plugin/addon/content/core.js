@@ -46,7 +46,8 @@ var ZoteroTranslateCore = (() => {
 
   // Task states: the service's queued/running/waiting_rerun/failed/cancelled,
   // plus the plugin's own submitting (upload under way), attaching (service
-  // succeeded, PDFs being added to the item), done (both PDFs attached) and
+  // succeeded, PDFs being added to the item), attach_failed (a local error
+  // while attaching; "继续挂回" goes on), done (both PDFs attached) and
   // cancelling (the user cancelled; the cancel is not yet confirmed by the service).
   const STATUS_LABELS = {
     submitting: "提交中",
@@ -54,6 +55,7 @@ var ZoteroTranslateCore = (() => {
     running: "翻译中",
     waiting_rerun: "等待自动重跑",
     attaching: "挂回中",
+    attach_failed: "挂回失败",
     done: "已挂回",
     failed: "失败",
     cancelling: "取消中",
@@ -62,7 +64,7 @@ var ZoteroTranslateCore = (() => {
   // Unfinished states: the plugin still has work to do for the task (the
   // lifecycle saves these across restarts and submits no second task for the
   // same source PDF); only these show a disconnection.
-  const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching", "cancelling"];
+  const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching", "attach_failed", "cancelling"];
 
   /** What the task window shows for one task; a waiting task shows its
    *  place in the service's queue, a running one its attempt when the
@@ -118,7 +120,8 @@ var ZoteroTranslateCore = (() => {
         status = `${status}（${kept.join("，")}）`;
       }
     }
-    return { ...row, status: task.state === "failed" && task.error ? `${status}：${task.error}` : status };
+    const withReason = ["failed", "attach_failed"].includes(task.state) && task.error;
+    return { ...row, status: withReason ? `${status}：${task.error}` : status };
   }
 
   return { OUTPUTS, UNFINISHED_STATES, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow };
