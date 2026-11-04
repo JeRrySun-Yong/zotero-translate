@@ -16,12 +16,16 @@ to leave its spawned child behind; there is no other way to stage that.
 """
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 
 import httpx
 import psutil
 
+from tests.conftest import MARK_ENV
 from tests.conftest import launch_service
 from tests.conftest import marked_processes
 from tests.conftest import stop_service
@@ -317,3 +321,42 @@ def _cancel_ignoring_errors(service, task_id: str) -> None:
     except httpx.HTTPError:  # the service is killed while the cancel waits
         pass
 
+
+
+# Python children: macOS does not let psutil read a platform binary's
+# (e.g. /bin/sleep) environment, so its marker could not be seen.
+_SPAWNER = """
+import subprocess, sys, time
+for _ in range(40):  # bounded: at most 40 sleeping children
+    subprocess.Popen([sys.executable, "-S", "-c", "import time; time.sleep(3600)"], start_new_session=True)
+    time.sleep(0.02)
+time.sleep(3600)
+"""
+
+
+def test_processes_started_while_the_reap_runs_are_reaped_too(tmp_path, fake_model, start_service):
+    # A marked process keeps starting marked children: those started after
+    # the first scan must be found and ended before the cancel answers 200.
+    fake_model.respond("dossier", lambda body: "not a dossier")
+    service = start_service(fake_model, env={WAITS: "600,600"})
+    task_id = service.submit()
+    service.wait_for(task_id, lambda s: s["state"] == "waiting_rerun", timeout=120)
+    spawner = subprocess.Popen(
+        [sys.executable, "-c", _SPAWNER],
+        env={**os.environ, MARK_ENV: f"{task_id}:1"},
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while len(marked_processes([task_id])) < 4:
+            assert time.monotonic() < deadline, "the spawner never started its children"
+            time.sleep(0.05)
+
+        _assert_cancelled(_cancel(service, task_id), service, task_id)
+        assert spawner.poll() is not None
+        assert marked_processes([task_id]) == []
+    finally:
+        for process in marked_processes([task_id]):
+            process.kill()
+        spawner.kill()
+        spawner.wait()

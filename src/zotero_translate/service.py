@@ -359,25 +359,23 @@ class TaskQueue:
         On failure the task keeps its state; ``cleanup_error`` and the log
         say why (logged again only when the reason changes), and ``then``
         is kept for the retry, which comes every REAP_RETRY_SECONDS
-        (``_retry_reaps_forever``) and on a repeated cancel. While the task
-        has not finished, no new attempt starts. A finished task (e.g.
-        cancelled meanwhile by another thread) never blocks scheduling.
+        (``_retry_reaps_forever``) and on a repeated cancel. Until every
+        failed reap has succeeded, finished tasks' included, no new attempt
+        starts.
         """
         try:
             processes.reap(task_id)
         except processes.ReapError as e:
             with self._cond:
                 status = td.read_status(self.tasks_dir / task_id)
-                finished = status["state"] in td.TERMINAL_STATES
-                reason = str(e) if finished else f"{e}；暂停调度新的尝试"
+                reason = f"{e}；暂停调度新的尝试"
                 if status.get("cleanup_error") != reason:
                     self._decide(task_id, "cleanup_error", {"cleanup_error": reason}, reason=reason)
                 # A plain retry (then None, e.g. a repeated cancel) keeps
                 # the transition an earlier failed reap was waiting for.
                 if then is not None or task_id not in self._reap_retries:
                     self._reap_retries[task_id] = then
-                if not finished:
-                    self._cleanup_blocked.add(task_id)
+                self._cleanup_blocked.add(task_id)
             return False
         with self._cond:
             status = td.read_status(self.tasks_dir / task_id)

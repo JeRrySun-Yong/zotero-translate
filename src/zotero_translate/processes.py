@@ -57,18 +57,35 @@ def marked_processes(task_id: str) -> list[psutil.Process]:
 
 
 def reap(task_id: str) -> None:
-    """End every process of ``task_id``; raise ``ReapError`` if that cannot be confirmed."""
+    """End every process of ``task_id``; raise ``ReapError`` if that cannot be confirmed.
+
+    A process may start a marked child after a scan and before it is
+    ended, so the scan is repeated after each round until it finds none;
+    when marked processes still turn up after the rule's 15 seconds, the
+    reap fails.
+    """
+    deadline = time.monotonic() + TERM_WAIT_SECONDS + KILL_WAIT_SECONDS
+    while True:
+        processes = _scan(task_id)
+        if not processes:
+            return
+        if time.monotonic() >= deadline:
+            pids = ", ".join(str(p.pid) for p in processes)
+            raise ReapError(f"回收期间不断出现新的带标记的进程（PID {pids}）")
+        survivors = end(processes)
+        if survivors:
+            pids = ", ".join(str(p.pid) for p in survivors)
+            raise ReapError(f"强制结束后仍有带标记的进程存活（PID {pids}）")
+
+
+def _scan(task_id: str) -> list[psutil.Process]:
     try:
         flag = os.environ.get(SCAN_ERROR_SETTING)
         if flag and Path(flag).exists():
             raise OSError(f"测试设置 {SCAN_ERROR_SETTING}")
-        processes = marked_processes(task_id)
+        return marked_processes(task_id)
     except Exception as e:  # the scan itself failed
         raise ReapError(f"无法扫描进程：{type(e).__name__}: {e}") from e
-    survivors = end(processes)
-    if survivors:
-        pids = ", ".join(str(p.pid) for p in survivors)
-        raise ReapError(f"强制结束后仍有带标记的进程存活（PID {pids}）")
 
 
 def end(
