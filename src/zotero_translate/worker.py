@@ -31,13 +31,11 @@ marker (``zotero_translate.processes``).
 Test only: ``ZT_TEST_WORKER_SPAWN_CHILD=1`` makes the subprocess start a
 long-running child the way the engine does (``multiprocessing``, spawn);
 ``ZT_TEST_WORKER_BAD_REPORTS=1``, see ``BAD_REPORTS``.
-``ZT_TEST_WORKER_HANG_AT_EXIT=1``, see ``HANG_AT_EXIT``.
 """
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import logging
 import multiprocessing
@@ -60,9 +58,6 @@ BAD_REPORTS = "ZT_TEST_WORKER_BAD_REPORTS"
 # Test only: when set, the subprocess starts a child that sleeps for an
 # hour, by multiprocessing's spawn method like the engine's subprocesses.
 SPAWN_CHILD = "ZT_TEST_WORKER_SPAWN_CHILD"
-# Test only: after its result, the worker registers a C exit handler that
-# never returns, as a native library's teardown once did (M3 ticket 13).
-HANG_AT_EXIT = "ZT_TEST_WORKER_HANG_AT_EXIT"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -151,8 +146,6 @@ def main(argv: list[str] | None = None) -> int:
         kept_source_paragraphs=result.kept_source_paragraphs,
         kept_source_algorithms=result.kept_source_algorithms,
     )
-    if os.environ.get(HANG_AT_EXIT):
-        _hang_at_exit()
     return 0
 
 
@@ -173,12 +166,6 @@ def _exit_orphaned() -> None:
             except Exception:  # noqa: BLE001 - exit anyway; the service reaps by marker
                 traceback.print_exc()
         os._exit(3)
-
-
-def _hang_at_exit() -> None:
-    """Make the process hang after Python's own shutdown, in a C exit handler."""
-    libc = ctypes.CDLL(None)
-    libc.atexit(ctypes.cast(libc.pause, ctypes.c_void_p))
 
 
 def _sleep_for_an_hour() -> None:
