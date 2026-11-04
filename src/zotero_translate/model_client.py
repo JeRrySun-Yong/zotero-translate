@@ -390,13 +390,12 @@ class ModelClient:
             on_start=self._send_started,
             on_end=self._send_ended,
         )
-        timing.slot_wait_seconds = send.slot_wait_seconds
-        timing.started_at, timing.sent = send.started_at, send.sent
         try:
             ended = send.wait(self.settings.timeout_seconds)
             if not ended:
                 send.cancel()
-        finally:
+        finally:  # the send's thread set its start as the request went out
+            timing.slot_wait_seconds = send.slot_wait_seconds
             timing.started_at, timing.sent = send.started_at, send.sent
         if not ended:
             raise _Timeout(self._timeout_reason())
