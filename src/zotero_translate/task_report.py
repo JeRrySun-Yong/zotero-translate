@@ -9,10 +9,11 @@ It records the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
-concurrency limit, i.e. the size of its endpoint's budget, whether flash and
-argon share that budget (same address and key), requests, timeouts and the
-maximum number of its requests in flight, and of the budget's), the batches whose requests failed for good and the
-term list counts with the spellings dropped because the source lacks them,
+concurrency limit, i.e. the size of its endpoint's budget, requests,
+timeouts and the maximum number of its requests in flight; when flash and
+argon share one endpoint, ``shared_budget`` gives the budget's size, the
+argon setting it ignores and its own maximum in flight), the batches whose
+requests failed for good and the term list counts with the spellings dropped because the source lacks them,
 the promoted basic terms, the promoted glosses request and the gloss checks,
 for each key concept the pages of its first-mention glosses in the
 abstract and in the body and whether the translation contains them (with
@@ -122,14 +123,21 @@ class TaskReport:
                     name: {
                         "model": c.model,
                         "concurrency": c.concurrency,
-                        "shared_budget": self.models.shared_budget,
                         "requests": c.request_count,
                         "timeouts": c.timeout_count,
                         "max_in_flight": c.max_in_flight,
-                        "budget_max_in_flight": c.endpoint.max_in_flight,
                     }
                     for name, c in endpoints.items()
                 },
+                "shared_budget": (
+                    {
+                        "concurrency": self.models.flash.concurrency,
+                        "ignored_argon_concurrency": self.models.ignored_argon_concurrency,
+                        "max_in_flight": self.models.flash.endpoint.max_in_flight,
+                    }
+                    if self.models.shared_budget
+                    else None
+                ),
             },
             "failed_batches": self.failed_batches,
             "terms": self.terms,

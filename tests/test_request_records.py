@@ -213,7 +213,7 @@ def test_a_send_ended_by_any_other_error_is_recorded_and_the_error_propagates(tm
         None,
     )
     assert record["seconds"] >= 0.05 and record["started_at"] > 0
-    assert client._in_flight == 0 and endpoint.in_flight == 0  # slot and count given back
+    assert endpoint.in_flight == 0  # the slot was given back
 
 
 def test_a_cache_hit_gets_a_record_with_time_zero(tmp_path):

@@ -465,8 +465,11 @@ class PipelineModels:
         flash, argon = settings.flash, settings.argon
         flash_endpoint = Endpoint(flash)
         argon_endpoint = None
-        if (flash.base_url, flash.api_key) == (argon.base_url, argon.api_key):
+        # Argon's own setting when it is ignored (shared budget), else None.
+        self.ignored_argon_concurrency: int | None = None
+        if _endpoint_identity(flash) == _endpoint_identity(argon):
             argon_endpoint = flash_endpoint
+            self.ignored_argon_concurrency = argon.concurrency
             logger.info(
                 "flash and argon have the same address and API key: they share one budget "
                 "of %d requests in flight (flash's setting); argon's concurrency setting "
@@ -499,6 +502,13 @@ class PipelineModels:
     def close(self) -> None:
         for client in self.endpoints().values():
             client.close()
+
+
+def _endpoint_identity(settings: ModelSettings) -> tuple:
+    """What makes two settings one endpoint: the address (case of scheme and host,
+    default port and a trailing slash aside) and the API key."""
+    url = httpx.URL(settings.base_url)
+    return (url.scheme, url.host, url.port, url.path.rstrip("/"), settings.api_key)
 
 
 class ResponseCache:

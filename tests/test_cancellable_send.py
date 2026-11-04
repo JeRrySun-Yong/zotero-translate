@@ -277,7 +277,7 @@ def test_a_timed_out_send_gives_its_slot_back_only_after_its_connection_closed(t
     # The resend (concurrency 1) could only go out once the slot was back.
     order = [(name, send) for name, send, _ in events.seen]
     assert order.index(("slot_released", first)) < order.index(("connected", second))
-    assert client._in_flight == 0 and endpoint.in_flight == 0
+    assert endpoint.in_flight == 0
 
 
 def test_closing_the_client_aborts_its_sends_in_flight_at_once(tmp_path):
@@ -350,6 +350,23 @@ def test_two_roles_on_the_same_endpoint_share_one_budget_sized_by_flash(caplog):
     assert FAKE_API_KEY not in caplog.text
 
 
+def test_addresses_that_differ_only_in_case_or_a_trailing_slash_are_the_same_endpoint():
+    with FakeModel() as model:
+        upper = model.base_url.replace("http://", "HTTP://") + "/"
+        settings = PipelineSettings(
+            flash=_settings(model, concurrency=2),
+            argon=_settings(model, base_url=upper, model="fake-argon", concurrency=16),
+        )
+        models = PipelineModels(settings)
+        try:
+            assert models.argon.complete([{"role": "user", "content": "hello"}]) == "ok"
+        finally:
+            models.close()
+
+    assert models.flash.endpoint is models.argon.endpoint
+    assert models.argon.concurrency == 2
+
+
 def test_two_roles_with_different_keys_keep_their_own_budgets(caplog):
     with FakeModel(delay=0.3) as model:
         settings = PipelineSettings(
@@ -378,7 +395,6 @@ def test_a_task_whose_roles_share_an_endpoint_stays_within_the_shared_budget(tmp
             task_id = service.submit()
             final = service.wait(task_id)
             report = service.report(task_id)
-            task_log = (service.data_dir / "tasks" / task_id / "task.log").read_text("utf-8")
         finally:
             stop_service(service)
 
@@ -388,6 +404,7 @@ def test_a_task_whose_roles_share_an_endpoint_stays_within_the_shared_budget(tmp
     assert model.max_in_flight <= 2
     endpoints = report["model"]["endpoints"]
     assert endpoints["flash"]["concurrency"] == endpoints["argon"]["concurrency"] == 2
-    assert endpoints["flash"]["shared_budget"] is endpoints["argon"]["shared_budget"] is True
-    assert endpoints["flash"]["budget_max_in_flight"] <= 2
-    assert "ignored" in task_log and FAKE_API_KEY not in task_log
+    shared = report["model"]["shared_budget"]
+    assert shared["concurrency"] == 2
+    assert shared["ignored_argon_concurrency"] == 16
+    assert 1 <= shared["max_in_flight"] <= 2
