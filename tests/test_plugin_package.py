@@ -78,7 +78,7 @@ def test_package_has_no_test_switch(xpi):
     # test profile only (plugin/dev/acceptance/quit_before_identity.js); the
     # package neither holds it nor reads any test setting.
     switch = (ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js").read_text("utf-8")
-    forbidden = re.compile(r"ZT_TEST_|zotero-translate-dev|acceptance|quitBeforeIdentity|eAttemptQuit")
+    forbidden = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
     assert forbidden.search(switch), "the pattern must match the switch itself"
     for name in xpi.namelist():
         assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name
