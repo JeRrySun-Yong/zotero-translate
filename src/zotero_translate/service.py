@@ -11,7 +11,7 @@ HTTP interface (the contract with the translation plugin):
   reruns_max (2), next_attempt_in_seconds (only while waiting_rerun), queue
   position (only while queued), error (the last failure's reason, only
   while waiting_rerun or failed), cancel_requested (the service accepted a
-  cancel), cleanup_error (why the task's processes could not be reaped, or
+  cancel and is reaping the task's processes), cleanup_error (why the task's processes could not be reaped, or
   null), kept source paragraphs and downloadable files
 - ``POST /tasks/{task_id}/cancel`` -> the same object as the query: 200 when
   the task is cancelled (a queued task, one waiting for a rerun, once its
@@ -151,7 +151,6 @@ HOST = "127.0.0.1"
 RESTART_ERROR = "翻译服务重启，任务中断"
 MANY_RESTARTS_ERROR = "翻译服务多次重启，任务中断"
 UPGRADE_ERROR = "升级前未完成的任务，请重试"
-CANCELLED_REASON = "用户取消"
 MAX_INTERRUPTIONS = 3  # in a row; the third fails the task
 RERUNS_MAX = 2  # automatic reruns after the first attempt
 RERUN_WAITS_SECONDS = (60.0, 300.0)  # before the first and the second rerun
@@ -269,9 +268,10 @@ class TaskQueue:
             return
         if not self._reap(task_id):
             return  # left as it is until its processes are reaped
-        if status.get("cancel_requested"):
-            # Accepted before the restart: completed now, no interruption, no rerun.
-            self._finish_cancel(task_id, attempt_ended=state == "running")
+        if status.get("cancel_requested") and state in ("queued", "waiting_rerun"):
+            # Accepted before the restart, its processes now reaped: completed
+            # now, no interruption, no rerun. (A running task's cancel is ticket 09's.)
+            self._finish_cancel(task_id)
         elif state == "queued":
             self._enqueue(task_id, status["queue_class"], status["queue_key"])
         elif state == "waiting_rerun":
@@ -388,6 +388,7 @@ class TaskQueue:
         _test_pause(PAUSE_BEFORE_RERUN_QUEUE, task_id, td.read_status(directory)["attempt"])
         with self._cond:
             status = td.read_status(directory)
+            # A cancel accepted while this thread waited (still reaping, or done) wins.
             if status["state"] != "waiting_rerun" or status.get("cancel_requested"):
                 return
             queue_key = [status["next_attempt_at"], _submitted_at(directory)]
@@ -422,7 +423,7 @@ class TaskQueue:
         ``then`` gives further ``(event, reason)`` log lines of the same
         transition, e.g. the requeue after an interruption.
 
-        ``outcome`` (succeeded, failed, interrupted, cancelled) ends the current attempt:
+        ``outcome`` (succeeded, failed, interrupted) ends the current attempt:
         its summary entry gets the end time, outcome and reason, and the
         task's ``report.json`` becomes that attempt's report with the summary
         of all attempts. The report is written before the status file, so a
@@ -477,7 +478,7 @@ class TaskQueue:
             # the sends that ended after the worker wrote its report, and
             # those of a worker that never wrote one.
             report["requests"] = load_records(records)
-        if outcome in ("interrupted", "cancelled"):
+        if outcome == "interrupted":
             # The attempt did not run to its end: say so, invent nothing.
             report.update(complete=False, incomplete_reason=reason)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -606,11 +607,11 @@ class TaskQueue:
         self._finish_cancel(task_id)
         return 200, self.status(task_id)
 
-    def _finish_cancel(self, task_id: str, attempt_ended: bool = False) -> None:
-        """Complete an accepted cancel: out of the queue and the rerun timer, ``cancelled``.
+    def _finish_cancel(self, task_id: str) -> None:
+        """Complete an accepted cancel whose processes are reaped: ``cancelled``.
 
-        ``attempt_ended``: an attempt was under way (a running task at
-        startup); its summary entry ends as cancelled.
+        ``cancel_requested`` is true only while the cancel is under way, so
+        the cancelled state clears it.
         """
         with self._cond:
             self._waiting.pop(task_id, None)
@@ -620,9 +621,7 @@ class TaskQueue:
             self._decide(
                 task_id,
                 "cancelled",
-                {"state": "cancelled", "next_attempt_at": None},
-                outcome="cancelled" if attempt_ended else None,
-                reason=CANCELLED_REASON if attempt_ended else None,
+                {"state": "cancelled", "next_attempt_at": None, "cancel_requested": False},
             )
             self._cond.notify_all()
 
@@ -656,10 +655,9 @@ class TaskQueue:
                 with self._cond:
                     if self._next_task() != task_id:
                         continue
+                    # A cancel takes the task out of _waiting under this lock
+                    # when it is accepted, so a task still here is not cancelled.
                     del self._waiting[task_id]
-                    status = td.read_status(self.tasks_dir / task_id)
-                    if status["state"] != "queued" or status.get("cancel_requested"):
-                        continue  # cancelled meanwhile: never started
                     attempt = self._start_attempt(task_id)
                 self._run_attempt(task_id, attempt)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
@@ -813,15 +811,18 @@ class TaskQueue:
             }
             if result["category"] == "retryable" and reruns_used < RERUNS_MAX:
                 due = time.time() + _rerun_waits()[reruns_used]
-                if self._adopt(
-                    task_id,
-                    attempt,
-                    "waiting_rerun",
-                    {**fields, "state": "waiting_rerun", "next_attempt_at": due},
-                    outcome="failed",
-                    reason=result["error"],
-                ):
-                    self._schedule_rerun(task_id, due, _submitted_at(directory))
+                # One lock for both, so a cancel never sees the task waiting
+                # without its rerun scheduled (and leaves no stale entry).
+                with self._cond:
+                    if self._adopt(
+                        task_id,
+                        attempt,
+                        "waiting_rerun",
+                        {**fields, "state": "waiting_rerun", "next_attempt_at": due},
+                        outcome="failed",
+                        reason=result["error"],
+                    ):
+                        self._schedule_rerun(task_id, due, _submitted_at(directory))
             else:
                 self._adopt(
                     task_id,

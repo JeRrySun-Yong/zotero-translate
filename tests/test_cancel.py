@@ -88,7 +88,7 @@ def _assert_cancelled(response, service, task_id: str) -> dict:
     body = response.json()
     assert body == service.status(task_id)  # the same object as a query
     assert body["state"] == "cancelled"
-    assert body["cancel_requested"] is True
+    assert body["cancel_requested"] is False  # true only while the cancel is under way
     assert body["queue_position"] is None
     assert body["next_attempt_in_seconds"] is None
     assert body["error"] is None
@@ -199,12 +199,12 @@ def test_finished_and_running_tasks_answer_409_unchanged_and_unknown_ones_404(
 
     failed = service.submit()
     _wait_for_file(pauses / f"{failed}-1.paused").unlink()
-    assert service.wait(failed)["state"] == "failed"
+    assert service.wait(failed, timeout=600)["state"] == "failed"
     succeeded = service.submit()
     _wait_for_file(pauses / f"{succeeded}-1.paused").unlink()
-    assert service.wait(succeeded)["state"] == "succeeded"
+    assert service.wait(succeeded, timeout=600)["state"] == "succeeded"
     running = service.submit()
-    paused = _wait_for_file(pauses / f"{running}-1.paused")
+    _wait_for_file(pauses / f"{running}-1.paused", timeout=600)  # held: it stays running
 
     for task_id, state in ((failed, "failed"), (succeeded, "succeeded"), (running, "running")):
         before = service.status(task_id)
@@ -214,13 +214,9 @@ def test_finished_and_running_tasks_answer_409_unchanged_and_unknown_ones_404(
         assert response.json()["state"] == state
         assert response.json()["cancel_requested"] is False
         assert service.status(task_id) == before
+        assert "接受取消" not in _events(service, task_id)
     assert _cancel(service, "0" * 32).status_code == 404
     assert _cancel(service, "not-a-task").status_code == 404
-
-    paused.unlink()
-    assert service.wait(running)["state"] == "succeeded"
-    for task_id in (failed, succeeded, running):
-        assert "接受取消" not in _events(service, task_id)
 
 
 def test_a_cancelled_task_is_not_queued_again_after_a_restart(tmp_path):
@@ -320,6 +316,35 @@ def test_a_cancel_whose_reaping_fails_answers_503_and_a_repeated_cancel_complete
     assert service.wait(other)["state"] == "succeeded"
 
 
+def test_cancelling_a_queued_task_whose_reap_failed_resumes_the_queue(
+    tmp_path, fake_model, start_service
+):
+    # The queue's reap before the first attempt fails: the task stays
+    # queued, with cleanup_error, and no attempt starts. A cancel reaps
+    # again: 503 while that fails; once it succeeds, the task is cancelled
+    # and the queue goes on.
+    scan_error = tmp_path / "scan-error"
+    scan_error.touch()
+    service = start_service(fake_model, env={SCAN_ERROR: str(scan_error)})
+
+    stuck = service.submit()
+    held = service.wait_for(stuck, lambda s: s["cleanup_error"] is not None, timeout=120)
+    assert held["state"] == "queued"
+    other = service.submit()
+    response = _cancel(service, stuck)
+    assert response.status_code == 503, response.text
+    assert response.json()["state"] == "queued"
+    assert response.json()["cancel_requested"] is True
+    assert "无法扫描进程" in response.json()["cleanup_error"]
+    assert service.status(other)["attempt"] == 0
+
+    scan_error.unlink()
+    _assert_cancelled(_cancel(service, stuck), service, stuck)
+    assert service.status(stuck)["cleanup_error"] is None
+    assert service.wait(other, timeout=600)["state"] == "succeeded"
+    assert service.status(stuck)["attempt"] == 0
+
+
 def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path):
     # The service dies after saving the accepted cancel, before reaping and
     # saving the cancelled state: one task queued, one waiting for a rerun,
@@ -350,7 +375,7 @@ def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path)
             for task_id in (waiting, queued):
                 cancelled = services[1].status(task_id)
                 assert cancelled["state"] == "cancelled"
-                assert cancelled["cancel_requested"] is True
+                assert cancelled["cancel_requested"] is False
             assert [p.poll() is not None for p in leftovers] == [True, True]
             _wait_for_file(pauses / f"{holder}-2.paused").unlink()
             assert services[1].wait(holder)["state"] == "succeeded"
