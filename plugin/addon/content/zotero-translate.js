@@ -199,25 +199,31 @@ var ZoteroTranslate = {
         this._loading = (async () => {
           this._byIdentity = (await IOUtils.exists(this._path)) ? await IOUtils.readJSON(this._path) : {};
         })();
+        this._loading.catch(() => {
+          this._loading = null; // read it again next time
+        });
       }
       await this._loading;
       return this._byIdentity;
     },
 
     /** The attachment with this identity, unless it is gone or in the trash. */
-    async find(target, { taskId, output }) {
-      const entry = (await this._load())[`${taskId}/${output}`];
+    _key: ({ taskId, output }) => `${taskId}/${output}`,
+    _itemKey: ({ libraryID, key }) => `${libraryID}/${key}`,
+
+    async find(target, identity) {
+      const entry = (await this._load())[this._key(identity)];
       const item = entry && (await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key));
       return item && !item.deleted ? item.id : null;
     },
 
     /** Write the identity; the file is replaced only after the new one is
      *  written in full, and the identity counts only once it is. */
-    async mark(id, { taskId, output }) {
+    async mark(id, identity) {
       const written = this._writing.then(async () => {
         const byIdentity = await this._load();
         const item = await Zotero.Items.getAsync(id);
-        const next = { ...byIdentity, [`${taskId}/${output}`]: { libraryID: item.libraryID, key: item.key } };
+        const next = { ...byIdentity, [this._key(identity)]: { libraryID: item.libraryID, key: item.key } };
         await IOUtils.makeDirectory(PathUtils.parent(this._path));
         await IOUtils.writeJSON(this._path, next, { tmpPath: `${this._path}.tmp` });
         this._byIdentity = next;
@@ -231,7 +237,7 @@ var ZoteroTranslate = {
      *  has no identity; null when there is none. */
     async unmarked(target, { title, since }) {
       const byIdentity = await this._load();
-      const marked = new Set(Object.values(byIdentity).map((e) => `${e.libraryID}/${e.key}`));
+      const marked = new Set(Object.values(byIdentity).map(this._itemKey));
       let items;
       if (target.parentItemID) {
         const parent = await Zotero.Items.getAsync(target.parentItemID);
@@ -248,7 +254,7 @@ var ZoteroTranslate = {
           !item.deleted &&
           item.getField("title") === title &&
           Zotero.Date.sqlToDate(item.dateAdded, true).getTime() >= sinceSecond &&
-          !marked.has(`${item.libraryID}/${item.key}`),
+          !marked.has(this._itemKey(item)),
       );
       return found ? found.id : null;
     },

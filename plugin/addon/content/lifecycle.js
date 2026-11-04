@@ -103,7 +103,7 @@ var ZoteroTranslateLifecycle = (() => {
   const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => !["submitting", "attach_failed"].includes(state));
   // States whose rows offer "取消"; a running task's cancel comes with ticket 09.
   const CANCELLABLE_STATES = ["queued", "waiting_rerun"];
-  // States whose rows offer "取消" that end the task here, without a cancel
+  // Further states whose rows offer "取消", which ends the task here, without a cancel
   // request: the service has already succeeded. Not while a PDF is being imported.
   const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
   // States whose rows offer "重试".
@@ -230,8 +230,9 @@ var ZoteroTranslateLifecycle = (() => {
         await upload(task);
       },
 
-      /** The "取消" button: save the cancel intent, end the task's operation
-       *  under way, and send the cancel at once; no confirmation. */
+      /** The "取消" button, no confirmation: end the task's operation under
+       *  way; while attaching or attach_failed, the task is cancelled at once,
+       *  with no cancel request; otherwise save the cancel intent and send the cancel at once. */
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (task && cancelsLocally(task)) {
@@ -483,13 +484,14 @@ var ZoteroTranslateLifecycle = (() => {
      *  and goes on later; a local error makes it attach_failed. Nothing
      *  happens after the operation has ended (a cancel). */
     async function attachOutputs(task, operation) {
-      const temp = { dir: null };
+      let dir = null;
+      const tempDir = async () => (dir = dir || (await tempFiles.makeDirectory(task)));
       try {
         try {
-          await attachEach(task, operation, temp);
+          await attachEach(task, operation, tempDir);
         } finally {
-          if (temp.dir) {
-            await tempFiles.remove(temp.dir);
+          if (dir) {
+            await tempFiles.remove(dir);
           }
         }
       } catch (e) {
@@ -499,7 +501,9 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    async function attachEach(task, operation, temp) {
+    /** Each PDF in turn: found with its identity, claimed after an import
+     *  intent, or downloaded (into `tempDir()`, made on first use) and imported. */
+    async function attachEach(task, operation, tempDir) {
       const target = await attachTarget(task);
       for (const output of Core.OUTPUTS) {
         if (!isCurrent(task, operation)) {
@@ -513,8 +517,14 @@ var ZoteroTranslateLifecycle = (() => {
         const intent = task.importIntent;
         if (attachment == null && intent && intent.taskId === task.taskId && intent.output === output.file) {
           attachment = await attachments.unmarked(target, { title: output.title, since: intent.startedAt });
+          if (!isCurrent(task, operation)) {
+            return;
+          }
           if (attachment != null) {
             await attachments.mark(attachment, identity);
+            if (!isCurrent(task, operation)) {
+              return;
+            }
           }
         }
         if (attachment == null) {
@@ -535,8 +545,7 @@ var ZoteroTranslateLifecycle = (() => {
           if (answer.body == null) {
             return disconnected(task);
           }
-          temp.dir = temp.dir || (await tempFiles.makeDirectory(task));
-          const path = await tempFiles.write(temp.dir, Core.outputFileName(task.sourceFileName, output.title), answer.body);
+          const path = await tempFiles.write(await tempDir(), Core.outputFileName(task.sourceFileName, output.title), answer.body);
           if (!isCurrent(task, operation)) {
             return; // cancelled: no import
           }
@@ -644,12 +653,14 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** The task has failed for good: only "重试" goes on. */
     function fail(task, reason) {
       task.state = "failed";
       task.error = reason;
       task.disconnectedSince = null;
     }
 
+    /** Attaching hit a local error: "继续挂回" or "取消" go on. */
     function attachFailed(task, reason) {
       task.state = "attach_failed";
       task.error = reason;

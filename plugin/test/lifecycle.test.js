@@ -88,6 +88,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
     quitAfterMark: false,
     findHold: null, // a held() whose route each look-up waits for
     writeHold: null, // the same for writing a temporary file
+    unmarkedHold: null, // and for looking for an attachment to claim
     library,
   };
   const identityOf = ({ taskId, output }) => `${taskId}/${output}`;
@@ -175,6 +176,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
       },
       unmarked: async (target, { title, since }) => {
         env.steps.push(`unmarked ${title} ${since}`);
+        if (env.unmarkedHold) {
+          await env.unmarkedHold.route();
+        }
         const found = env.library.find(
           (a) => !a.identity && !a.deleted && a.title === title && a.addedAt >= since && JSON.stringify(a.target) === JSON.stringify(target),
         );
@@ -1301,6 +1305,23 @@ test("取消 while the downloaded PDF is being written: once written, it is not 
   assert.equal(env.steps.at(-1), "remove /tmp/zotero-translate/t1");
 });
 
+test("取消 while looking for the attachment to claim: once the look-up returns, nothing is claimed", async () => {
+  const before = await quitWhileAttaching((env) => {
+    env.quitAfterImport = true;
+  });
+  const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
+  after.unmarkedHold = held();
+  after.lifecycle.start();
+  await after.clock.advance(2000);
+  assert.equal(after.unmarkedHold.count, 1);
+  await after.lifecycle.cancel(rowOf(after).key);
+  after.unmarkedHold.answer();
+  await after.clock.advance(60000);
+  assert.deepEqual(after.status(), ["已取消"]);
+  assert.ok(!after.steps.some((step) => step.startsWith("mark")));
+  assert.deepEqual(after.requests, []);
+});
+
 test("取消 on 挂回失败 ends the task; attachments already added stay", async () => {
   const env = await submitted(succeededRoutes("t1"));
   env.failWrite = "AutoDesign-双语对照.pdf";
@@ -1329,7 +1350,7 @@ test("an attaching task saved before attach records existed becomes 挂回失败
   assert.deepEqual(env.requests, [QUERY("t2")]); // nothing downloaded for t1
 
   await env.lifecycle.continueAttach(row.key);
-  assert.equal(env.lifecycle.tasks[0].state, "done");
+  assert.deepEqual(env.status(), ["已挂回", "翻译中"]);
   assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
 });
 
