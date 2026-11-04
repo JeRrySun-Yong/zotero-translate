@@ -605,3 +605,77 @@ def test_a_losers_record_is_written_even_when_the_process_exits_right_after(tmp_
         (1, "flash", "cancelled_for_winner", False),
         (2, "argon", "succeeded", True),
     ]
+
+
+# Batch acceptance: a send whose record cannot be written still ends: the
+# request fails with that error, as it does without hedging, instead of
+# waiting for an end that never comes.
+@pytest.mark.parametrize("fault", [None, "500"], ids=["answered", "failed"])
+def test_a_record_that_cannot_be_written_fails_the_request_instead_of_hanging(tmp_path, fault):
+    with FakeModel() as flash, FakeModel() as argon:
+        if fault:
+            flash.inject_error(fault)
+        models, log = _models(flash, argon, tmp_path)
+
+        def broken_append(**fields) -> None:
+            raise OSError("disk full")
+
+        log.append = broken_append
+        outcome: list = []
+
+        def call() -> None:
+            try:
+                outcome.append(models.flash.complete(MESSAGES, kind="translation_batch"))
+            except BaseException as e:  # noqa: BLE001 - the test looks at it
+                outcome.append(e)
+
+        caller = threading.Thread(target=call, daemon=True)
+        try:
+            caller.start()
+            caller.join(5.0)
+            assert not caller.is_alive(), "the request never ended"
+        finally:
+            models.close()
+
+    [error] = outcome
+    assert isinstance(error, OSError) and str(error) == "disk full"
+
+
+# Batch acceptance: 「胜者出现后，还没发出去的副本不再发」 also when the copy
+# has its argon slot but its HTTP thread has not sent anything yet.
+def test_a_copy_with_a_slot_but_not_yet_sent_is_not_sent_once_the_original_wins(tmp_path):
+    with FakeModel() as flash, FakeModel() as argon:
+        answered = threading.Event()
+
+        def answer_after_the_threshold(body: dict) -> str:
+            time.sleep(HEDGE + 0.3)
+            answered.set()
+            return "flash"
+
+        flash.respond("other", answer_after_the_threshold)
+        models, log = _models(flash, argon, tmp_path)
+        endpoint = models.argon.endpoint
+        run, start = endpoint._run, endpoint.start
+
+        def slow_thread(*args) -> None:
+            # The copy's HTTP thread is slow to start: it sends only after
+            # the original has won.
+            answered.wait(10)
+            time.sleep(0.3)
+            run(*args)
+
+        def slow_return(*args, **kwargs):
+            # The caller is slower still to get the send back from ``start``.
+            send = start(*args, **kwargs)
+            answered.wait(10)
+            time.sleep(0.8)
+            return send
+
+        endpoint._run, endpoint.start = slow_thread, slow_return
+        try:
+            assert models.flash.complete(MESSAGES, kind="translation_batch") == "flash"
+            time.sleep(1.5)  # past both delays
+        finally:
+            models.close()
+
+    assert argon.requests == []
