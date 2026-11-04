@@ -1,8 +1,16 @@
 /* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
  * the "翻译任务" window, and the Zotero side of the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
- * PDFs, importing an output PDF as an attachment, saving the tasks in a
- * preference.
+ * PDFs, importing an output PDF as an attachment, the attachments'
+ * identities, saving the tasks in a preference.
+ *
+ * An attachment's identity (service task ID + output) is kept in the file
+ * zotero-translate/attachments.json in the Zotero data directory,
+ * {"<task ID>/<output>": {libraryID, key}}, written whole by an atomic
+ * rename. Not as an item relation, which would be hidden too: the Zotero
+ * sync server accepts only its own relation predicates (dc:relation,
+ * owl:sameAs, dc:replaces with Zotero item URIs; Mendeley's), so an
+ * attachment with any other relation could never sync (M3 ticket 10).
  *
  * The plugin sends the service only the PDF and its file name; model
  * credentials and translation parameters live in the service.
@@ -49,11 +57,18 @@ var ZoteroTranslate = {
         },
         remove: (dir) => IOUtils.remove(dir, { recursive: true }),
       },
-      importAttachment: (target, { path, title }) =>
-        Zotero.Attachments.importFromFile({ file: path, title, ...target }),
+      importAttachment: async (target, { path, title }) =>
+        (await Zotero.Attachments.importFromFile({ file: path, title, ...target })).id,
+      attachments: this.attachmentIdentities,
       store: {
         load: () => Zotero.Prefs.get(this.TASKS_PREF, true),
-        save: (value) => Zotero.Prefs.set(this.TASKS_PREF, value, true),
+        // Ask for prefs.js to be written now (Firefox writes it off the main
+        // thread within about 0.1 s; otherwise about 0.6 s later), so that an
+        // import intent is on disk before the import commits, also if Zotero is killed.
+        save: (value) => {
+          Zotero.Prefs.set(this.TASKS_PREF, value, true);
+          Services.prefs.savePrefFile(null);
+        },
       },
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),
@@ -175,6 +190,80 @@ var ZoteroTranslate = {
       throw new Error("找不到原 PDF 附件");
     }
     return { libraryID: source.libraryID, collections: source.getCollections() };
+  },
+
+  /** The attachments' identities ({taskId, output}), for the lifecycle. */
+  attachmentIdentities: {
+    _path: null,
+    _byIdentity: null, // "<task ID>/<output>" -> {libraryID, key}
+    _loading: null,
+    _writing: Promise.resolve(),
+
+    async _load() {
+      if (!this._loading) {
+        this._path = PathUtils.join(Zotero.DataDirectory.dir, "zotero-translate", "attachments.json");
+        this._loading = (async () => {
+          this._byIdentity = (await IOUtils.exists(this._path)) ? await IOUtils.readJSON(this._path) : {};
+        })();
+        this._loading.catch(() => {
+          this._loading = null; // read it again next time
+        });
+      }
+      await this._loading;
+      return this._byIdentity;
+    },
+
+    /** The attachment with this identity, unless it is gone or in the trash. */
+    _key: ({ taskId, output }) => `${taskId}/${output}`,
+    _itemKey: ({ libraryID, key }) => `${libraryID}/${key}`,
+
+    async find(target, identity) {
+      const entry = (await this._load())[this._key(identity)];
+      const item = entry && (await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key));
+      return item && !item.deleted ? item.id : null;
+    },
+
+    /** Write the identity; the file is replaced only after the new one is
+     *  written in full, and the identity counts only once it is. */
+    async mark(id, identity) {
+      const written = this._writing.then(async () => {
+        const byIdentity = await this._load();
+        const item = await Zotero.Items.getAsync(id);
+        const next = { ...byIdentity, [this._key(identity)]: { libraryID: item.libraryID, key: item.key } };
+        await IOUtils.makeDirectory(PathUtils.parent(this._path));
+        await IOUtils.writeJSON(this._path, next, { tmpPath: `${this._path}.tmp` });
+        this._byIdentity = next;
+      });
+      this._writing = written.catch(() => {});
+      await written;
+    },
+
+    /** An attachment at the target (under the original item, or a standalone
+     *  one in its library) with this title, added at or after `since`, that
+     *  has no identity; null when there is none. */
+    async unmarked(target, { title, since }) {
+      const byIdentity = await this._load();
+      const marked = new Set(Object.values(byIdentity).map(this._itemKey));
+      let items;
+      if (target.parentItemID) {
+        const parent = await Zotero.Items.getAsync(target.parentItemID);
+        items = parent ? await Zotero.Items.getAsync(parent.getAttachments()) : [];
+      } else {
+        const search = new Zotero.Search({ libraryID: target.libraryID });
+        search.addCondition("itemType", "is", "attachment");
+        search.addCondition("title", "is", title);
+        items = (await Zotero.Items.getAsync(await search.search())).filter((item) => !item.parentItemID);
+      }
+      const sinceSecond = Math.floor(since / 1000) * 1000; // dateAdded has whole seconds
+      const found = items.find(
+        (item) =>
+          !item.deleted &&
+          item.getField("title") === title &&
+          Zotero.Date.sqlToDate(item.dateAdded, true).getTime() >= sinceSecond &&
+          !marked.has(this._itemKey(item)),
+      );
+      return found ? found.id : null;
+    },
   },
 
   openTaskWindow(window) {

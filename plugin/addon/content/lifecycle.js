@@ -26,6 +26,26 @@
  * counts only while the operation is the task's current one, of the same
  * generation and task ID; so an old task's answers never change the new one.
  *
+ * Attaching handles the two PDFs one after the other, each in this order:
+ * look for the attachment with its identity (service task ID + output,
+ * mono or dual), and when there is one record it and go on; otherwise
+ * download the PDF, save the import intent (task ID, output, start time),
+ * import it, write the identity on the new attachment, record it and
+ * clear the intent. Zotero saves an attachment before the plugin can
+ * write its identity; so when an intent is saved and the attachment with
+ * that identity is not found, the attachment without identity, of the
+ * output's title, added no earlier than the intent's start, is claimed
+ * (its identity written) instead of importing again. A local error makes
+ * the task `attach_failed` with the reason; "继续挂回" handles the PDFs
+ * again in the same way. "取消" while downloading or waiting to download,
+ * or on `attach_failed`, makes the task `cancelled` at once (the service
+ * has already succeeded; no cancel request): the download under way is
+ * aborted, and nothing comes after it; attachments already added stay.
+ * While a PDF is being imported, the row offers no "取消". An `attaching`
+ * task saved by a plugin from before these records (no `attached`) cannot
+ * tell how many PDFs it attached: it becomes `attach_failed`, asking the
+ * user to check the item's attachments first.
+ *
  * Everything outside the lifecycle comes in as a dependency, given to
  * createTaskLifecycle():
  *
@@ -40,7 +60,12 @@
  * - tempFiles: {makeDirectory(task), write(dir, fileName, bytes), remove(dir)}:
  *   the task's temporary directory for the downloaded PDFs; write returns the file's path;
  * - importAttachment(target, {path, title}): import one PDF file as an
- *   attachment at that target;
+ *   attachment at that target; returns the attachment (an ID, saved with the task);
+ * - attachments: {find(target, identity), mark(attachment, identity),
+ *   unmarked(target, {title, since})}, where identity is {taskId, output}:
+ *   the attachment with that identity that the user has not deleted, or
+ *   null; write the identity on an attachment; the attachment at the target
+ *   with no identity, that title, added at or after the clock time `since`, or null;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
  * - debug(message), logError(error): logging.
  *
@@ -75,9 +100,12 @@ var ZoteroTranslateLifecycle = (() => {
   const ACTIVE_STATES = Core.UNFINISHED_STATES;
   // States in which the plugin has a next operation for the task: query the
   // service, (attaching) download and import the PDFs, or (cancelling) send the cancel.
-  const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => state !== "submitting");
+  const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => !["submitting", "attach_failed"].includes(state));
   // States whose rows offer "取消"; a running task's cancel comes with ticket 09.
   const CANCELLABLE_STATES = ["queued", "waiting_rerun"];
+  // Further states whose rows offer "取消", which ends the task here, without a cancel
+  // request: the service has already succeeded. Not while a PDF is being imported.
+  const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
   // States whose rows offer "重试".
   const RETRYABLE_STATES = ["failed", "cancelled"];
   // Task fields saved for restarts.
@@ -91,7 +119,11 @@ var ZoteroTranslateLifecycle = (() => {
     "state",
     "disconnectedSince",
     "generation",
+    "error",
+    "attached",
+    "importIntents",
   ];
+  const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
 
   /** The service could not be reached, did not answer in full within the
    *  time limit, or gave an answer that cannot be read. */
@@ -105,6 +137,7 @@ var ZoteroTranslateLifecycle = (() => {
     attachTarget,
     tempFiles,
     importAttachment,
+    attachments,
     store,
     debug,
     logError,
@@ -126,7 +159,10 @@ var ZoteroTranslateLifecycle = (() => {
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
       // service stopped answering, or null), generation (0 for a new task, one more for
       // each retry), cleanupError (why the
-      // service has not confirmed the cancel yet, or null)}
+      // service has not confirmed the cancel yet, or null), attached (output -> the
+      // attachment recorded for it, e.g. {mono: 51}), importIntents (output ->
+      // {taskId, output, startedAt} while that PDF's import has started and its attachment
+      // is not recorded; one per PDF, so handling one never drops the other's), importing (true while a PDF is being imported; not saved)}
       tasks: [],
       // Why items of the latest submission were skipped; shown in the task window.
       notices: [],
@@ -194,10 +230,17 @@ var ZoteroTranslateLifecycle = (() => {
         await upload(task);
       },
 
-      /** The "取消" button: save the cancel intent, end the task's operation
-       *  under way, and send the cancel at once; no confirmation. */
+      /** The "取消" button, no confirmation: end the task's operation under
+       *  way; while attaching or attach_failed, the task is cancelled at once,
+       *  with no cancel request; otherwise save the cancel intent and send the cancel at once. */
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
+        if (task && cancelsLocally(task)) {
+          Object.assign(task, { state: "cancelled", error: null, disconnectedSince: null });
+          changed(); // saved first: the task is no longer unfinished, so no restart attaches it
+          endOperation(task);
+          return;
+        }
         if (!task || !CANCELLABLE_STATES.includes(task.state)) {
           return;
         }
@@ -209,14 +252,29 @@ var ZoteroTranslateLifecycle = (() => {
         }
       },
 
-      /** Rows for the task window; `key` identifies the task for "重试" and "取消". */
+      /** The "继续挂回" button of an attach_failed row: attach again,
+       *  each PDF looked for with its identity first. */
+      async continueAttach(key) {
+        const task = lifecycle.tasks.find((t) => t.key === key);
+        if (!task || task.state !== "attach_failed") {
+          return;
+        }
+        Object.assign(task, { state: "attaching", error: null });
+        changed();
+        if (started) {
+          await run(task);
+        }
+      },
+
+      /** Rows for the task window; `key` identifies the task for "重试", "取消" and "继续挂回". */
       rows() {
         const now = clock.now();
         return lifecycle.tasks.map((task) => ({
           ...Core.taskRow(task, now),
           key: task.key,
           canRetry: RETRYABLE_STATES.includes(task.state),
-          canCancel: CANCELLABLE_STATES.includes(task.state),
+          canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
+          canContinue: task.state === "attach_failed",
         }));
       },
     };
@@ -228,6 +286,12 @@ var ZoteroTranslateLifecycle = (() => {
         lifecycle.notice(`${title}：已有未结束的翻译任务，本次提交已忽略`);
       }
       return active;
+    }
+
+    /** Whether "取消" ends the task here: attaching, but not while a PDF is
+     *  being imported; or attach_failed. */
+    function cancelsLocally(task) {
+      return LOCALLY_CANCELLABLE_STATES.includes(task.state) && !task.importing;
     }
 
     /** Set the task's next operation: 2 seconds from now, or 10 while the
@@ -252,7 +316,7 @@ var ZoteroTranslateLifecycle = (() => {
       operations.set(task.key, operation);
       try {
         if (task.state === "attaching") {
-          await attachOutputs(task);
+          await attachOutputs(task, operation);
         } else if (task.state === "cancelling") {
           await sendCancel(task, operation);
         } else {
@@ -309,6 +373,8 @@ var ZoteroTranslateLifecycle = (() => {
         keptSourceAlgorithms: null,
         disconnectedSince: null,
         cleanupError: null,
+        attached: {},
+        importIntents: {},
       });
       changed();
       try {
@@ -364,7 +430,7 @@ var ZoteroTranslateLifecycle = (() => {
       task.state = status.state === "succeeded" ? "attaching" : status.state;
       changed();
       if (task.state === "attaching") {
-        await attachOutputs(task);
+        await attachOutputs(task, operation);
       }
     }
 
@@ -412,43 +478,98 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    /** Resolve where the PDFs go; download both into the task's temporary
-     *  directory; only when both are written, import them; always remove the
-     *  directory. A failure before the imports attaches nothing; existing
-     *  attachments stay as they are. When the service cannot be reached
-     *  while downloading, the task stays attaching and starts over later. */
-    async function attachOutputs(task) {
+    /** Attach the two PDFs, one after the other (see the top of this file);
+     *  always remove the temporary directory, when one was made. When the
+     *  service cannot be reached while downloading, the task stays attaching
+     *  and goes on later; a local error makes it attach_failed. Nothing
+     *  happens after the operation has ended (a cancel). */
+    async function attachOutputs(task, operation) {
+      let dir = null;
+      const tempDir = async () => (dir = dir || (await tempFiles.makeDirectory(task)));
       try {
-        const target = await attachTarget(task);
-        const dir = await tempFiles.makeDirectory(task);
         try {
-          const files = [];
-          for (const output of Core.OUTPUTS) {
-            const url = Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "files", output.file);
-            const answer = await exchange(url, {}, DOWNLOAD_LIMIT_MS, async (response) => new Uint8Array(await response.arrayBuffer()));
-            if (answer.status === 404) {
-              throw new Error("译文已不在翻译服务中，请重试");
-            }
-            if (answer.body == null) {
-              throw new Unreachable(`HTTP ${answer.status}`);
-            }
-            const fileName = Core.outputFileName(task.sourceFileName, output.title);
-            files.push({ path: await tempFiles.write(dir, fileName, answer.body), title: output.title });
-          }
-          for (const file of files) {
-            await importAttachment(target, file);
-          }
+          await attachEach(task, operation, tempDir);
         } finally {
-          await tempFiles.remove(dir);
+          if (dir) {
+            await tempFiles.remove(dir);
+          }
         }
+      } catch (e) {
+        if (isCurrent(task, operation)) {
+          attachFailed(task, e.message);
+        }
+      }
+    }
+
+    /** Each PDF in turn: found with its identity, claimed after an import
+     *  intent, or downloaded (into `tempDir()`, made on first use) and imported. */
+    async function attachEach(task, operation, tempDir) {
+      const target = await attachTarget(task);
+      for (const output of Core.OUTPUTS) {
+        if (!isCurrent(task, operation)) {
+          return;
+        }
+        const identity = { taskId: task.taskId, output: output.file };
+        let attachment = await attachments.find(target, identity);
+        if (!isCurrent(task, operation)) {
+          return;
+        }
+        const intent = task.importIntents[output.file];
+        if (attachment == null && intent && intent.taskId === task.taskId) {
+          attachment = await attachments.unmarked(target, { title: output.title, since: intent.startedAt });
+          if (!isCurrent(task, operation)) {
+            return;
+          }
+          if (attachment != null) {
+            await attachments.mark(attachment, identity);
+            if (!isCurrent(task, operation)) {
+              return;
+            }
+          }
+        }
+        if (attachment == null) {
+          const answer = await operationExchange(
+            task,
+            operation,
+            ["tasks", task.taskId, "files", output.file],
+            {},
+            DOWNLOAD_LIMIT_MS,
+            async (response) => new Uint8Array(await response.arrayBuffer()),
+          );
+          if (!answer) {
+            return; // the operation has ended, or the service cannot be reached
+          }
+          if (answer.status === 404) {
+            return fail(task, "译文已不在翻译服务中，请重试");
+          }
+          if (answer.body == null) {
+            return disconnected(task);
+          }
+          const path = await tempFiles.write(await tempDir(), Core.outputFileName(task.sourceFileName, output.title), answer.body);
+          if (!isCurrent(task, operation)) {
+            return; // cancelled: no import
+          }
+          task.importIntents = {
+            ...task.importIntents,
+            [output.file]: { taskId: task.taskId, output: output.file, startedAt: clock.now() },
+          };
+          task.importing = true;
+          changed(); // the intent is saved before the import
+          try {
+            attachment = await importAttachment(target, { path, title: output.title });
+            await attachments.mark(attachment, identity);
+          } finally {
+            task.importing = false;
+          }
+        }
+        task.attached = { ...task.attached, [output.file]: attachment };
+        const { [output.file]: _done, ...otherIntents } = task.importIntents;
+        task.importIntents = otherIntents; // the other PDF's intent stays until that one is handled
+        changed();
+      }
+      if (isCurrent(task, operation)) {
         task.state = "done";
         task.disconnectedSince = null;
-      } catch (e) {
-        if (e instanceof Unreachable) {
-          disconnected(task);
-        } else {
-          fail(task, e.message);
-        }
       }
     }
 
@@ -536,14 +657,24 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** The task has failed for good: only "重试" goes on. */
     function fail(task, reason) {
       task.state = "failed";
       task.error = reason;
       task.disconnectedSince = null;
     }
 
+    /** Attaching hit a local error: "继续挂回" or "取消" go on. */
+    function attachFailed(task, reason) {
+      task.state = "attach_failed";
+      task.error = reason;
+      task.disconnectedSince = null;
+    }
+
     /** Load the tasks saved before Zotero last quit. An upload under way
-     *  when Zotero quit is not sent again: its row fails and asks for a retry. */
+     *  when Zotero quit is not sent again: its row fails and asks for a retry.
+     *  An attaching task saved without attach records (before they existed)
+     *  becomes attach_failed. */
     function restoreTasks() {
       let saved = [];
       try {
@@ -554,13 +685,20 @@ var ZoteroTranslateLifecycle = (() => {
       lifecycle.tasks = saved.map((task) => ({
         disconnectedSince: null,
         generation: 0,
+        error: null,
+        importIntents: {},
         ...task,
+        attached: task.attached || {},
         cleanupError: null,
         key: nextKey++,
       }));
-      for (const task of lifecycle.tasks.filter((t) => t.state === "submitting")) {
-        fail(task, "提交未完成，请重试");
-      }
+      lifecycle.tasks.forEach((task, i) => {
+        if (task.state === "submitting") {
+          fail(task, "提交未完成，请重试");
+        } else if (task.state === "attaching" && !saved[i].attached) {
+          attachFailed(task, UPGRADE_ATTACH_ERROR);
+        }
+      });
       saveTasks();
     }
 
