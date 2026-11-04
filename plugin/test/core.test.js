@@ -119,3 +119,12 @@ test("a disconnected unfinished row says how many whole minutes it has waited, a
   assert.equal(core.taskRow(task, 1000 + 180000).status, "翻译服务暂时连不上，恢复后继续（已 3 分钟）");
   assert.equal(core.taskRow({ ...task, state: "failed", error: "x" }, 1000).status, "失败：x");
 });
+
+test("a cancelling row says so, with the service's reason or the disconnection; a cancelled row says 已取消", () => {
+  const cancelling = { title: "A", state: "cancelling", stage: "排队中", progress: 0 };
+  assert.equal(core.taskRow(cancelling).status, "取消中");
+  assert.equal(core.taskRow({ ...cancelling, cleanupError: "进程回收没有完成" }).status, "取消中：进程回收没有完成");
+  assert.equal(core.taskRow({ ...cancelling, disconnectedSince: 0 }, 5 * 60000).status, "取消中（翻译服务暂时连不上）");
+  assert.equal(core.taskRow({ title: "A", state: "cancelled" }).status, "已取消");
+  assert.equal(core.taskRow({ title: "A", state: "cancelled", disconnectedSince: 0 }, 60000).status, "已取消");
+});

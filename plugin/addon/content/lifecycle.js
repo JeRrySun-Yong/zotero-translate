@@ -14,6 +14,18 @@
  * or a 404 for the task or one of its PDFs, fails the task. An upload that
  * cannot reach the service fails at once, naming the service address.
  *
+ * "取消" on a queued or waiting task (also while disconnected) first saves
+ * the cancel intent and makes the task `cancelling`, which ends whatever
+ * operation the task has under way: its request is aborted, and its answer,
+ * whenever it comes, is dropped. The cancel request goes out at once; the
+ * task is no longer queried. 200, 409 or 404 make it `cancelled`, and
+ * nothing is attached; a 503 shows the service's reason, and a 503 or no
+ * answer sends it again every 10 seconds, also after Zotero restarts.
+ * "重试" (failed or cancelled) submits the PDF again as a new task under a
+ * new generation, with nothing of the old task's. An operation's result
+ * counts only while the operation is the task's current one, of the same
+ * generation and task ID; so an old task's answers never change the new one.
+ *
  * Everything outside the lifecycle comes in as a dependency, given to
  * createTaskLifecycle():
  *
@@ -51,16 +63,21 @@ var ZoteroTranslateLifecycle = (() => {
   // Time limits of one request, from sending it to reading the whole answer.
   const UPLOAD_LIMIT_MS = 120000;
   const QUERY_LIMIT_MS = 10000;
+  const CANCEL_LIMIT_MS = 30000; // more than the service's 15 seconds to reap the task's processes
   const DOWNLOAD_LIMIT_MS = 120000; // each PDF
   // Task states in the service's answers that the plugin acts on; any other
   // answer counts as one that cannot be read (a disconnection).
-  const KNOWN_SERVICE_STATES = ["queued", "running", "waiting_rerun", "succeeded", "failed"];
+  const KNOWN_SERVICE_STATES = ["queued", "running", "waiting_rerun", "succeeded", "failed", "cancelled"];
   // Unfinished states (core.js): saved for restarts, and a source PDF with a
   // task in one of them is not submitted again.
   const ACTIVE_STATES = Core.UNFINISHED_STATES;
   // States in which the plugin has a next operation for the task: query the
-  // service, or (attaching) download and import the PDFs.
+  // service, (attaching) download and import the PDFs, or (cancelling) send the cancel.
   const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => state !== "submitting");
+  // States whose rows offer "取消"; a running task's cancel comes with ticket 09.
+  const CANCELLABLE_STATES = ["queued", "waiting_rerun"];
+  // States whose rows offer "重试".
+  const RETRYABLE_STATES = ["failed", "cancelled"];
   // Task fields saved for restarts.
   const SAVED_FIELDS = [
     "sourceItemID",
@@ -71,6 +88,8 @@ var ZoteroTranslateLifecycle = (() => {
     "taskId",
     "state",
     "disconnectedSince",
+    "generation",
+    "cancelRequested",
   ];
 
   /** The service could not be reached, did not answer in full within the
@@ -94,15 +113,19 @@ var ZoteroTranslateLifecycle = (() => {
     let started = false;
     // Task key -> the timer of the task's next operation. A task's next
     // operation is set only when its current one has finished, so a task
-    // never has two operations at once.
+    // never has two operations at once; a cancel ends the current one first.
     const timers = new Map();
+    // Task key -> the operation under way: {generation, taskId, abort}.
+    const operations = new Map();
 
     const lifecycle = {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
       // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
-      // service stopped answering, or null)}
+      // service stopped answering, or null), generation (0 for a new task, one more for
+      // each retry), cancelRequested (the user cancelled), cleanupError (why the
+      // service has not confirmed the cancel yet, or null)}
       tasks: [],
       // Why items of the latest submission were skipped; shown in the task window.
       notices: [],
@@ -150,30 +173,49 @@ var ZoteroTranslateLifecycle = (() => {
           itemID: source.itemID,
           title: source.title,
           sourceFileName: source.sourceFileName,
+          generation: 0,
         };
         lifecycle.tasks.push(task);
         await upload(task);
       },
 
-      /** The "重试" button of a failed row: submit the same source PDF again. */
+      /** The "重试" button of a failed or cancelled row: submit the same
+       *  source PDF again, as a new task of a new generation. */
       async retry(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
-        if (!task || task.state !== "failed") {
+        if (!task || !RETRYABLE_STATES.includes(task.state)) {
           return;
         }
         if (skippedAsActive(task.sourceItemID, task.title)) {
           return;
         }
+        task.generation = (task.generation || 0) + 1;
         await upload(task);
       },
 
-      /** Rows for the task window; `key` identifies the task for "重试". */
+      /** The "取消" button: save the cancel intent, end the task's operation
+       *  under way, and send the cancel at once; no confirmation. */
+      async cancel(key) {
+        const task = lifecycle.tasks.find((t) => t.key === key);
+        if (!task || !CANCELLABLE_STATES.includes(task.state)) {
+          return;
+        }
+        Object.assign(task, { state: "cancelling", cancelRequested: true, cleanupError: null });
+        endOperation(task);
+        changed(); // the intent is saved before the request goes out
+        if (started) {
+          await run(task);
+        }
+      },
+
+      /** Rows for the task window; `key` identifies the task for "重试" and "取消". */
       rows() {
         const now = clock.now();
         return lifecycle.tasks.map((task) => ({
           ...Core.taskRow(task, now),
           key: task.key,
-          canRetry: task.state === "failed",
+          canRetry: RETRYABLE_STATES.includes(task.state),
+          canCancel: CANCELLABLE_STATES.includes(task.state),
         }));
       },
     };
@@ -182,27 +224,70 @@ var ZoteroTranslateLifecycle = (() => {
     function skippedAsActive(sourceItemID, title) {
       const active = lifecycle.tasks.some((t) => t.sourceItemID === sourceItemID && ACTIVE_STATES.includes(t.state));
       if (active) {
-        lifecycle.notice(`${title}：已在排队或翻译中，本次提交已忽略`);
+        lifecycle.notice(`${title}：已有未结束的翻译任务，本次提交已忽略`);
       }
       return active;
     }
 
     /** Set the task's next operation: 2 seconds from now, or 10 while the
-     *  service cannot be reached. */
+     *  service cannot be reached or has not confirmed a cancel. */
     function schedule(task) {
-      if (!started || !SCHEDULED_STATES.includes(task.state)) {
+      if (!started || !SCHEDULED_STATES.includes(task.state) || timers.has(task.key) || operations.has(task.key)) {
         return;
       }
-      const delay = task.disconnectedSince == null ? POLL_INTERVAL_MS : DISCONNECTED_INTERVAL_MS;
+      const waiting = task.disconnectedSince != null || task.cleanupError != null;
+      const delay = waiting ? DISCONNECTED_INTERVAL_MS : POLL_INTERVAL_MS;
       timers.set(
         task.key,
-        clock.setTimeout(async () => {
-          timers.delete(task.key);
-          await (task.state === "attaching" ? attachOutputs(task) : query(task));
-          changed();
-          schedule(task);
-        }, delay),
+        clock.setTimeout(() => run(task), delay),
       );
+    }
+
+    /** Run the task's next operation; when it is still the task's current
+     *  one at its end, set the one after. */
+    async function run(task) {
+      timers.delete(task.key);
+      const operation = { generation: task.generation, taskId: task.taskId, abort: new AbortController() };
+      operations.set(task.key, operation);
+      try {
+        if (task.state === "attaching") {
+          await attachOutputs(task);
+        } else if (task.state === "cancelling") {
+          await sendCancel(task, operation);
+        } else {
+          await query(task, operation);
+        }
+      } finally {
+        const current = operations.get(task.key) === operation;
+        if (current) {
+          operations.delete(task.key);
+        }
+        changed();
+        if (current) {
+          schedule(task);
+        }
+      }
+    }
+
+    /** Whether the operation's result still counts for the task. */
+    function isCurrent(task, operation) {
+      return (
+        operations.get(task.key) === operation && task.generation === operation.generation && task.taskId === operation.taskId
+      );
+    }
+
+    /** End the task's operation under way and its next one: the request is
+     *  aborted and the result, whenever it comes, does not count. */
+    function endOperation(task) {
+      if (timers.has(task.key)) {
+        clock.clearTimeout(timers.get(task.key));
+        timers.delete(task.key);
+      }
+      const operation = operations.get(task.key);
+      if (operation) {
+        operations.delete(task.key);
+        operation.abort.abort();
+      }
     }
 
     /** Send the task's source PDF to the service address currently set. */
@@ -219,7 +304,11 @@ var ZoteroTranslateLifecycle = (() => {
         nextAttemptInSeconds: null,
         queuePosition: null,
         error: null,
+        keptSourceParagraphs: null,
+        keptSourceAlgorithms: null,
         disconnectedSince: null,
+        cancelRequested: false,
+        cleanupError: null,
       });
       changed();
       try {
@@ -245,13 +334,17 @@ var ZoteroTranslateLifecycle = (() => {
       schedule(task);
     }
 
-    /** Ask the service about the task; on success, attach its PDFs. */
-    async function query(task) {
+    /** Ask the service about the task; on success, attach its PDFs. An
+     *  answer that comes after the operation ended (a cancel) is dropped. */
+    async function query(task, operation) {
       let answer;
       try {
-        answer = await exchange(Core.serviceUrl(task.serviceUrl, "tasks", task.taskId), {}, QUERY_LIMIT_MS, readStatus);
+        answer = await exchange(Core.serviceUrl(task.serviceUrl, "tasks", task.taskId), { signal: operation.abort.signal }, QUERY_LIMIT_MS, readStatus);
       } catch {
-        return disconnected(task);
+        return isCurrent(task, operation) && disconnected(task);
+      }
+      if (!isCurrent(task, operation)) {
+        return;
       }
       if (answer.status === 404) {
         return fail(task, "翻译服务中找不到该任务，请重试");
@@ -277,6 +370,34 @@ var ZoteroTranslateLifecycle = (() => {
       changed();
       if (task.state === "attaching") {
         await attachOutputs(task);
+      }
+    }
+
+    /** Send the cancel: 200, 409 (the task had ended) or 404 (the service no
+     *  longer has it) make the task cancelled; a 503 keeps it cancelling,
+     *  with the service's reason; no answer keeps it cancelling, disconnected. */
+    async function sendCancel(task, operation) {
+      let answer;
+      try {
+        answer = await exchange(
+          Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "cancel"),
+          { method: "POST", signal: operation.abort.signal },
+          CANCEL_LIMIT_MS,
+          readCancelAnswer,
+          [503],
+        );
+      } catch {
+        return isCurrent(task, operation) && disconnected(task);
+      }
+      if (!isCurrent(task, operation)) {
+        return;
+      }
+      if ([200, 409, 404].includes(answer.status)) {
+        Object.assign(task, { state: "cancelled", disconnectedSince: null, cleanupError: null });
+      } else if (answer.status === 503) {
+        Object.assign(task, { disconnectedSince: null, cleanupError: answer.body.cleanup_error });
+      } else {
+        disconnected(task);
       }
     }
 
@@ -322,11 +443,15 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** One request to the service, with `limitMs` to send it and read the
      *  whole answer: {status, body}, where body is read(response) for a
-     *  success status and null otherwise (that body is not read; the request
-     *  is aborted). Throws Unreachable when there is no connection, the time
-     *  limit passes, or the answer cannot be read. */
-    async function exchange(url, options, limitMs, read) {
+     *  success status or one of `readStatuses`, and null otherwise (that body
+     *  is not read; the request is aborted). Throws Unreachable when there is
+     *  no connection, the time limit passes, the answer cannot be read, or
+     *  `options.signal` (the task's operation) is aborted. */
+    async function exchange(url, { signal, ...options }, limitMs, read, readStatuses = []) {
       const abort = new AbortController();
+      if (signal) {
+        signal.addEventListener("abort", () => abort.abort(), { once: true });
+      }
       let timer;
       const timeLimit = new Promise((resolve, reject) => {
         timer = clock.setTimeout(() => {
@@ -342,7 +467,7 @@ var ZoteroTranslateLifecycle = (() => {
           debug(`zotero-translate: ${url}: ${e}`);
           throw new Unreachable("无法连接翻译服务");
         }
-        if (!response.ok) {
+        if (!response.ok && !readStatuses.includes(response.status)) {
           return { status: response.status, body: null };
         }
         try {
@@ -372,14 +497,23 @@ var ZoteroTranslateLifecycle = (() => {
     }
 
     /** The service's answer about a task; one without a state the plugin
-     *  acts on cannot be read. `cancelled` is not among them until the
-     *  plugin handles cancellation, so it keeps the task as it is. */
+     *  acts on cannot be read. */
     async function readStatus(response) {
       const status = await response.json();
       if (!KNOWN_SERVICE_STATES.includes(status?.state)) {
         throw new Error(`未知的任务状态：${JSON.stringify(status?.state)}`);
       }
       return status;
+    }
+
+    /** The answer to a cancel: the task (200), or the reason it is not
+     *  cancelled yet (503); one without them cannot be read. */
+    async function readCancelAnswer(response) {
+      const body = await response.json();
+      if (response.status === 503 ? typeof body?.cleanup_error !== "string" : typeof body?.state !== "string") {
+        throw new Error(`无法解析的取消回答：${JSON.stringify(body)}`);
+      }
+      return body;
     }
 
     /** The service did not answer: keep the task's state, note when this began. */
@@ -404,7 +538,14 @@ var ZoteroTranslateLifecycle = (() => {
       } catch (e) {
         logError(e);
       }
-      lifecycle.tasks = saved.map((task) => ({ disconnectedSince: null, ...task, key: nextKey++ }));
+      lifecycle.tasks = saved.map((task) => ({
+        disconnectedSince: null,
+        generation: 0,
+        cancelRequested: false,
+        ...task,
+        cleanupError: null,
+        key: nextKey++,
+      }));
       for (const task of lifecycle.tasks.filter((t) => t.state === "submitting")) {
         fail(task, "提交未完成，请重试");
       }

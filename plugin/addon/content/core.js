@@ -44,9 +44,10 @@ var ZoteroTranslateCore = (() => {
     return { contentType: `multipart/form-data; boundary=${boundary}`, body };
   }
 
-  // Task states: the service's queued/running/waiting_rerun/failed, plus the
-  // plugin's own submitting (upload under way), attaching (service
-  // succeeded, PDFs being added to the item) and done (both PDFs attached).
+  // Task states: the service's queued/running/waiting_rerun/failed/cancelled,
+  // plus the plugin's own submitting (upload under way), attaching (service
+  // succeeded, PDFs being added to the item), done (both PDFs attached) and
+  // cancelling (the user cancelled; the cancel is not yet confirmed by the service).
   const STATUS_LABELS = {
     submitting: "提交中",
     queued: "排队中",
@@ -55,27 +56,37 @@ var ZoteroTranslateCore = (() => {
     attaching: "挂回中",
     done: "已挂回",
     failed: "失败",
+    cancelling: "取消中",
+    cancelled: "已取消",
   };
   // Unfinished states: the plugin still has work to do for the task (the
   // lifecycle saves these across restarts and submits no second task for the
   // same source PDF); only these show a disconnection.
-  const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching"];
+  const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching", "cancelling"];
 
   /** What the task window shows for one task; a waiting task shows its
    *  place in the service's queue, a running one its attempt when the
    *  service has started more than one (after a restart or a rerun), one
    *  waiting for an automatic rerun about how many minutes are left, which
    *  rerun comes next and why the last attempt failed, a finished one how
-   *  many paragraphs and algorithms kept their source text. An unfinished
-   *  task whose service has not answered since `disconnectedSince` says it
-   *  waits for the service, and for how many whole minutes so far (at `now`;
-   *  at least 1). */
+   *  many paragraphs and algorithms kept their source text. A cancelling
+   *  task says why the service has not confirmed the cancel yet
+   *  (`cleanupError`), or that the service cannot be reached. Any other
+   *  unfinished task whose service has not answered since `disconnectedSince`
+   *  says it waits for the service, and for how many whole minutes so far
+   *  (at `now`; at least 1). */
   function taskRow(task, now) {
     const row = {
       title: task.title,
       stage: task.stage || "",
       percent: task.progress == null ? "" : `${task.progress}%`,
     };
+    if (task.state === "cancelling") {
+      if (task.disconnectedSince != null) {
+        return { ...row, status: "取消中（翻译服务暂时连不上）" };
+      }
+      return { ...row, status: task.cleanupError ? `取消中：${task.cleanupError}` : "取消中" };
+    }
     if (task.disconnectedSince != null && UNFINISHED_STATES.includes(task.state)) {
       const minutes = Math.max(1, Math.floor((now - task.disconnectedSince) / 60000));
       return { ...row, status: `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）` };
