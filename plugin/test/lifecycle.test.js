@@ -1173,6 +1173,25 @@ test("the intent claims only an attachment of its output's title, without identi
   assert.deepEqual(library.slice(0, 3).map((a) => a.identity), [null, "t0/mono", null]);
 });
 
+test("Zotero quit in the second PDF's crash window: after a restart, finding the first does not drop the second's intent", async () => {
+  const before = await quitWhileAttaching((env) => {
+    env.routes[DUAL("t1")] = () => {
+      env.quitAfterImport = true; // mono is attached in full; dual is saved without identity
+      return pdfBytes("dual pdf");
+    };
+  });
+  assert.deepEqual(before.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", null]]);
+  assert.deepEqual(savedOf(before).map((t) => [t.attached, t.importIntent?.output]), [[{ mono: 100 }, "dual"]]);
+
+  const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
+  after.lifecycle.start();
+  await after.clock.advance(2000);
+  assert.deepEqual(after.status(), ["已挂回"]);
+  assert.deepEqual(after.requests, []);
+  assert.deepEqual(after.imports, []);
+  assert.deepEqual(after.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+});
+
 test("a recorded attachment the user has deleted is imported again when attaching goes on", async () => {
   const env = await submitted(succeededRoutes("t1"));
   env.failWrite = "AutoDesign-双语对照.pdf";
@@ -1241,10 +1260,14 @@ test("an identity that cannot be written makes the row 挂回失败; 继续挂�
 test("取消 while a download is under way aborts it; the download that comes back afterwards is not imported", async () => {
   const dual = held();
   let signal = null;
+  let savedAtAbort = null;
   const env = await submitted({
     ...succeededRoutes("t1"),
     [DUAL("t1")]: (options) => {
       signal = options.signal;
+      signal.addEventListener("abort", () => {
+        savedAtAbort = env.saved; // what was saved when the download was aborted
+      });
       return dual.route();
     },
   });
@@ -1254,6 +1277,7 @@ test("取消 while a download is under way aborts it; the download that comes ba
 
   await env.lifecycle.cancel(rowOf(env).key);
   assert.equal(signal.aborted, true);
+  assert.equal(savedAtAbort, "[]"); // the cancel was saved (no longer unfinished) before the download was aborted
   assert.deepEqual(env.status(), ["已取消"]);
   assert.equal(rowOf(env).canRetry, true);
   assert.equal(env.saved, "[]");

@@ -62,7 +62,13 @@ var ZoteroTranslate = {
       attachments: this.attachmentIdentities,
       store: {
         load: () => Zotero.Prefs.get(this.TASKS_PREF, true),
-        save: (value) => Zotero.Prefs.set(this.TASKS_PREF, value, true),
+        // Ask for prefs.js to be written now (Firefox writes it off the main
+        // thread within about 0.1 s; otherwise about 0.6 s later), so that an
+        // import intent is on disk before the import commits, also if Zotero is killed.
+        save: (value) => {
+          Zotero.Prefs.set(this.TASKS_PREF, value, true);
+          Services.prefs.savePrefFile(null);
+        },
       },
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),

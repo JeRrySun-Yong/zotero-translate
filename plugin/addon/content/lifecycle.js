@@ -236,9 +236,9 @@ var ZoteroTranslateLifecycle = (() => {
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (task && cancelsLocally(task)) {
-          endOperation(task);
           Object.assign(task, { state: "cancelled", error: null, disconnectedSince: null });
-          changed();
+          changed(); // saved first: the task is no longer unfinished, so no restart attaches it
+          endOperation(task);
           return;
         }
         if (!task || !CANCELLABLE_STATES.includes(task.state)) {
@@ -560,7 +560,9 @@ var ZoteroTranslateLifecycle = (() => {
           }
         }
         task.attached = { ...task.attached, [output.file]: attachment };
-        task.importIntent = null;
+        if (task.importIntent?.output === output.file) {
+          task.importIntent = null; // an intent for the other PDF stays until that one is handled
+        }
         changed();
       }
       if (isCurrent(task, operation)) {
