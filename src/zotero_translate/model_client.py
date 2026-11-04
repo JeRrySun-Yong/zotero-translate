@@ -785,7 +785,7 @@ class _Hedged:
         error = last.error
         wait = self.flash._wait_before_resend(self._sent, error)
         logger.warning(
-            "model request failed (send %d/%d): %s; retrying in %.1fs",
+            "model request failed (attempt %d/%d): %s; retrying in %.1fs",
             self._sent,
             self.attempts,
             error,
