@@ -30,8 +30,8 @@ var ZoteroTranslate = {
       fetch: (url, options) => fetch(url, options),
       clock: {
         now: () => Date.now(),
-        setInterval: (fn, ms) => setInterval(fn, ms),
-        clearInterval: (id) => clearInterval(id),
+        setTimeout: (fn, ms) => setTimeout(fn, ms),
+        clearTimeout: (id) => clearTimeout(id),
       },
       serviceUrl: () => Zotero.Prefs.get(this.SERVICE_URL_PREF, true),
       readSource: (task) => this._readSource(task),
