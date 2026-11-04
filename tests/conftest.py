@@ -114,6 +114,15 @@ class ServiceClient:
         return response.content
 
 
+def wait_until(condition, timeout: float = 5.0) -> float:
+    """Poll ``condition()`` until it holds; return the seconds it took, fail after ``timeout``."""
+    started = time.monotonic()
+    while not condition():
+        assert time.monotonic() - started < timeout, "condition never held"
+        time.sleep(0.01)
+    return time.monotonic() - started
+
+
 def write_env_file(
     root: Path,
     base_url: str,

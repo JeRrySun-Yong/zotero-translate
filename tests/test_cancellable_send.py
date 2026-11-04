@@ -36,6 +36,7 @@ from tests.conftest import FAKE_ARGON_API_KEY
 from tests.conftest import FAKE_MODEL_NAME
 from tests.conftest import launch_service
 from tests.conftest import stop_service
+from tests.conftest import wait_until
 from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
 from zotero_translate.endpoint import Endpoint
@@ -74,14 +75,6 @@ def _content(response: tuple[int, bytes]) -> str:
     status, data = response
     assert status == 200
     return json.loads(data)["choices"][0]["message"]["content"]
-
-
-def _wait_until(condition, timeout: float = 5.0) -> float:
-    started = time.monotonic()
-    while not condition():
-        assert time.monotonic() - started < timeout, "condition never held"
-        time.sleep(0.01)
-    return time.monotonic() - started
 
 
 class Events:
@@ -123,10 +116,10 @@ def test_a_cancelled_send_disconnects_and_the_other_sends_on_the_endpoint_go_on(
         endpoint, events = _endpoint(_settings(model))
         try:
             hung = endpoint.start(PATH, _body("hung"))
-            _wait_until(lambda: model.in_flight == 1)
+            wait_until(lambda: model.in_flight == 1)
             time.sleep(0.2)  # the headers, if any, have reached the client
             other = endpoint.start(PATH, _body("other"))
-            _wait_until(lambda: model.in_flight == 2)
+            wait_until(lambda: model.in_flight == 2)
 
             hung.cancel()
 
@@ -134,7 +127,7 @@ def test_a_cancelled_send_disconnects_and_the_other_sends_on_the_endpoint_go_on(
             with pytest.raises(SendCancelled):
                 hung.result()
             # The endpoint saw the client go, and the other send is answered.
-            _wait_until(lambda: model.requests[0].disconnected, timeout=2)
+            wait_until(lambda: model.requests[0].disconnected, timeout=2)
             assert other.wait(5) and _content(other.result()) == "ok"
             # The shared client is still open: a new send on it is answered.
             again = endpoint.start(PATH, _body("again"))
@@ -149,6 +142,42 @@ def test_a_cancelled_send_disconnects_and_the_other_sends_on_the_endpoint_go_on(
     assert names.index("connection_closed") < names.index("slot_released")
     in_flight = dict(events.of(hung))
     assert in_flight["connection_closed"] >= 1
+
+
+def test_cancelling_a_send_whose_connection_went_back_to_the_pool_spares_the_next_send_on_it():
+    # A's whole response is read and its connection goes back to the pool;
+    # B takes that connection. A cancel of A now (say its timeout fires)
+    # must not touch B's request, and the connection's later close belongs
+    # to no send that has already given its slot back.
+    with FakeModel(keep_alive=True) as model:
+        model.respond("other", _slow_ok)
+        events = Events()
+        sends: dict[str, object] = {}
+
+        def on_event(name: str, send) -> None:
+            events(name, send)
+            if name == "connection_returned" and send is sends.get("a"):
+                sends["b"] = endpoint.start(PATH, _body("b"))
+                wait_until(lambda: model.in_flight == 1)  # B is on the reused connection
+                send.cancel()
+
+        endpoint = Endpoint(_settings(model), on_event=on_event)
+        events.endpoint = endpoint
+        try:
+            sends["a"] = endpoint.start(PATH, _body("a"))
+            assert sends["a"].wait(10)
+            assert _content(sends["a"].result()) == "ok"
+            assert sends["b"].wait(10)
+            assert _content(sends["b"].result()) == "ok"
+        finally:
+            endpoint.close()
+
+    a, b = model.requests
+    assert a.client_port == b.client_port  # one connection, reused
+    assert not b.disconnected
+    for send in sends.values():
+        names = [name for name, _ in events.of(send)]
+        assert names[-1] == "slot_released", names  # nothing of the send after its slot is back
 
 
 def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot_back():
@@ -203,7 +232,7 @@ def test_a_timed_out_send_gives_its_slot_back_only_after_its_connection_closed(t
         finally:
             client.close()
         timed_out = model.requests[0]
-        _wait_until(lambda: timed_out.disconnected, timeout=2)
+        wait_until(lambda: timed_out.disconnected, timeout=2)
 
     assert [r["result"] for r in load_records(log.path)] == ["timeout", "succeeded"]
     first, second = sorted({send for _, send, _ in events.seen}, key=lambda s: s.sent)
@@ -232,13 +261,13 @@ def test_closing_the_client_aborts_its_sends_in_flight_at_once(tmp_path):
 
         thread = threading.Thread(target=complete)
         thread.start()
-        _wait_until(lambda: model.in_flight == 1)
+        wait_until(lambda: model.in_flight == 1)
         started = time.monotonic()
         client.close()
         thread.join(5)
         assert not thread.is_alive()
         assert time.monotonic() - started < 3
-        _wait_until(lambda: model.requests[0].disconnected, timeout=2)
+        wait_until(lambda: model.requests[0].disconnected, timeout=2)
 
     assert len(raised) == 1 and isinstance(raised[0], SendCancelled)
     assert len(model.requests) == 1  # no resend

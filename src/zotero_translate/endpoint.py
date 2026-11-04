@@ -29,8 +29,11 @@ backend, so ``_use_backend`` sets it on its connection pools; it fails at
 once if a new httpx or httpcore changes that.
 
 ``on_event(name, send)`` lets a test watch the order of things: ``connected``
-(the connector returned a socket for the send), ``connection_closed`` (the
-send's connection was closed) and ``slot_released`` (its slot is back).
+(the connector returned a socket for the send), ``connection_returned``
+(the send read its whole response and gave up its connection, to the pool
+or to be closed), ``connection_closed`` (a connection closed while the
+send's exchange used it; ``send`` is None for one no send was using) and
+``slot_released`` (the send's slot is back; nothing of it follows).
 
 ``close`` cancels every send in flight, waits a little for them to end and
 closes the HTTP client; a send that starts afterwards fails with
@@ -60,7 +63,9 @@ CONNECT_POLL_SECONDS = 0.05  # how often a connect looks at its cancel event
 CLOSE_WAIT_SECONDS = 5.0  # how long ``close`` waits for the cancelled sends to end
 
 _IN_PROGRESS = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EAGAIN}  # a non-blocking connect under way
-_current = threading.local()  # .send: the send whose thread this is
+_current = threading.local()
+# socket.socket's own shutdown (from _socket.socket); ssl.SSLSocket overrides it.
+_SOCKET_SHUTDOWN = socket.socket.shutdown  # .send: the send whose thread this is
 
 
 class SendCancelled(Exception):
@@ -133,13 +138,14 @@ class Send:
         """Abort the send at whatever stage it is; return at once.
 
         The send then ends as soon as its connection is closed; ``wait``
-        tells when.
+        tells when. Only a connection the send is still using is shut down:
+        once its exchange is over, the connection may serve another send.
         """
         with self._lock:
             self.cancelled.set()
-            stream = self._stream if self._exchanging else None
+            stream = self._stream
         if stream is not None:
-            stream.shutdown()
+            stream.shutdown_for(self)
 
     def wait(self, timeout: float | None = None) -> bool:
         """True once the send has ended: its connection ended and its slot is back."""
@@ -163,11 +169,45 @@ class Send:
         with self._lock:
             if self.cancelled.is_set():
                 raise SendCancelled("模型请求已中止")
-            self._stream = stream
+            if self._exchanging:
+                self._stream = stream
+
+    @property
+    def exchanging(self) -> bool:
+        with self._lock:
+            return self._exchanging
+
+    def _exchange(self, http: httpx.Client, path: str, body: dict, timeout: float | None) -> None:
+        """Send the request and read the whole response, in the send's own thread.
+
+        The exchange is over before the connection goes back to the pool:
+        from then on, a cancel of this send no longer reaches it.
+        """
+        self.started_at = time.time()
+        self.sent = time.monotonic()
+        try:
+            with http.stream("POST", path, json=body, timeout=timeout) as response:
+                data = b"".join(response.iter_bytes())
+                self._response = (response.status_code, data)
+                self._exchange_over()
+            self._endpoint._event("connection_returned", self)
+        except BaseException as e:  # noqa: BLE001 - the caller gets it from ``result``
+            self._error = e
+        finally:
+            # The connection is closed now (on an error, httpx closes it as
+            # the response context exits), or back in the pool.
+            self._exchange_over()
 
     def _exchange_over(self) -> None:
         with self._lock:
             self._exchanging = False
+            stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.disown(self)
+
+    def _end(self) -> None:
+        """The send's slot is back: it has ended."""
+        self._ended.set()
 
 
 class Endpoint:
@@ -242,18 +282,10 @@ class Endpoint:
 
     def _run(self, send: Send, path: str, body: dict, timeout, on_end) -> None:
         _current.send = send
-        send.started_at = time.time()
-        send.sent = time.monotonic()
         try:
-            with self._http.stream("POST", path, json=body, timeout=timeout) as response:
-                data = b"".join(response.iter_bytes())
-                send._response = (response.status_code, data)
-        except BaseException as e:  # noqa: BLE001 - the caller gets it from ``result``
-            send._error = e
+            send._exchange(self._http, path, body, timeout)
         finally:
-            # The connection is closed now, or back in the pool after a
-            # whole response; only then is the slot given back.
-            send._exchange_over()
+            # The send's connection has ended: only now is its slot given back.
             _current.send = None
             with self._budget:
                 self._in_flight -= 1
@@ -262,7 +294,7 @@ class Endpoint:
                     on_end()
                 self._budget.notify_all()
             self._event("slot_released", send)
-            send._ended.set()
+            send._end()
 
     def _event(self, name: str, send: Send | None) -> None:
         if self._on_event is not None:
@@ -332,16 +364,30 @@ class _Stream(httpcore.NetworkStream):
     def __init__(self, sock: socket.socket, endpoint: Endpoint):
         self._sock = sock
         self._endpoint = endpoint
-        self._owner: Send | None = None
+        self._lock = threading.Lock()  # guards ``_owner``
+        self._owner: Send | None = None  # the send whose exchange uses the connection
         self._closed = False
 
     def _use(self) -> None:
+        """The current thread's send is using the connection: it owns it now."""
         send = getattr(_current, "send", None)
         if send is None:
             return
-        if send is not self._owner:
+        with self._lock:
             self._owner = send
         send._attach(self)
+
+    def disown(self, send: Send) -> None:
+        """``send``'s exchange is over: the connection belongs to no send until the next uses it."""
+        with self._lock:
+            if self._owner is send:
+                self._owner = None
+
+    def shutdown_for(self, send: Send) -> None:
+        """Shut the connection down if ``send`` is still using it (see ``shutdown``)."""
+        with self._lock:
+            if self._owner is send and send.exchanging:
+                self.shutdown()
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
         self._use()
@@ -380,7 +426,9 @@ class _Stream(httpcore.NetworkStream):
             return
         self._closed = True
         self._sock.close()
-        self._endpoint._event("connection_closed", self._owner)
+        with self._lock:
+            owner = self._owner
+        self._endpoint._event("connection_closed", owner)
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
         self._use()
@@ -411,6 +459,3 @@ class _Stream(httpcore.NetworkStream):
             return bool(readable)
         return None
 
-
-# socket.socket's own shutdown (from _socket.socket); ssl.SSLSocket overrides it.
-_SOCKET_SHUTDOWN = socket.socket.shutdown

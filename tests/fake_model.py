@@ -15,6 +15,8 @@ Test fixture only. It can:
   and longer than 200 characters; "400_echo" answers with an error that
   echoes the request's Authorization header, key included;
 - inject a delay and count the maximum number of requests in flight;
+- keep connections open between requests (``keep_alive``, HTTP/1.1), so
+  that a client reuses them; each request records its client's port;
 - see a client disconnect: a request that hangs ("timeout",
   "hang_after_headers") ends as soon as the client closes its connection,
   is marked ``disconnected`` and leaves the in-flight count at once.
@@ -154,6 +156,7 @@ class RecordedRequest:
     fault: str | None = None  # the injected error; None if answered normally
     received_at: float = 0.0  # time.monotonic() when the request arrived
     disconnected: bool = False  # the client closed the connection before the answer ended
+    client_port: int = 0  # the client's end of the connection; equal ports: a reused connection
 
     @property
     def prompt(self) -> str:
@@ -183,6 +186,7 @@ class FakeModel:
     delay: float = 0.0
     slow_body_seconds: float = 30.0  # how long a "slow" fault takes to send its body
     port: int = 0  # 0 picks a free port; a test can bring up an endpoint that was unreachable
+    keep_alive: bool = False  # HTTP/1.1: a connection stays open for the client's next request
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
 
@@ -252,6 +256,8 @@ class FakeModel:
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1" if self.keep_alive else "HTTP/1.0"
+
             def log_message(self, *args):
                 pass
 
@@ -283,6 +289,7 @@ class FakeModel:
                 body=body,
                 fault=fault,
                 received_at=time.monotonic(),
+                client_port=handler.client_address[1],
             )
             self.requests.append(request)
             self._in_flight += 1

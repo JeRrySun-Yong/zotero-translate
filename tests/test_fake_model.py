@@ -8,6 +8,7 @@ import time
 import httpx
 import pytest
 
+from tests.conftest import wait_until
 from tests.fake_model import PSEUDO_PREFIX
 
 BATCH_PROMPT = 'Translate.\n\n## Here is the input:\n\n[\n  {"id": 0, "input": "Hello {v1} 42", "layout_label": "text"}\n]'
@@ -127,15 +128,6 @@ def test_term_list_request_gets_the_default_term_list(fake_model):
     assert fake_model.requests[0].kind == "term_list"
 
 
-def _wait_until(condition, timeout: float = 5.0) -> float:
-    """Seconds until ``condition()`` held; fails after ``timeout``."""
-    started = time.monotonic()
-    while not condition():
-        assert time.monotonic() - started < timeout, "condition never held"
-        time.sleep(0.01)
-    return time.monotonic() - started
-
-
 @pytest.mark.parametrize("error, headers", [("timeout", False), ("hang_after_headers", True)])
 def test_sees_a_client_disconnect_and_counts_it_out_of_flight_at_once(fake_model, error, headers):
     # "timeout" hangs before the response headers, "hang_after_headers"
@@ -149,7 +141,7 @@ def test_sees_a_client_disconnect_and_counts_it_out_of_flight_at_once(fake_model
         + f"Content-Length: {len(body)}\r\n\r\n".encode()
         + body
     )
-    _wait_until(lambda: fake_model.in_flight == 1)
+    wait_until(lambda: fake_model.in_flight == 1)
     if headers:
         assert sock.recv(1024).startswith(b"HTTP/1.0 200")
     time.sleep(0.2)
@@ -157,5 +149,5 @@ def test_sees_a_client_disconnect_and_counts_it_out_of_flight_at_once(fake_model
 
     sock.close()  # in this thread, which nothing else holds
 
-    assert _wait_until(lambda: fake_model.in_flight == 0) < 1.0
+    assert wait_until(lambda: fake_model.in_flight == 0) < 1.0
     assert fake_model.requests[0].disconnected
