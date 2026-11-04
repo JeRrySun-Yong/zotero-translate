@@ -155,6 +155,7 @@ def launch_service(
     argon_env_file: Path | None = None,
     argon_concurrency: int | None = None,
     env: dict[str, str] | None = None,
+    hedging: bool = True,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
@@ -165,8 +166,8 @@ def launch_service(
     ``request_timeout`` (seconds) to replace the 480-second request timeout of
     both endpoints, and ``argon_concurrency`` to replace argon's limit of 16.
     ``env`` adds environment variables to the service's (the ``ZT_TEST_``
-    settings). The client's ``output`` collects the service's whole standard
-    output.
+    settings). ``hedging=False`` starts it with ``--no-hedging``. The
+    client's ``output`` collects the service's whole standard output.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
     if env_file is None:
@@ -179,7 +180,8 @@ def launch_service(
             root, base_url, FAKE_ARGON_API_KEY, None, request_timeout, argon_concurrency
         )
     process = subprocess.Popen(
-        serve_command(env_file, argon_env_file, data_dir, concurrency=concurrency),
+        serve_command(env_file, argon_env_file, data_dir, concurrency=concurrency)
+        + ([] if hedging else ["--no-hedging"]),
         stdout=subprocess.PIPE,
         text=True,
         env={**os.environ, **(env or {})},
@@ -341,7 +343,7 @@ def fake_model():
 @pytest.fixture
 def start_service(tmp_path):
     """Return ``start(fake_model, concurrency=4, data_dir=None, request_timeout=None, argon=None,
-    argon_concurrency=None, env=None)``; see ``launch_service``."""
+    argon_concurrency=None, env=None, hedging=True)``; see ``launch_service``."""
     started: list[ServiceClient] = []
 
     def start(
@@ -352,6 +354,7 @@ def start_service(tmp_path):
         argon=None,
         argon_concurrency: int | None = None,
         env: dict[str, str] | None = None,
+        hedging: bool = True,
     ) -> ServiceClient:
         client = launch_service(
             model,
@@ -362,6 +365,7 @@ def start_service(tmp_path):
             argon=argon,
             argon_concurrency=argon_concurrency,
             env=env,
+            hedging=hedging,
         )
         started.append(client)
         return client

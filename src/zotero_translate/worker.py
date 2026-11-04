@@ -1,7 +1,7 @@
 """Subprocess entry point: run one attempt of a paper task in its task directory.
 
 Usage: python -m zotero_translate.worker TASK_DIR --attempt N --report-fd FD
---env-file FILE --argon-env-file FILE --concurrency N [--cache-dir DIR]
+--env-file FILE --argon-env-file FILE --concurrency N [--cache-dir DIR] [--no-hedging]
 
 The subprocess never writes the status file: only the translation service
 decides the task's state. It reports to the service through the pipe ``FD``,
@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--argon-env-file", type=Path, required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--cache-dir", type=Path, default=None)
+    parser.add_argument("--no-hedging", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -112,7 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     try:
         settings = load_pipeline_settings(
-            args.env_file, args.argon_env_file, args.concurrency, args.cache_dir
+            args.env_file,
+            args.argon_env_file,
+            args.concurrency,
+            args.cache_dir,
+            hedging=not args.no_hedging,
         )
     except SettingsError as e:
         send("result", outcome="failed", error=str(e), category="permanent")
