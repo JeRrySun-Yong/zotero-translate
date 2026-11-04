@@ -450,6 +450,53 @@ def test_a_connection_closed_while_its_tls_socket_is_set_up_does_not_leave_it_op
             theirs.close()
 
 
+class _SharingContext:
+    """Stands in for an SSL context the way ``ssl.SSLSocket._create`` works: the
+    TLS socket is made on the raw socket's descriptor, ``during`` runs, and only
+    then is the raw socket detached."""
+
+    def __init__(self, during):
+        self.during = during
+
+    def wrap_socket(self, sock: socket.socket, server_hostname=None) -> socket.socket:
+        tls = socket.socket(sock.family, sock.type, sock.proto, fileno=sock.fileno())
+        self.during()
+        sock.detach()
+        return tls
+
+
+def test_a_connection_closed_while_its_tls_socket_shares_the_descriptor_keeps_it():
+    # A close (e.g. of a proxy tunnel as the endpoint closes) while the TLS
+    # socket and the raw socket share one descriptor must not free that
+    # descriptor: another connection could get it, and the TLS socket would
+    # then work on, and finally close, that connection.
+    ours, theirs = socket.socketpair()
+    theirs.settimeout(2)
+    held: dict[str, object] = {}
+
+    def during() -> None:
+        descriptor = held["stream"]._sock.fileno()
+        held["stream"].close()
+        victim = socket.socket()  # takes the lowest free descriptor
+        held["victim"] = victim
+        held["reused"] = victim.fileno() == descriptor
+
+    with FakeModel() as model:
+        endpoint = Endpoint(_settings(model))
+        try:
+            held["stream"] = _Stream(ours, endpoint)
+            with pytest.raises(httpcore.ConnectError):
+                held["stream"].start_tls(_SharingContext(during), server_hostname="x")
+            assert not held["reused"], "the close freed the descriptor the TLS socket was using"
+            assert held["victim"].fileno() >= 0  # the other connection's socket is still open
+            assert theirs.recv(1) == b""  # and ours is closed once the set-up is over
+        finally:
+            endpoint.close()
+            theirs.close()
+            if "victim" in held:
+                held["victim"].close()
+
+
 def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot_back():
     entered = threading.Event()
     release = threading.Event()

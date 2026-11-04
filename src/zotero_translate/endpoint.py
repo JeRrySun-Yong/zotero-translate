@@ -393,6 +393,11 @@ class _Stream(httpcore.NetworkStream):
         # During the TLS handshake: a duplicate of the raw socket, which
         # ``wrap_socket`` has detached; shutting it down ends the handshake.
         self._handshake_sock: socket.socket | None = None
+        # While ``wrap_socket`` runs, the TLS socket and the raw one share a
+        # descriptor; a close then only shuts it down and is left to
+        # ``start_tls``, so that the descriptor is not freed under it.
+        self._handshaking = False
+        self._close_pending = False
         self._closed = False
 
     def _use(self) -> None:
@@ -460,6 +465,10 @@ class _Stream(httpcore.NetworkStream):
         with self._lock:  # never while a cancel is shutting the socket down
             if self._closed:
                 return
+            if self._handshaking:
+                self._close_pending = True
+                self.shutdown()  # ends the handshake; ``start_tls`` then closes
+                return
             self._closed = True
             self._sock.close()
             owner = self._owner
@@ -471,14 +480,22 @@ class _Stream(httpcore.NetworkStream):
         self._endpoint._event("connection_closed", owner)
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        """Upgrade to TLS; a cancel during the handshake ends it (see ``_handshake_sock``)."""
+        """Upgrade to TLS; a cancel during the handshake ends it (see ``_handshake_sock``).
+
+        A close during ``wrap_socket`` waits for it (see ``_handshaking``);
+        the set-up then fails with ``ConnectError`` and closes the socket.
+        """
         try:  # every way out but the return closes the socket
             self._endpoint._event("tls_handshake", getattr(_current, "send", None))
             self._use()  # a send cancelled since its connect stops here
-            raw = self._sock
-            spare = raw.dup()  # the same socket under another descriptor
             with self._lock:
+                if self._closed:
+                    raise httpcore.ConnectError("连接在 TLS 握手之前已关闭")
+                raw = self._sock
+                spare = raw.dup()  # the same socket under another descriptor
                 self._handshake_sock = spare
+                self._handshaking = True
+            tls = None
             try:
                 raw.settimeout(timeout)
                 # On failure the TLS socket closes the descriptor it took
@@ -486,21 +503,18 @@ class _Stream(httpcore.NetworkStream):
                 # ever shuts down ``spare``, which is still open.
                 tls = ssl_context.wrap_socket(raw, server_hostname=server_hostname)
                 self._endpoint._event("tls_established", getattr(_current, "send", None))
-            except BaseException:
+            finally:
                 with self._lock:
+                    self._handshaking = False
                     self._handshake_sock = None
                     spare.close()
-                raise
-            with self._lock:
-                self._handshake_sock = None
-                spare.close()
-                if self._closed:
-                    # Closed meanwhile (e.g. a proxy tunnel's connection as
-                    # the endpoint closes): that close only reached the
-                    # detached raw socket, so close the TLS socket here.
-                    tls.close()
-                    raise httpcore.ConnectError("连接在 TLS 握手之后已关闭")
-                self._sock = tls
+                    if tls is not None:
+                        self._sock = tls  # it owns the descriptor now
+                    pending = self._close_pending
+            if pending:
+                # Closed meanwhile (e.g. a proxy tunnel's connection as the
+                # endpoint closes): the close happens now.
+                raise httpcore.ConnectError("连接在 TLS 握手期间已关闭")
         except socket.timeout as e:
             self.close()
             raise httpcore.ConnectTimeout(str(e)) from e
