@@ -72,10 +72,24 @@ class SendCancelled(Exception):
     """The send was cancelled, or its endpoint closed, before it got an answer."""
 
 
-def connect(host: str, port: int, timeout: float | None, cancelled: threading.Event) -> socket.socket:
+def _wait_writable(sock: socket.socket, seconds: float) -> bool:
+    """Wait up to ``seconds`` for a non-blocking connect to finish (or fail)."""
+    _, writable, failed = select.select([], [sock], [sock], seconds)
+    return bool(writable or failed)
+
+
+def connect(
+    host: str,
+    port: int,
+    timeout: float | None,
+    cancelled: threading.Event,
+    wait_writable: Callable[[socket.socket, float], bool] = _wait_writable,
+) -> socket.socket:
     """Open a TCP connection to ``host:port``; give up when ``cancelled`` is set.
 
-    The name lookup itself cannot be interrupted; the connect can.
+    The connect waits in steps of ``CONNECT_POLL_SECONDS`` and looks at
+    ``cancelled`` between them; ``wait_writable`` is that wait (a test
+    replaces it). The name lookup itself cannot be interrupted.
     Raises ``SendCancelled``, ``socket.timeout`` or ``OSError``.
     """
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -94,8 +108,7 @@ def connect(host: str, port: int, timeout: float | None, cancelled: threading.Ev
                 if left is not None and left <= 0:
                     raise socket.timeout(f"connect to {host}:{port} timed out")
                 wait = CONNECT_POLL_SECONDS if left is None else min(CONNECT_POLL_SECONDS, left)
-                _, writable, failed = select.select([], [sock], [sock], wait)
-                if writable or failed:
+                if wait_writable(sock, wait):
                     code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
                     if code != 0:
                         raise OSError(code, f"connect to {host}:{port} failed")

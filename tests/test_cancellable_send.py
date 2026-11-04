@@ -22,6 +22,7 @@ Two roles with the same address and key share one budget, sized by flash's
 concurrency setting; the measured in-flight count stays within it.
 """
 
+import functools
 import json
 import logging
 import socket
@@ -41,6 +42,7 @@ from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
 from zotero_translate.endpoint import Endpoint
 from zotero_translate.endpoint import SendCancelled
+from zotero_translate.endpoint import connect
 from zotero_translate.model_client import ModelClient
 from zotero_translate.model_client import PipelineModels
 from zotero_translate.request_log import REQUESTS_FILE
@@ -218,6 +220,40 @@ def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot
     assert [r.body["messages"][0]["content"] for r in model.requests] == ["again"]
     names = [name for name, _ in events.of(send)]
     assert names == ["connected", "connection_closed", "slot_released"]
+
+
+def test_the_default_connect_gives_up_when_its_send_is_cancelled():
+    # The production connector, with its wait for the connect to finish
+    # replaced by one that never sees an answer (a SYN nobody answers).
+    sockets: list[socket.socket] = []
+
+    def unanswered(sock: socket.socket, seconds: float) -> bool:
+        sockets.append(sock)
+        time.sleep(seconds)
+        return False
+
+    connector = functools.partial(connect, wait_writable=unanswered)
+    with FakeModel() as model:
+        endpoint, events = _endpoint(_settings(model, concurrency=1), connector=connector)
+        try:
+            send = endpoint.start(PATH, _body("connecting"))
+            wait_until(lambda: sockets)
+            time.sleep(0.2)  # several polls of the cancel flag go by
+            assert endpoint.in_flight == 1
+
+            started = time.monotonic()
+            send.cancel()
+            assert send.wait(2)
+            assert time.monotonic() - started < 0.5  # the next poll sees the cancel
+            with pytest.raises(SendCancelled):
+                send.result()
+            assert endpoint.in_flight == 0
+            assert sockets[0].fileno() == -1  # the half-open socket is closed
+        finally:
+            endpoint.close()
+
+    assert model.requests == []
+    assert [name for name, _ in events.of(send)] == ["slot_released"]  # it never connected
 
 
 def test_a_timed_out_send_gives_its_slot_back_only_after_its_connection_closed(tmp_path):
