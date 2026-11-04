@@ -194,16 +194,23 @@ class Send:
         """Send the request and read the whole response, in the send's own thread.
 
         The exchange is over before the connection goes back to the pool:
-        from then on, a cancel of this send no longer reaches it.
+        from then on, a cancel of this send no longer reaches it. So the
+        body is read from ``response.stream`` (the raw bytes), which unlike
+        ``iter_bytes`` does not close the response, and so hand the
+        connection back, when it is exhausted; the response context's exit
+        does that, after the exchange is over. The raw body is then decoded
+        as httpx decodes it (``Content-Encoding``).
         """
         self.started_at = time.time()
         self.sent = time.monotonic()
         try:
             with http.stream("POST", path, json=body, timeout=timeout) as response:
-                data = b"".join(response.iter_bytes())
-                self._response = (response.status_code, data)
+                raw = b"".join(response.stream)
                 self._exchange_over()
+                self._endpoint._event("response_read", self)
             self._endpoint._event("connection_returned", self)
+            status, headers = response.status_code, response.headers
+            self._response = (status, httpx.Response(status, headers=headers, content=raw).content)
         except BaseException as e:  # noqa: BLE001 - the caller gets it from ``result``
             self._error = e
         finally:
@@ -377,8 +384,11 @@ class _Stream(httpcore.NetworkStream):
     def __init__(self, sock: socket.socket, endpoint: Endpoint):
         self._sock = sock
         self._endpoint = endpoint
-        self._lock = threading.Lock()  # guards ``_owner``
+        self._lock = threading.Lock()  # guards ``_owner`` and ``_handshake_sock``
         self._owner: Send | None = None  # the send whose exchange uses the connection
+        # During the TLS handshake: a duplicate of the raw socket, which
+        # ``wrap_socket`` has detached; shutting it down ends the handshake.
+        self._handshake_sock: socket.socket | None = None
         self._closed = False
 
     def _use(self) -> None:
@@ -386,6 +396,8 @@ class _Stream(httpcore.NetworkStream):
         send = getattr(_current, "send", None)
         if send is None:
             return
+        if self._owner is not send:
+            self._endpoint._event("connection_taken", send)
         with self._lock:
             self._owner = send
         send._attach(self)
@@ -430,7 +442,7 @@ class _Stream(httpcore.NetworkStream):
         try:
             # The plain socket's shutdown, also for a TLS socket, whose own
             # would tear down its TLS state under the reading thread.
-            _SOCKET_SHUTDOWN(self._sock, socket.SHUT_RDWR)
+            _SOCKET_SHUTDOWN(self._handshake_sock or self._sock, socket.SHUT_RDWR)
         except OSError:
             pass  # already closed
 
@@ -444,16 +456,27 @@ class _Stream(httpcore.NetworkStream):
         self._endpoint._event("connection_closed", owner)
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        """Upgrade to TLS; a cancel during the handshake ends it (see ``_handshake_sock``)."""
         self._use()
+        raw = self._sock
+        spare = raw.dup()  # the same socket under another descriptor
+        with self._lock:
+            self._handshake_sock = spare
         try:
-            self._sock.settimeout(timeout)
-            self._sock = ssl_context.wrap_socket(self._sock, server_hostname=server_hostname)
+            raw.settimeout(timeout)
+            tls = ssl_context.wrap_socket(raw, server_hostname=server_hostname)
         except socket.timeout as e:
             self.close()
             raise httpcore.ConnectTimeout(str(e)) from e
         except OSError as e:
             self.close()
             raise httpcore.ConnectError(str(e)) from e
+        finally:
+            with self._lock:
+                self._handshake_sock = None
+                spare.close()
+        with self._lock:
+            self._sock = tls
         return self
 
     def get_extra_info(self, info: str):

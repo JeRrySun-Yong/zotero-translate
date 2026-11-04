@@ -182,6 +182,85 @@ def test_cancelling_a_send_whose_connection_went_back_to_the_pool_spares_the_nex
         assert names[-1] == "slot_released", names  # nothing of the send after its slot is back
 
 
+@pytest.mark.parametrize("window", ["response_read", "connection_returned"])
+def test_a_cancel_after_the_whole_response_never_reaches_the_next_send_on_the_connection(window):
+    # A has read its whole response; in that window (before or after its
+    # connection went back to the pool) B starts and takes a connection,
+    # and A is cancelled just before B claims it. B must be untouched.
+    with FakeModel(keep_alive=True) as model:
+        events = Events()
+        sends: dict[str, object] = {}
+
+        def on_event(name: str, send) -> None:
+            events(name, send)
+            a = sends.get("a")
+            if name == window and send is a and "b" not in sends:
+                sends["b"] = endpoint.start(PATH, _body("b"))
+                assert sends["b"].wait(10)  # B runs to its end inside A's window
+            elif name == "connection_taken" and a is not None and send is not a:
+                a.cancel()  # B has the connection and has not claimed it yet
+
+        endpoint = Endpoint(_settings(model), on_event=on_event)
+        events.endpoint = endpoint
+        try:
+            sends["a"] = endpoint.start(PATH, _body("a"))
+            assert sends["a"].wait(15)
+            assert _content(sends["a"].result()) == "ok"  # its whole response was read
+            assert _content(sends["b"].result()) == "ok"
+        finally:
+            endpoint.close()
+
+    a, b = model.requests
+    assert not b.disconnected
+    if window == "connection_returned":
+        assert a.client_port == b.client_port  # B did reuse A's connection
+
+
+def test_a_send_cancelled_during_the_tls_handshake_ends_at_once():
+    # A TCP server that takes the connection and never answers the
+    # ClientHello: the send hangs in the TLS handshake.
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    received = threading.Event()
+    disconnected = threading.Event()
+
+    def serve() -> None:
+        connection, _ = server.accept()
+        with connection:
+            while True:
+                data = connection.recv(4096)
+                if not data:
+                    disconnected.set()
+                    return
+                received.set()
+
+    threading.Thread(target=serve, daemon=True).start()
+    settings = ModelSettings(base_url=f"https://127.0.0.1:{port}/v1", api_key="k", concurrency=1)
+    endpoint, events = _endpoint(settings)
+    try:
+        send = endpoint.start(PATH, _body("tls"))
+        assert received.wait(5)  # the ClientHello arrived
+        time.sleep(0.2)
+        assert endpoint.in_flight == 1
+
+        started = time.monotonic()
+        send.cancel()
+        assert send.wait(2), "the cancel did not reach the TLS handshake"
+        assert time.monotonic() - started < 1
+        with pytest.raises(SendCancelled):
+            send.result()
+        assert endpoint.in_flight == 0
+        assert disconnected.wait(2)  # the server saw the client go
+    finally:
+        endpoint.close()
+        server.close()
+
+    names = [name for name, _ in events.of(send)]
+    assert names.index("connection_closed") < names.index("slot_released")
+
+
 def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot_back():
     entered = threading.Event()
     release = threading.Event()
@@ -219,7 +298,7 @@ def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot
     # Nothing of the cancelled send reached the endpoint.
     assert [r.body["messages"][0]["content"] for r in model.requests] == ["again"]
     names = [name for name, _ in events.of(send)]
-    assert names == ["connected", "connection_closed", "slot_released"]
+    assert names == ["connected", "connection_taken", "connection_closed", "slot_released"]
 
 
 def test_the_default_connect_gives_up_when_its_send_is_cancelled():
@@ -271,7 +350,8 @@ def test_a_timed_out_send_gives_its_slot_back_only_after_its_connection_closed(t
         wait_until(lambda: timed_out.disconnected, timeout=2)
 
     assert [r["result"] for r in load_records(log.path)] == ["timeout", "succeeded"]
-    first, second = sorted({send for _, send, _ in events.seen}, key=lambda s: s.sent)
+    sends = {send for _, send, _ in events.seen if send is not None}  # None: a connection no send used
+    first, second = sorted(sends, key=lambda s: s.sent)
     names = [name for name, _ in events.of(first)]
     assert names.index("connection_closed") < names.index("slot_released")
     # The resend (concurrency 1) could only go out once the slot was back.
