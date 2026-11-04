@@ -17,10 +17,12 @@ The suite also runs in parallel processes (M3 ticket 18): ``pytest -n auto``
 starts ``PARALLEL_PROCESSES`` of them (pytest-xdist), and ``--dist loadfile``
 (pyproject.toml) keeps each test file in one. Nothing the fixtures make is
 shared between tests: ports are picked free, data directories and
-environment files live in the test's own temporary directory, task ids are
-random, and ``stop_service`` ends only the processes of tasks in its own
-data directory. A test that leaves the data directory to its default
-(``ZT_DATA_DIR``) gets one of its own too, never the user's.
+environment files live in the test's own temporary directory, the service
+gives tasks random ids, and ``stop_service`` ends only the processes of
+tasks in its own data directory. A test that names its own task ids makes
+them unique too (another test run may be going on in another worktree). The
+default data directory (``ZT_DATA_DIR``) is never the user's: each test has
+one of its own, a module fixture shares its test process's.
 """
 
 from __future__ import annotations
@@ -348,14 +350,18 @@ def pytest_configure(config) -> None:
     # zotero_translate.settings is first imported, is a fresh one of its own:
     # never the user's, never another parallel process's (each test then
     # gets its own, see ``own_default_data_dir``).
-    default = tempfile.mkdtemp(prefix="zt-test-data-")
-    os.environ["ZT_DATA_DIR"] = default
-    config.add_cleanup(lambda: shutil.rmtree(default, ignore_errors=True))
+    default_data_dir = tempfile.mkdtemp(prefix="zt-test-data-")
+    os.environ["ZT_DATA_DIR"] = default_data_dir
+    config.add_cleanup(lambda: shutil.rmtree(default_data_dir, ignore_errors=True))
 
 
 @pytest.hookimpl(tryfirst=True)  # before pytest-xdist's own, whichever loaded first
 def pytest_xdist_auto_num_workers(config) -> int:
-    """``-n auto``: ``PARALLEL_PROCESSES``, or ``PYTEST_XDIST_AUTO_NUM_WORKERS`` when set."""
+    """``-n auto``: ``PARALLEL_PROCESSES``, or ``PYTEST_XDIST_AUTO_NUM_WORKERS`` when set.
+
+    This hook runs before pytest-xdist's, which would otherwise read that
+    variable, so it reads it too.
+    """
     return int(os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") or PARALLEL_PROCESSES)
 
 

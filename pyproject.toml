@@ -34,8 +34,6 @@ babeldoc = { path = "engine", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# With -n (pytest-xdist), each test file runs whole in one process, so module
-# fixtures run once; -n auto means 3 processes (tests/conftest.py). Without -n
-# the suite runs serially.
+# With -n (pytest-xdist), each test file runs whole in one process; see tests/conftest.py.
 addopts = "--dist loadfile"
 markers = ["real_model: calls the real pipeline model; skipped unless ZT_REAL_MODEL_SMOKE=1"]

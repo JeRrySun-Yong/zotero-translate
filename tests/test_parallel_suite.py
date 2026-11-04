@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.conftest import PARALLEL_PROCESSES
+
 REPO = Path(__file__).resolve().parent.parent
 
 # Each inner test writes down which process ran it.
@@ -32,11 +34,11 @@ def test_records_its_process(n, request):
         "workers": os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"),
     }
     out = Path(os.environ["ZT_TEST_RECORDS"]) / f"{request.node.path.stem}-{n}.json"
-    out.write_text(json.dumps(record))
+    out.write_text(json.dumps(record), encoding="utf-8")
 """
 
 
-def _run_inner(tmp_path: Path, *options: str) -> list[dict]:
+def _run_inner_suite(tmp_path: Path, *options: str) -> list[dict]:
     inner = tmp_path / "inner"
     inner.mkdir()
     for name in ("test_one.py", "test_two.py", "test_three.py"):
@@ -44,7 +46,7 @@ def _run_inner(tmp_path: Path, *options: str) -> list[dict]:
     records = tmp_path / "records"
     records.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_XDIST")}
-    run = subprocess.run(
+    inner_run = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "tests.conftest"]
         + ["-c", str(REPO / "pyproject.toml"), "--rootdir", str(inner), *options, str(inner)],
         cwd=REPO,
@@ -53,15 +55,16 @@ def _run_inner(tmp_path: Path, *options: str) -> list[dict]:
         text=True,
         timeout=120,
     )
-    assert run.returncode == 0, run.stdout + run.stderr
-    return [json.loads(p.read_text()) for p in sorted(records.iterdir())]
+    assert inner_run.returncode == 0, inner_run.stdout + inner_run.stderr
+    return [json.loads(p.read_text("utf-8")) for p in sorted(records.iterdir())]
 
 
 def test_n_auto_runs_three_processes_and_keeps_each_file_in_one(tmp_path):
-    records = _run_inner(tmp_path, "-n", "auto")
+    records = _run_inner_suite(tmp_path, "-n", "auto")
 
+    assert PARALLEL_PROCESSES == 3  # the ticket's default
     assert len(records) == 12
-    assert {r["workers"] for r in records} == {"3"}
+    assert {r["workers"] for r in records} == {str(PARALLEL_PROCESSES)}
     by_file: dict[str, set[str]] = {}
     for r in records:
         by_file.setdefault(r["file"], set()).add(r["worker"])
@@ -69,7 +72,7 @@ def test_n_auto_runs_three_processes_and_keeps_each_file_in_one(tmp_path):
 
 
 def test_without_n_the_tests_run_in_one_process(tmp_path):
-    records = _run_inner(tmp_path)
+    records = _run_inner_suite(tmp_path)
 
     assert len(records) == 12
     assert {r["worker"] for r in records} == {"main"}

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 
 import httpx
 import pytest
@@ -53,7 +54,7 @@ def test_a_test_only_delay_holds_back_one_file_before_it_is_sent(fake_model, sta
     """``ZT_TEST_DOWNLOAD_DELAY_SECONDS="dual=<seconds>"`` (M3 ticket 10): the
     dual PDF is sent only after the delay; mono and the task's status are not held up."""
     data_dir = tmp_path / "data"
-    task_id = "a" * 32
+    task_id = uuid.uuid4().hex  # no other test run on the machine has its process marker
     directory = data_dir / "tasks" / task_id
     directory.mkdir(parents=True)
     shutil.copy(EXCERPT, directory / "source.pdf")
