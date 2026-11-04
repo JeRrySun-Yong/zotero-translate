@@ -329,24 +329,33 @@ class TaskQueue:
         """The waiting tasks in the order they will run."""
         return sorted(self._waiting, key=self._waiting.__getitem__)
 
-    def _reap(self, task_id: str) -> bool:
+    def _reap(self, task_id: str, then=None) -> bool:
         """Reap the task's processes by marker; on failure record why, block scheduling, return False.
 
-        Retrying a failed reap is ticket 09's: until then the task stays
-        as it is and no new attempt starts.
+        On success ``then()``, if given, runs under the same lock as the
+        unblocking, so no other thread's failed reap of the task comes in
+        between. A finished task (e.g. cancelled meanwhile by another
+        thread) never blocks scheduling: its failure is recorded and
+        logged only, and a repeated cancel reaps it again. Retrying a failed
+        reap every 30 seconds is ticket 09's: until then the task stays as
+        it is and, unless it has finished, no new attempt starts.
         """
         try:
             processes.reap(task_id)
         except processes.ReapError as e:
-            reason = f"{e}；暂停调度新的尝试"
             with self._cond:
+                finished = td.read_status(self.tasks_dir / task_id)["state"] in td.TERMINAL_STATES
+                reason = str(e) if finished else f"{e}；暂停调度新的尝试"
                 self._decide(task_id, "cleanup_error", {"cleanup_error": reason}, reason=reason)
-                self._cleanup_blocked.add(task_id)
+                if not finished:
+                    self._cleanup_blocked.add(task_id)
             return False
         with self._cond:
             if td.read_status(self.tasks_dir / task_id).get("cleanup_error"):
                 td.write_status(self.tasks_dir / task_id, cleanup_error=None)
             self._cleanup_blocked.discard(task_id)
+            if then is not None:
+                then()
             self._cond.notify_all()
         return True
 
@@ -584,7 +593,8 @@ class TaskQueue:
         does the task become ``cancelled`` (200). When the reaping fails,
         the task keeps its state, its ``cleanup_error`` says why, no new
         attempt starts (``_reap``), and the answer is 503; a repeated
-        cancel tries again. A cancelled task answers 200 again; a finished
+        cancel tries again. A cancelled task answers 200 again, and when a
+        reap of its processes failed after the cancel (``cleanup_error``), reaps again first; a finished
         one 409, unchanged. A running one answers 409 too, unchanged, until
         cancelling a running task comes (ticket 09).
         """
@@ -594,17 +604,23 @@ class TaskQueue:
         with self._cond:
             status = td.read_status(directory)
             state = status["state"]
-            if state not in ("queued", "waiting_rerun"):
+            if state == "cancelled" and status.get("cleanup_error"):
+                retry_reap = True  # a reap that failed after the cancel: try again
+            elif state not in ("queued", "waiting_rerun"):
                 return (200 if state == "cancelled" else 409), self.status(task_id)
-            if not status.get("cancel_requested"):
+            else:
+                retry_reap = False
+            if not retry_reap and not status.get("cancel_requested"):
                 self._decide(task_id, "cancel_accepted", {"cancel_requested": True})
             self._waiting.pop(task_id, None)
             self._due.pop(task_id, None)
             self._cond.notify_all()
+        if retry_reap:
+            self._reap(task_id)
+            return 200, self.status(task_id)
         _test_pause(PAUSE_AFTER_CANCEL_ACCEPTED, task_id, status.get("attempt", 0))
-        if not self._reap(task_id):
+        if not self._reap(task_id, then=lambda: self._finish_cancel(task_id)):
             return 503, self.status(task_id)
-        self._finish_cancel(task_id)
         return 200, self.status(task_id)
 
     def _finish_cancel(self, task_id: str) -> None:
@@ -647,6 +663,9 @@ class TaskQueue:
             try:
                 next_attempt = td.read_status(self.tasks_dir / task_id).get("attempt", 0) + 1
                 _test_pause(PAUSE_BEFORE_REAP, task_id, next_attempt)
+                with self._cond:
+                    if task_id not in self._waiting:
+                        continue  # cancelled meanwhile: the cancel reaped it
                 # The processes of its earlier attempts go first. Meanwhile the
                 # task stays queued, in its place, so a rerun that comes due or
                 # a requeue can still go ahead of it.

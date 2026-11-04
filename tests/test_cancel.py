@@ -345,6 +345,32 @@ def test_cancelling_a_queued_task_whose_reap_failed_resumes_the_queue(
     assert service.status(stuck)["attempt"] == 0
 
 
+def test_a_task_cancelled_while_the_queue_was_about_to_reap_it_never_blocks_the_queue(
+    tmp_path, fake_model, start_service
+):
+    # The runner has picked the task and waits before reaping it; the cancel
+    # reaps and completes (200); then the scan starts to fail. The runner's
+    # own reap of the cancelled task must not pause scheduling.
+    reaps = _pauses(tmp_path)
+    scan_error = tmp_path / "scan-error"
+    service = start_service(fake_model, env={PAUSE_BEFORE_REAP: str(reaps), SCAN_ERROR: str(scan_error)})
+
+    stuck = service.submit()
+    paused = _wait_for_file(reaps / f"{stuck}-1.paused")
+    _assert_cancelled(_cancel(service, stuck), service, stuck)
+    scan_error.touch()
+    paused.unlink()
+    time.sleep(1)
+    scan_error.unlink()
+    other = service.submit()
+    _wait_for_file(reaps / f"{other}-1.paused", timeout=60).unlink()
+
+    assert service.wait(other, timeout=600)["state"] == "succeeded"
+    assert service.status(stuck)["state"] == "cancelled"
+    assert service.status(stuck)["cleanup_error"] is None
+    assert service.status(stuck)["attempt"] == 0
+
+
 def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path):
     # The service dies after saving the accepted cancel, before reaping and
     # saving the cancelled state: one task queued, one waiting for a rerun,
