@@ -32,7 +32,8 @@ once if a new httpx or httpcore changes that.
 (the connector returned a socket for the send), ``connection_returned``
 (the send read its whole response and gave up its connection, to the pool
 or to be closed), ``connection_closed`` (a connection closed while the
-send's exchange used it; ``send`` is None for one no send was using) and
+send used it, or after its exchange but before its slot is back; ``send``
+is None for one closed later, e.g. an idle pooled connection) and
 ``slot_released`` (the send's slot is back; nothing of it follows).
 
 ``close`` cancels every send in flight, waits a little for them to end and
@@ -205,8 +206,10 @@ class Send:
         self.sent = time.monotonic()
         try:
             with http.stream("POST", path, json=body, timeout=timeout) as response:
-                raw = b"".join(response.stream)
-                self._exchange_over()
+                try:
+                    raw = b"".join(response.stream)
+                finally:  # also if anything fails once the body is in
+                    self._exchange_over()
                 self._endpoint._event("response_read", self)
             self._endpoint._event("connection_returned", self)
             status, headers = response.status_code, response.headers
@@ -386,6 +389,7 @@ class _Stream(httpcore.NetworkStream):
         self._endpoint = endpoint
         self._lock = threading.Lock()  # guards ``_owner`` and ``_handshake_sock``
         self._owner: Send | None = None  # the send whose exchange uses the connection
+        self._last_owner: Send | None = None  # the send that used it last
         # During the TLS handshake: a duplicate of the raw socket, which
         # ``wrap_socket`` has detached; shutting it down ends the handshake.
         self._handshake_sock: socket.socket | None = None
@@ -399,7 +403,7 @@ class _Stream(httpcore.NetworkStream):
         if self._owner is not send:
             self._endpoint._event("connection_taken", send)
         with self._lock:
-            self._owner = send
+            self._owner = self._last_owner = send
         send._attach(self)
 
     def disown(self, send: Send) -> None:
@@ -459,6 +463,11 @@ class _Stream(httpcore.NetworkStream):
             self._closed = True
             self._sock.close()
             owner = self._owner
+            if owner is None and self._last_owner is not None and not self._last_owner.wait(0):
+                # Its exchange is over, but its slot is not back yet: the
+                # connection ends as part of that send (e.g. an error response
+                # context closing it).
+                owner = self._last_owner
         self._endpoint._event("connection_closed", owner)
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
@@ -476,15 +485,22 @@ class _Stream(httpcore.NetworkStream):
                 # over; ``raw`` is detached by then. A cancel meanwhile only
                 # ever shuts down ``spare``, which is still open.
                 tls = ssl_context.wrap_socket(raw, server_hostname=server_hostname)
+                self._endpoint._event("tls_established", getattr(_current, "send", None))
             except BaseException:
                 with self._lock:
                     self._handshake_sock = None
                     spare.close()
                 raise
             with self._lock:
-                self._sock = tls
                 self._handshake_sock = None
                 spare.close()
+                if self._closed:
+                    # Closed meanwhile (e.g. a proxy tunnel's connection as
+                    # the endpoint closes): that close only reached the
+                    # detached raw socket, so close the TLS socket here.
+                    tls.close()
+                    raise httpcore.ConnectError("连接在 TLS 握手之后已关闭")
+                self._sock = tls
         except socket.timeout as e:
             self.close()
             raise httpcore.ConnectTimeout(str(e)) from e

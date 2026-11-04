@@ -79,6 +79,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -503,11 +504,21 @@ class PipelineModels:
             client.close()
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def _endpoint_identity(settings: ModelSettings) -> tuple:
-    """What makes two settings one endpoint: the address (case of scheme and host,
-    default port and a trailing slash aside) and the API key."""
-    url = httpx.URL(settings.base_url)
-    return (url.scheme, url.host, url.port, url.path.rstrip("/"), settings.api_key)
+    """What makes two settings one endpoint: the address and the API key.
+
+    Only the case of the scheme and host, a default port and a single
+    trailing slash are set aside; the rest (path, query) is compared as
+    written, without decoding, so ``/a%2Fb`` and ``/a/b`` stay apart.
+    """
+    url = urlsplit(settings.base_url)
+    scheme = url.scheme.lower()
+    path = url.path[:-1] if url.path.endswith("/") else url.path
+    port = url.port or _DEFAULT_PORTS.get(scheme)
+    return (scheme, url.username, url.password, url.hostname, port, path, url.query, settings.api_key)
 
 
 class ResponseCache:

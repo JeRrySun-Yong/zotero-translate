@@ -30,6 +30,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpcore
 import pytest
 
 from tests.conftest import FAKE_API_KEY
@@ -41,6 +42,7 @@ from tests.conftest import wait_until
 from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
 from zotero_translate.endpoint import Endpoint
+from zotero_translate.endpoint import _Stream  # its close and TLS set-up contract
 from zotero_translate.endpoint import SendCancelled
 from zotero_translate.endpoint import connect
 from zotero_translate.model_client import ModelClient
@@ -417,6 +419,37 @@ def test_a_send_cancelled_just_before_its_tls_handshake_closes_its_connection_fi
     assert names.index("connection_closed") < names.index("slot_released")
 
 
+class _DetachingContext:
+    """Stands in for an SSL context: like ``wrap_socket``, it detaches the socket
+    it is given and returns a new socket object that owns the descriptor."""
+
+    def wrap_socket(self, sock: socket.socket, server_hostname=None) -> socket.socket:
+        return socket.socket(fileno=sock.detach())
+
+
+def test_a_connection_closed_while_its_tls_socket_is_set_up_does_not_leave_it_open():
+    # E.g. a proxy tunnel's connection closed as the endpoint closes, just
+    # after the handshake and before the TLS socket replaces the raw one.
+    ours, theirs = socket.socketpair()
+    theirs.settimeout(2)
+    streams: list = []
+
+    def on_event(name: str, send) -> None:
+        if name == "tls_established":
+            streams[0].close()
+
+    with FakeModel() as model:
+        endpoint = Endpoint(_settings(model), on_event=on_event)
+        try:
+            streams.append(_Stream(ours, endpoint))
+            with pytest.raises(httpcore.ConnectError):
+                streams[0].start_tls(_DetachingContext(), server_hostname="x")
+            assert theirs.recv(1) == b""  # our end is closed
+        finally:
+            endpoint.close()
+            theirs.close()
+
+
 def test_a_send_cancelled_while_connecting_ends_sends_nothing_and_gives_its_slot_back():
     entered = threading.Event()
     release = threading.Event()
@@ -601,6 +634,23 @@ def test_addresses_that_differ_only_in_case_or_a_trailing_slash_are_the_same_end
 
     assert models.flash.endpoint is models.argon.endpoint
     assert models.argon.concurrency == 2
+
+
+@pytest.mark.parametrize(
+    "flash_path, argon_path, shared",
+    [("/a/b", "/a%2Fb", False), ("/a/b", "/A/b", False), ("/v1", "/v1/", True)],
+)
+def test_the_paths_of_two_addresses_are_compared_as_written(flash_path, argon_path, shared):
+    with FakeModel() as model:
+        root = model.base_url.removesuffix("/v1")
+        settings = PipelineSettings(
+            flash=_settings(model, base_url=root + flash_path, concurrency=2),
+            argon=_settings(model, base_url=root + argon_path, concurrency=16),
+        )
+        models = PipelineModels(settings)
+        models.close()
+
+    assert (models.flash.endpoint is models.argon.endpoint) is shared
 
 
 def test_two_roles_with_different_keys_keep_their_own_budgets(caplog):
