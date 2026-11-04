@@ -58,7 +58,12 @@ def main(argv: list[str] | None = None) -> int:
             print(e, file=sys.stderr)
             return 2
         return serve_forever(
-            args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
+            args.data_dir,
+            args.env_file,
+            args.argon_env_file,
+            args.port,
+            args.concurrency,
+            hedging=not args.no_hedging,
         )
     run_then_exit(lambda: _run(args))  # does not return
 
@@ -79,6 +84,12 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--concurrency", type=int, default=s.DEFAULT_CONCURRENCY)
     parser.add_argument(
+        "--no-hedging",
+        action="store_true",
+        help="no argon copy of a slow flash translation batch or review; flash requests "
+        "go to argon after 2 timeouts in a row instead (ADR 0004)",
+    )
+    parser.add_argument(
         "--data-dir",
         type=Path,
         default=s.DEFAULT_DATA_DIR,
@@ -98,6 +109,7 @@ def _run(args) -> int:
             args.argon_env_file,
             args.concurrency,
             s.model_cache_dir(args.data_dir),
+            hedging=not args.no_hedging,
         )
     except s.SettingsError as e:
         print(e, file=sys.stderr)

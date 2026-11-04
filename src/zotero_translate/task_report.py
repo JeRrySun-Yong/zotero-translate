@@ -119,6 +119,12 @@ class TaskReport:
                     "requests": len(forwarded),
                     "pages": sorted(forwarded, key=lambda p: (p is None, p)),
                 },
+                # Hedging (ADR 0004): its threshold in this task (None: off)
+                # and the argon copies sent; each copy's record says ``hedge``.
+                "hedging": {
+                    "after_seconds": self.models.flash.hedge_after_seconds,
+                    "copies": self.models.flash.hedge_count,
+                },
                 "endpoints": {
                     name: {
                         "model": c.model,

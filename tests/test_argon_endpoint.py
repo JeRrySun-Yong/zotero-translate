@@ -4,7 +4,9 @@ Ticket closure-01 and ADR 0004. Two fake pipeline models stand for flash
 (translation batches, review, algorithms, paragraph redos) and argon (the
 paper dossier, the term list and the promoted glosses request). A flash
 request that times out twice in a row sends its remaining attempts to argon;
-only timeouts count, and the attempts stay 4 in total.
+only timeouts count, and the attempts stay 4 in total. These tests run with
+hedging off; hedging replaces the rule for translation batches and reviews
+(M3 ticket 15, ``test_hedging.py``).
 """
 
 import json
@@ -113,7 +115,7 @@ def test_an_argon_key_echoed_in_a_400_response_is_redacted(start_service):
     with FakeModel() as flash, FakeModel() as argon:
         flash.fail_same_request(["timeout", "timeout"], kind="translate_batch")
         argon.fail_same_request(["400_echo", "400_echo"], kind="translate_batch")
-        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT, hedging=False)
 
         task_id = service.submit()
         final = service.wait_first_failure(task_id)
@@ -185,6 +187,8 @@ def test_an_argon_env_file_without_key_stops_run_and_serve_at_startup(
 
 
 # -- forwarding after two timeouts in a row --------------------------------
+# With hedging off (``--no-hedging``): with it on, a translation batch or a
+# review goes to argon after one timeout (``test_hedging.py``).
 
 
 @pytest.fixture(scope="module")
@@ -197,6 +201,7 @@ def forwarded_batch(tmp_path_factory):
             tmp_path_factory.mktemp("argon-forward"),
             argon=argon,
             request_timeout=SMALL_TIMEOUT,
+            hedging=False,
         )
         try:
             first = service.wait(service.submit(EXCERPT))
@@ -254,7 +259,7 @@ def _sends_in(requests: list, request) -> list:
 def test_a_review_timing_out_twice_is_forwarded_and_the_task_succeeds(start_service):
     with FakeModel() as flash, FakeModel() as argon:
         flash.fail_same_request(["timeout", "timeout"], kind="review")
-        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT, hedging=False)
 
         final = service.wait(service.submit())
 
@@ -271,7 +276,7 @@ def test_a_review_timing_out_twice_is_forwarded_and_the_task_succeeds(start_serv
 def test_one_timeout_then_success_is_not_forwarded(start_service):
     with FakeModel() as flash, FakeModel() as argon:
         flash.fail_same_request(["timeout"], kind="translate_batch")
-        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT, hedging=False)
 
         final = service.wait(service.submit())
 
@@ -287,7 +292,7 @@ def test_a_500_between_two_timeouts_sets_the_count_back_and_the_fourth_attempt_s
 ):
     with FakeModel() as flash, FakeModel() as argon:
         flash.fail_same_request(["timeout", "500", "timeout"], kind="translate_batch")
-        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT, hedging=False)
 
         final = service.wait(service.submit())
 
@@ -302,7 +307,7 @@ def test_a_forwarded_request_failing_twice_on_argon_fails_the_task_with_its_page
     with FakeModel() as flash, FakeModel() as argon:
         flash.fail_same_request(["timeout", "timeout"], kind="translate_batch")
         argon.fail_same_request(["500", "timeout"], kind="translate_batch")
-        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
+        service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT, hedging=False)
 
         final = service.wait_first_failure(service.submit())
 
@@ -325,7 +330,7 @@ def test_requests_forwarded_at_once_stay_within_argons_concurrency_limit(tmp_pat
             tmp_path, argon.base_url, FAKE_ARGON_API_KEY, request_timeout=10, concurrency=2
         )
         service = launch_service(
-            flash, tmp_path, request_timeout=SMALL_TIMEOUT, argon_env_file=argon_env
+            flash, tmp_path, request_timeout=SMALL_TIMEOUT, argon_env_file=argon_env, hedging=False
         )
         try:
             final = service.wait(service.submit())

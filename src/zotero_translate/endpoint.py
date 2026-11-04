@@ -62,6 +62,7 @@ EventCallback = Callable[[str, "Send | None"], None]
 
 CONNECT_POLL_SECONDS = 0.05  # how often a connect looks at its cancel event
 CLOSE_WAIT_SECONDS = 5.0  # how long ``close`` waits for the cancelled sends to end
+GIVE_UP_POLL_SECONDS = 0.05  # how often a wait for a slot looks at its give-up event
 
 _IN_PROGRESS = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EAGAIN}  # a non-blocking connect under way
 _current = threading.local()
@@ -276,20 +277,27 @@ class Endpoint:
         timeout: float | None = None,
         on_start: Callable[[], None] | None = None,
         on_end: Callable[[], None] | None = None,
-    ) -> Send:
+        give_up: threading.Event | None = None,
+    ) -> Send | None:
         """Wait for a slot, then send ``body`` to ``path`` in the send's own thread.
 
         ``timeout`` bounds each network operation (httpx's timeout); the
         caller bounds the whole send by cancelling it. ``on_start`` runs as
         the slot is taken, ``on_end`` as it is given back. Raises
         ``SendCancelled`` if the endpoint closes (or is closed) first.
+        When ``give_up`` is set before a slot is taken, nothing is sent and
+        this returns None (a hedged copy whose original has ended).
         """
         waiting = time.monotonic()
         with self._budget:
             while not self._closed and self._in_flight >= self.concurrency:
-                self._budget.wait()
+                if give_up is not None and give_up.is_set():
+                    break
+                self._budget.wait(None if give_up is None else GIVE_UP_POLL_SECONDS)
             if self._closed:
                 raise SendCancelled("模型客户端已关闭")
+            if give_up is not None and give_up.is_set():
+                return None
             send = Send(self)
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)

@@ -118,6 +118,8 @@ makes it start a child that sleeps for an hour, by multiprocessing's spawn
 method like the engine (``zotero_translate.worker``).
 ``ZT_TEST_DOWNLOAD_DELAY_SECONDS`` ("<file>=<seconds>[,...]", e.g.
 "dual=30") waits that long before sending that file of any task.
+``ZT_TEST_HEDGE_AFTER_SECONDS`` (read by each worker, which inherits it;
+``zotero_translate.settings``) replaces the 400-second hedging threshold.
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
@@ -223,12 +225,20 @@ class TaskQueue:
     service left, and ``start`` starts running tasks.
     """
 
-    def __init__(self, data_dir: Path, env_file: Path, argon_env_file: Path, concurrency: int):
+    def __init__(
+        self,
+        data_dir: Path,
+        env_file: Path,
+        argon_env_file: Path,
+        concurrency: int,
+        hedging: bool = True,
+    ):
         self.tasks_dir = Path(data_dir) / "tasks"
         self.cache_dir = model_cache_dir(data_dir)
         self.env_file = Path(env_file)
         self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
+        self.hedging = hedging  # False: each worker gets ``--no-hedging``
         # Waiting tasks: task ID -> (rank of its queue class, *sort key).
         self._waiting: dict[str, tuple] = {}
         # Tasks waiting for an automatic rerun: task ID -> (due time, submission time).
@@ -977,6 +987,8 @@ class TaskQueue:
             "--cache-dir",
             str(self.cache_dir),
         ]
+        if not self.hedging:
+            command.append("--no-hedging")
         try:
             with (directory / td.LOG_FILE).open("ab") as log:
                 process = subprocess.Popen(
@@ -1168,7 +1180,12 @@ def _lock_data_dir(data_dir: Path):
 
 
 def serve(
-    data_dir: Path, env_file: Path, argon_env_file: Path, port: int, concurrency: int
+    data_dir: Path,
+    env_file: Path,
+    argon_env_file: Path,
+    port: int,
+    concurrency: int,
+    hedging: bool = True,
 ) -> int:
     """Run the service until interrupted; print ``{"url": ...}`` once listening.
 
@@ -1183,7 +1200,7 @@ def serve(
             file=sys.stderr,
         )
         return 1
-    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency)
+    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency, hedging)
     try:
         server = ThreadingHTTPServer((HOST, port), make_handler(queue))
     except OSError as e:

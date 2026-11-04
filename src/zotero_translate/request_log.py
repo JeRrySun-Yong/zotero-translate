@@ -28,6 +28,8 @@ A record has these fields:
 - ``endpoint`` and ``model``: the endpoint role (``flash`` or ``argon``) and
   model name the send went to; for a cache hit, those that gave the cached
   answer (the client's own for an entry cached before these records);
+- ``hedge``: true for a hedged copy, the argon send a slow flash send got
+  (``zotero_translate.model_client``); false otherwise, cache hits included;
 - ``started_at``: the wall-clock time (Unix seconds) the send went out;
 - ``slot_wait_seconds``: the time spent waiting for a concurrency slot;
 - ``seconds``: from sending to the end (last byte read, timeout, error);
@@ -86,7 +88,9 @@ KIND_STAGES = {
 # timeout; an HTTP error status; a network error before an answer; an answer
 # that was empty, did not parse or that the caller's check rejected; any other
 # error that ended the send (e.g. a closed client), which the caller then
-# sees unchanged; an answer from the cache (no send).
+# sees unchanged; an answer from the cache (no send); a send of a hedged
+# request that ended after another send of it won (cancelled, or its answer
+# came too late).
 RESULTS = (
     "succeeded",
     "timeout",
@@ -95,6 +99,7 @@ RESULTS = (
     "invalid_answer",
     "error",
     "cache_hit",
+    "cancelled_for_winner",
 )
 
 

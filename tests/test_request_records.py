@@ -53,6 +53,7 @@ FIELDS = {
     "send",
     "endpoint",
     "model",
+    "hedge",
     "started_at",
     "slot_wait_seconds",
     "seconds",
