@@ -121,7 +121,7 @@ var ZoteroTranslateLifecycle = (() => {
     "generation",
     "error",
     "attached",
-    "importIntent",
+    "importIntents",
   ];
   const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
 
@@ -160,9 +160,9 @@ var ZoteroTranslateLifecycle = (() => {
       // service stopped answering, or null), generation (0 for a new task, one more for
       // each retry), cleanupError (why the
       // service has not confirmed the cancel yet, or null), attached (output -> the
-      // attachment recorded for it, e.g. {mono: 51}), importIntent ({taskId, output,
-      // startedAt} while an import has started and its attachment is not recorded, or
-      // null), importing (true while a PDF is being imported; not saved)}
+      // attachment recorded for it, e.g. {mono: 51}), importIntents (output ->
+      // {taskId, output, startedAt} while that PDF's import has started and its attachment
+      // is not recorded; one per PDF, so handling one never drops the other's), importing (true while a PDF is being imported; not saved)}
       tasks: [],
       // Why items of the latest submission were skipped; shown in the task window.
       notices: [],
@@ -374,7 +374,7 @@ var ZoteroTranslateLifecycle = (() => {
         disconnectedSince: null,
         cleanupError: null,
         attached: {},
-        importIntent: null,
+        importIntents: {},
       });
       changed();
       try {
@@ -514,8 +514,8 @@ var ZoteroTranslateLifecycle = (() => {
         if (!isCurrent(task, operation)) {
           return;
         }
-        const intent = task.importIntent;
-        if (attachment == null && intent && intent.taskId === task.taskId && intent.output === output.file) {
+        const intent = task.importIntents[output.file];
+        if (attachment == null && intent && intent.taskId === task.taskId) {
           attachment = await attachments.unmarked(target, { title: output.title, since: intent.startedAt });
           if (!isCurrent(task, operation)) {
             return;
@@ -549,7 +549,10 @@ var ZoteroTranslateLifecycle = (() => {
           if (!isCurrent(task, operation)) {
             return; // cancelled: no import
           }
-          task.importIntent = { taskId: task.taskId, output: output.file, startedAt: clock.now() };
+          task.importIntents = {
+            ...task.importIntents,
+            [output.file]: { taskId: task.taskId, output: output.file, startedAt: clock.now() },
+          };
           task.importing = true;
           changed(); // the intent is saved before the import
           try {
@@ -560,9 +563,8 @@ var ZoteroTranslateLifecycle = (() => {
           }
         }
         task.attached = { ...task.attached, [output.file]: attachment };
-        if (task.importIntent?.output === output.file) {
-          task.importIntent = null; // an intent for the other PDF stays until that one is handled
-        }
+        const { [output.file]: _done, ...otherIntents } = task.importIntents;
+        task.importIntents = otherIntents; // the other PDF's intent stays until that one is handled
         changed();
       }
       if (isCurrent(task, operation)) {
@@ -684,7 +686,7 @@ var ZoteroTranslateLifecycle = (() => {
         disconnectedSince: null,
         generation: 0,
         error: null,
-        importIntent: null,
+        importIntents: {},
         ...task,
         attached: task.attached || {},
         cleanupError: null,

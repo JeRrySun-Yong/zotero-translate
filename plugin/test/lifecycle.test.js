@@ -282,7 +282,7 @@ test("after Zotero restarts, saved tasks are queried again and still attached", 
       disconnectedSince: null,
       generation: 0,
       attached: {},
-      importIntent: null,
+      importIntents: {},
     },
   ]);
 
@@ -364,7 +364,7 @@ test("each PDF in turn is looked for, downloaded, imported with an intent saved,
   const env = await submitted(succeededRoutes("t1"));
   const seen = [];
   env.routes[DUAL("t1")] = () => {
-    seen.push(["download dual", savedOf(env)[0].importIntent, savedOf(env)[0].attached]);
+    seen.push(["download dual", savedOf(env)[0].importIntents, savedOf(env)[0].attached]);
     return pdfBytes("dual pdf");
   };
   await env.clock.advance(2000);
@@ -381,7 +381,7 @@ test("each PDF in turn is looked for, downloaded, imported with an intent saved,
     "remove /tmp/zotero-translate/t1",
   ]);
   // When dual was downloaded, mono was recorded and its intent cleared.
-  assert.deepEqual(seen, [["download dual", null, { mono: 100 }]]);
+  assert.deepEqual(seen, [["download dual", {}, { mono: 100 }]]);
   assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
   assert.deepEqual(env.status(), ["已挂回"]);
   assert.deepEqual(env.files, new Map());
@@ -392,7 +392,7 @@ test("the import intent is saved before the import, and the identity is written 
   env.quitAfterImport = true;
   await env.clock.advance(2000);
   const [saved] = savedOf(env);
-  assert.deepEqual(saved.importIntent, { taskId: "t1", output: "mono", startedAt: 2000 });
+  assert.deepEqual(saved.importIntents, { mono: { taskId: "t1", output: "mono", startedAt: 2000 } });
   assert.deepEqual(saved.attached, {});
   assert.equal(rowOf(env).canCancel, false); // no 取消 while importing
 
@@ -401,7 +401,7 @@ test("the import intent is saved before the import, and the identity is written 
   await marked.clock.advance(2000);
   assert.deepEqual(marked.attached(), [["中文译文", "mono pdf", "t1/mono"]]);
   assert.deepEqual(savedOf(marked)[0].attached, {}); // not yet recorded
-  assert.equal(savedOf(marked)[0].importIntent.output, "mono");
+  assert.deepEqual(Object.keys(savedOf(marked)[0].importIntents), ["mono"]);
 });
 
 test("when writing the second PDF fails, the first stays attached, the task fails to attach and the temporary directory is removed", async () => {
@@ -636,7 +636,7 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
       generation: 0,
       error: null,
       attached: {},
-      importIntent: null,
+      importIntents: {},
     },
   ]);
   before.lifecycle.stop();
@@ -674,7 +674,7 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
     assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // the first is attached
     assert.deepEqual(env.files, new Map());
-    assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntent]), [["attaching", { mono: 100 }, null]]);
+    assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntents]), [["attaching", { mono: 100 }, {}]]);
 
     env.routes[DUAL("t1")] = pdfBytes("dual pdf");
     await env.clock.advance(10000);
@@ -1115,7 +1115,7 @@ test("Zotero quit after an import was identified but before it was recorded: aft
   const before = await quitWhileAttaching((env) => {
     env.quitAfterMark = true;
   });
-  assert.deepEqual(savedOf(before).map((t) => [t.state, t.attached, t.importIntent?.output]), [["attaching", {}, "mono"]]);
+  assert.deepEqual(savedOf(before).map((t) => [t.state, t.attached, Object.keys(t.importIntents)]), [["attaching", {}, ["mono"]]]);
 
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
   after.lifecycle.start();
@@ -1131,7 +1131,7 @@ test("Zotero quit after an attachment was saved but before its identity was writ
     env.quitAfterImport = true;
   });
   assert.deepEqual(before.attached(), [["中文译文", "mono pdf", null]]);
-  assert.deepEqual(savedOf(before)[0].importIntent, { taskId: "t1", output: "mono", startedAt: 2000 });
+  assert.deepEqual(savedOf(before)[0].importIntents, { mono: { taskId: "t1", output: "mono", startedAt: 2000 } });
 
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
   after.lifecycle.start();
@@ -1161,7 +1161,7 @@ test("the intent claims only an attachment of its output's title, without identi
       generation: 0,
       error: null,
       attached: {},
-      importIntent: { taskId: "t1", output: "mono", startedAt: 4000 },
+      importIntents: { mono: { taskId: "t1", output: "mono", startedAt: 4000 } },
     },
   ]);
   const env = environment({ saved, routes: succeededRoutes("t1"), library, time: 60000 });
@@ -1181,7 +1181,7 @@ test("Zotero quit in the second PDF's crash window: after a restart, finding the
     };
   });
   assert.deepEqual(before.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", null]]);
-  assert.deepEqual(savedOf(before).map((t) => [t.attached, t.importIntent?.output]), [[{ mono: 100 }, "dual"]]);
+  assert.deepEqual(savedOf(before).map((t) => [t.attached, Object.keys(t.importIntents)]), [[{ mono: 100 }, ["dual"]]]);
 
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
   after.lifecycle.start();
@@ -1190,6 +1190,23 @@ test("Zotero quit in the second PDF's crash window: after a restart, finding the
   assert.deepEqual(after.requests, []);
   assert.deepEqual(after.imports, []);
   assert.deepEqual(after.attached(), [["中文译文", "mono pdf", "t1/mono"], ["双语对照", "dual pdf", "t1/dual"]]);
+});
+
+test("an intent waiting to claim the second PDF survives importing the first again (deleted by the user)", async () => {
+  const before = await quitWhileAttaching((env) => {
+    env.routes[DUAL("t1")] = () => {
+      env.quitAfterImport = true;
+      return pdfBytes("dual pdf");
+    };
+  });
+  before.library[0].deleted = true; // the user deletes mono while Zotero is closed... or before it restarts
+
+  const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), library: before.library, time: 60000 });
+  after.lifecycle.start();
+  await after.clock.advance(2000);
+  assert.deepEqual(after.status(), ["已挂回"]);
+  assert.deepEqual(after.imports.map((i) => i.title), ["中文译文"]); // dual is claimed, not imported again
+  assert.deepEqual(after.attached(), [["双语对照", "dual pdf", "t1/dual"], ["中文译文", "mono pdf", "t1/mono"]]);
 });
 
 test("a recorded attachment the user has deleted is imported again when attaching goes on", async () => {
@@ -1248,7 +1265,7 @@ test("an identity that cannot be written makes the row 挂回失败; 继续挂�
   await env.clock.advance(2000);
   assert.deepEqual(env.status(), [ATTACH_FAILED("数据库已锁定")]);
   assert.deepEqual(env.attached(), [["中文译文", "mono pdf", null]]);
-  assert.equal(savedOf(env)[0].importIntent.output, "mono");
+  assert.deepEqual(Object.keys(savedOf(env)[0].importIntents), ["mono"]);
 
   env.failMark = null;
   await env.lifecycle.continueAttach(rowOf(env).key);
@@ -1385,5 +1402,5 @@ test("a retry starts with no attach records or import intent of the old task", a
   await env.lifecycle.cancel(rowOf(env).key);
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
   await env.lifecycle.retry(rowOf(env).key);
-  assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.attached, t.importIntent]), [["t2", {}, null]]);
+  assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.attached, t.importIntents]), [["t2", {}, {}]]);
 });
