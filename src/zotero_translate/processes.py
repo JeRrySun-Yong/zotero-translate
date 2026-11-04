@@ -31,6 +31,8 @@ MARK_ENV = "ZT_PROCESS_MARK"
 SCAN_ERROR_SETTING = "ZT_TEST_REAP_SCAN_ERROR"  # test only
 TERM_WAIT_SECONDS = 10.0
 KILL_WAIT_SECONDS = 5.0
+# A late rescan round still gets this long to confirm its kills.
+KILL_CONFIRM_MIN_SECONDS = 0.5
 
 
 class ReapError(Exception):
@@ -64,15 +66,22 @@ def reap(task_id: str) -> None:
     when marked processes still turn up after the rule's 15 seconds, the
     reap fails.
     """
-    deadline = time.monotonic() + TERM_WAIT_SECONDS + KILL_WAIT_SECONDS
+    # All rounds share one start: terminating ends by start + 10 s and killing by
+    # start + 15 s, so rescans cannot stretch a reap past the rule's 15 seconds.
+    start = time.monotonic()
+    term_deadline = start + TERM_WAIT_SECONDS
+    deadline = term_deadline + KILL_WAIT_SECONDS
     while True:
         processes = _scan(task_id)
         if not processes:
             return
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             pids = ", ".join(str(p.pid) for p in processes)
             raise ReapError(f"回收期间不断出现新的带标记的进程（PID {pids}）")
-        survivors = end(processes)
+        term_wait = max(0.0, term_deadline - now)
+        kill_wait = max(KILL_CONFIRM_MIN_SECONDS, deadline - now - term_wait)
+        survivors = end(processes, term_wait=term_wait, kill_wait=kill_wait)
         if survivors:
             pids = ", ".join(str(p.pid) for p in survivors)
             raise ReapError(f"强制结束后仍有带标记的进程存活（PID {pids}）")
