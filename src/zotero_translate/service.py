@@ -14,8 +14,9 @@ HTTP interface (the contract with the translation plugin):
   cancel), cleanup_error (why the task's processes could not be reaped, or
   null), kept source paragraphs and downloadable files
 - ``POST /tasks/{task_id}/cancel`` -> the same object as the query: 200 when
-  the task is cancelled (a queued task, one waiting for a rerun, or one
-  already cancelled), 409 when it has succeeded or failed, and for now when
+  the task is cancelled (a queued task, one waiting for a rerun, once its
+  processes are reaped; or one already cancelled), 503 when its processes
+  could not be reaped (cleanup_error says why), 409 when it has succeeded or failed, and for now when
   it is running (cancelling a running task is ticket 09's), unchanged
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
@@ -72,10 +73,11 @@ submitted, started, interrupted, requeued, waiting for a rerun, rerun
 started, cancel accepted, cancelled, succeeded, failed, cleanup error,
 report dropped. No API key and no HTTP poll is logged.
 
-A cancel is saved as accepted (event 接受取消) before the task becomes
-``cancelled`` (event 已取消); a task with an accepted cancel is never
+A cancel is saved as accepted (event 接受取消); then the task's processes
+are reaped by marker, and only after all have exited does the task become
+``cancelled`` (event 已取消). A task with an accepted cancel is never
 started: not when its rerun comes due, not when it reaches the head of the
-queue, and not after a restart, which completes the cancel.
+queue, and not after a restart, which reaps and completes the cancel.
 
 When the service starts (``TaskQueue.restore``), a task an earlier service
 left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
@@ -96,7 +98,12 @@ until that file is deleted. ``ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE`` is a pause
 of the same kind when a rerun is due, before it is queued (the attempt in
 the file name is the one that failed), and ``ZT_TEST_PAUSE_BEFORE_REAP``
 when the queue has picked the next task, before its earlier processes are
-reaped (the attempt is the one about to start). ``ZT_TEST_RERUN_WAITS_SECONDS``
+reaped (the attempt is the one about to start), and
+``ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED`` when a cancel has been saved as
+accepted, before the task's processes are reaped (the attempt is the task's
+current one, 0 before the first). ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
+while it exists, scanning for a task's processes fails, so reaping fails
+(``zotero_translate.processes``). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
 ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
@@ -153,6 +160,7 @@ PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
+PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -568,24 +576,35 @@ class TaskQueue:
     def cancel(self, task_id: str) -> tuple[int, dict] | None:
         """Cancel the task: ``(HTTP status, the task as status() gives it)``, or None if unknown.
 
-        A queued task, or one waiting for a rerun, is cancelled (200): the
-        accepted cancel is saved first, then the task leaves the queue and
-        the rerun timer and becomes ``cancelled``. A cancelled one answers
-        200 again; a finished one 409, unchanged. A running one answers 409
-        too, unchanged, until cancelling a running task comes (ticket 09).
+        A queued task, or one waiting for a rerun: the accepted cancel is
+        saved first, and from then on the task is neither started nor
+        rerun; then every process with its marker is reaped, outside the
+        lock, so queries are answered meanwhile; only when all have exited
+        does the task become ``cancelled`` (200). When the reaping fails,
+        the task keeps its state, its ``cleanup_error`` says why, no new
+        attempt starts (``_reap``), and the answer is 503; a repeated
+        cancel tries again. A cancelled task answers 200 again; a finished
+        one 409, unchanged. A running one answers 409 too, unchanged, until
+        cancelling a running task comes (ticket 09).
         """
         directory = self.task_dir(task_id)
         if directory is None:
             return None
         with self._cond:
-            state = td.read_status(directory)["state"]
-            if state in ("queued", "waiting_rerun"):
+            status = td.read_status(directory)
+            state = status["state"]
+            if state not in ("queued", "waiting_rerun"):
+                return (200 if state == "cancelled" else 409), self.status(task_id)
+            if not status.get("cancel_requested"):
                 self._decide(task_id, "cancel_accepted", {"cancel_requested": True})
-                self._finish_cancel(task_id)
-                code = 200
-            else:
-                code = 200 if state == "cancelled" else 409
-        return code, self.status(task_id)
+            self._waiting.pop(task_id, None)
+            self._due.pop(task_id, None)
+            self._cond.notify_all()
+        _test_pause(PAUSE_AFTER_CANCEL_ACCEPTED, task_id, status.get("attempt", 0))
+        if not self._reap(task_id):
+            return 503, self.status(task_id)
+        self._finish_cancel(task_id)
+        return 200, self.status(task_id)
 
     def _finish_cancel(self, task_id: str, attempt_ended: bool = False) -> None:
         """Complete an accepted cancel: out of the queue and the rerun timer, ``cancelled``.
@@ -596,6 +615,8 @@ class TaskQueue:
         with self._cond:
             self._waiting.pop(task_id, None)
             self._due.pop(task_id, None)
+            if td.read_status(self.tasks_dir / task_id)["state"] in td.TERMINAL_STATES:
+                return  # a concurrent cancel completed it
             self._decide(
                 task_id,
                 "cancelled",

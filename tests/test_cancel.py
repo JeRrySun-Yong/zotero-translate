@@ -1,22 +1,31 @@
 """Cancelling queued and waiting tasks (M3 ticket 08; spec sections 1, 4 and 5, seam 1 "取消与进程").
 
 ``POST /tasks/{id}/cancel`` first saves that the cancel was accepted, then
-cancels a queued task or one waiting for an automatic rerun. A cancelled
+reaps every process with the task's marker, and only then cancels a queued
+task or one waiting for an automatic rerun; when the reaping fails it answers
+503 with the reason, and a repeated cancel tries again. A cancelled
 task is never started: not when its rerun comes due, not when it reaches the
 head of the queue, not after a restart; a restart completes an accepted
 cancel. Cancelling again answers 200; a finished task answers 409, an
 unknown one 404. Until ticket 09, a running task also answers 409.
 
-Only the HTTP interface, the service log and the status files are looked at
-(a status file is edited only to stand for a service that died between the
-two saves of a cancel).
+Only the HTTP interface, the service log, the status files and the process
+table are looked at.
 """
 
 import json
+import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
+import httpx
+
+from tests.conftest import MARK_ENV
 from tests.conftest import launch_service
+from tests.conftest import marked_processes
 from tests.conftest import stop_service
 from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import FakeModel
@@ -25,6 +34,8 @@ WAITS = "ZT_TEST_RERUN_WAITS_SECONDS"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
+PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
+SCAN_ERROR = "ZT_TEST_REAP_SCAN_ERROR"
 
 
 def _event(line: str) -> str:
@@ -236,28 +247,103 @@ def test_a_cancelled_task_is_not_queued_again_after_a_restart(tmp_path):
                 stop_service(service)
 
 
+def _leftover(task_id: str, attempt: int = 1) -> subprocess.Popen:
+    """A process with the task's process marker that outlived its attempt.
+
+    It stands for a child the engine spawned whose worker reported its
+    result and was then killed before ending it: no service reaps such a
+    child until the task's next attempt, and that window cannot be hit
+    through the HTTP interface. ``stop_service`` ends it if a test does not.
+    """
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(3600)"],
+        env={**os.environ, MARK_ENV: f"{task_id}:{attempt}"},
+        start_new_session=True,
+    )
+
+
+def _wait_marked(task_id: str, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while not marked_processes([task_id]):
+        assert time.monotonic() < deadline, "the leftover process never showed up"
+        time.sleep(0.05)
+
+
+def test_a_cancel_reaps_the_tasks_leftover_processes_before_it_answers_200(
+    tmp_path, fake_model, start_service
+):
+    _fail_dossier(fake_model)
+    service = start_service(fake_model, env={WAITS: "600,600"})
+
+    task_id = service.submit()
+    service.wait_for(task_id, lambda s: s["state"] == "waiting_rerun", timeout=120)
+    leftover = _leftover(task_id)
+    _wait_marked(task_id)
+
+    _assert_cancelled(_cancel(service, task_id), service, task_id)
+    assert leftover.poll() is not None, "the leftover process outlived the cancel"
+    assert marked_processes([task_id]) == []
+    assert _events(service, task_id)[-2:] == ["接受取消", "已取消"]
+
+
+def test_a_cancel_whose_reaping_fails_answers_503_and_a_repeated_cancel_completes_it(
+    tmp_path, fake_model, start_service
+):
+    scan_error = tmp_path / "scan-error"
+    _fail_dossier(fake_model)
+    service = start_service(fake_model, env={WAITS: "600,600", SCAN_ERROR: str(scan_error)})
+
+    task_id = service.submit()
+    service.wait_for(task_id, lambda s: s["state"] == "waiting_rerun", timeout=120)
+    scan_error.touch()  # from now on the process scan itself fails
+    response = _cancel(service, task_id)
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body == service.status(task_id)
+    assert body["state"] == "waiting_rerun"
+    assert body["cancel_requested"] is True
+    assert "无法扫描进程" in body["cleanup_error"], body["cleanup_error"]
+    assert _events(service, task_id)[-2:] == ["接受取消", "进程回收出错"]
+    # No new attempt starts while a reap has failed.
+    other = service.submit()
+    time.sleep(2)
+    assert service.status(other)["state"] == "queued"
+    assert service.status(other)["attempt"] == 0
+
+    scan_error.unlink()
+    again = _cancel(service, task_id)
+    _assert_cancelled(again, service, task_id)
+    assert again.json()["cleanup_error"] is None
+    assert _events(service, task_id)[-3:] == ["接受取消", "进程回收出错", "已取消"]
+    _answer_dossier(fake_model)
+    assert service.wait(other)["state"] == "succeeded"
+
+
 def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path):
-    # The service died after saving the accepted cancel, before saving the
-    # cancelled state: one task queued, one waiting for a rerun.
+    # The service dies after saving the accepted cancel, before reaping and
+    # saving the cancelled state: one task queued, one waiting for a rerun,
+    # each with a leftover process.
     pauses = _pauses(tmp_path)
-    env = {WAITS: "1,600", PAUSE_AFTER_MARKER: str(pauses)}
+    accepted = _pauses(tmp_path, "accepted")
+    env = {WAITS: "600,600", PAUSE_AFTER_MARKER: str(pauses), PAUSE_AFTER_CANCEL_ACCEPTED: str(accepted)}
     with FakeModel() as model:
         _fail_dossier(model)
         services = [launch_service(model, tmp_path, env=env)]
+        leftovers = []
         try:
             waiting, holder, queued = services[0].submit(), services[0].submit(), services[0].submit()
             _wait_for_file(pauses / f"{waiting}-1.paused").unlink()
             _wait_for_file(pauses / f"{holder}-1.paused")  # holder holds the queue
             services[0].wait_for(waiting, lambda s: s["state"] == "waiting_rerun", timeout=60)
+            leftovers = [_leftover(waiting), _leftover(queued)]
+            for task_id, attempt in ((waiting, 1), (queued, 0)):
+                threading.Thread(target=_cancel_ignoring_errors, args=(services[0], task_id), daemon=True).start()
+                _wait_for_file(accepted / f"{task_id}-{attempt}.paused")
+                status = json.loads(_status_path(services[0], task_id).read_text("utf-8"))
+                assert status["cancel_requested"] is True
+                assert status["state"] != "cancelled"
             _kill(services[0])
-            for task_id, state in ((waiting, "waiting_rerun"), (queued, "queued")):
-                path = _status_path(services[0], task_id)
-                status = json.loads(path.read_text("utf-8"))
-                assert status["state"] == state
-                status["cancel_requested"] = True
-                if state == "waiting_rerun":
-                    status["next_attempt_at"] = time.time() - 60  # overdue
-                path.write_text(json.dumps(status), encoding="utf-8")
 
             _answer_dossier(model)
             services.append(launch_service(model, tmp_path, data_dir=services[0].data_dir, env=env))
@@ -265,9 +351,9 @@ def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path)
                 cancelled = services[1].status(task_id)
                 assert cancelled["state"] == "cancelled"
                 assert cancelled["cancel_requested"] is True
+            assert [p.poll() is not None for p in leftovers] == [True, True]
             _wait_for_file(pauses / f"{holder}-2.paused").unlink()
             assert services[1].wait(holder)["state"] == "succeeded"
-            time.sleep(1.5)
 
             assert services[1].status(waiting)["attempt"] == 1
             assert services[1].status(waiting)["reruns_used"] == 0
@@ -279,3 +365,13 @@ def test_a_restart_completes_a_cancel_accepted_before_the_service_died(tmp_path)
         finally:
             for service in reversed(services):
                 stop_service(service)
+            for leftover in leftovers:
+                leftover.kill()
+                leftover.wait()
+
+
+def _cancel_ignoring_errors(service, task_id: str) -> None:
+    try:
+        _cancel(service, task_id)
+    except httpx.HTTPError:  # the service is killed while the cancel waits
+        pass
