@@ -38,7 +38,7 @@ FAKE_MODEL_NAME = "fake-gemini-for-tests"
 FAKE_API_KEY = "sk-fake-test-key-0123456789"
 FAKE_ARGON_API_KEY = "sk-fake-argon-key-9876543210"
 ARGON_MODEL_NAME = "gemini-4-argon-high"  # the default, since the argon file names no model
-TERMINAL_STATES = {"succeeded", "failed"}
+TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 # The environment variable that carries a task process's process marker
 # "<task_id>:<attempt>" (spec section 2).
 MARK_ENV = "ZT_PROCESS_MARK"

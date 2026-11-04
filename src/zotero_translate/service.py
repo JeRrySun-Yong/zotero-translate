@@ -6,12 +6,17 @@ HTTP interface (the contract with the translation plugin):
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
 - ``GET /tasks/{task_id}`` -> state (queued, running, waiting_rerun,
-  succeeded, failed), stage, progress, attempt (attempts started,
+  succeeded, failed, cancelled), stage, progress, attempt (attempts started,
   interrupted ones included; 0 until the first starts), reruns_used and
   reruns_max (2), next_attempt_in_seconds (only while waiting_rerun), queue
   position (only while queued), error (the last failure's reason, only
-  while waiting_rerun or failed), kept source paragraphs and downloadable
-  files
+  while waiting_rerun or failed), cancel_requested (the service accepted a
+  cancel), cleanup_error (why the task's processes could not be reaped, or
+  null), kept source paragraphs and downloadable files
+- ``POST /tasks/{task_id}/cancel`` -> the same object as the query: 200 when
+  the task is cancelled (a queued task, one waiting for a rerun, or one
+  already cancelled), 409 when it has succeeded or failed, and for now when
+  it is running (cancelling a running task is ticket 09's), unchanged
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -64,7 +69,13 @@ to that file's records, which include the sends that ended after the worker
 wrote its report (``zotero_translate.request_log``). The service writes
 one line per task event to standard output (the service log):
 submitted, started, interrupted, requeued, waiting for a rerun, rerun
-started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
+started, cancel accepted, cancelled, succeeded, failed, cleanup error,
+report dropped. No API key and no HTTP poll is logged.
+
+A cancel is saved as accepted (event 接受取消) before the task becomes
+``cancelled`` (event 已取消); a task with an accepted cancel is never
+started: not when its rerun comes due, not when it reaches the head of the
+queue, and not after a restart, which completes the cancel.
 
 When the service starts (``TaskQueue.restore``), a task an earlier service
 left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
@@ -133,6 +144,7 @@ HOST = "127.0.0.1"
 RESTART_ERROR = "翻译服务重启，任务中断"
 MANY_RESTARTS_ERROR = "翻译服务多次重启，任务中断"
 UPGRADE_ERROR = "升级前未完成的任务，请重试"
+CANCELLED_REASON = "用户取消"
 MAX_INTERRUPTIONS = 3  # in a row; the third fails the task
 RERUNS_MAX = 2  # automatic reruns after the first attempt
 RERUN_WAITS_SECONDS = (60.0, 300.0)  # before the first and the second rerun
@@ -175,6 +187,8 @@ _EVENTS = {
     "requeued": "重新排队并开始新尝试",
     "waiting_rerun": "等待自动重跑",  # the attempt failed, retryable; a rerun is due later
     "rerun_started": "自动重跑开始",  # the rerun is due and queued
+    "cancel_accepted": "接受取消",  # saved first: the task never runs again
+    "cancelled": "已取消",
     "succeeded": "成功",
     "failed": "失败",
     "cleanup_error": "进程回收出错",
@@ -247,7 +261,10 @@ class TaskQueue:
             return
         if not self._reap(task_id):
             return  # left as it is until its processes are reaped
-        if state == "queued":
+        if status.get("cancel_requested"):
+            # Accepted before the restart: completed now, no interruption, no rerun.
+            self._finish_cancel(task_id, attempt_ended=state == "running")
+        elif state == "queued":
             self._enqueue(task_id, status["queue_class"], status["queue_key"])
         elif state == "waiting_rerun":
             # Its saved due time stands; a rerun already queued is "queued".
@@ -397,7 +414,7 @@ class TaskQueue:
         ``then`` gives further ``(event, reason)`` log lines of the same
         transition, e.g. the requeue after an interruption.
 
-        ``outcome`` (succeeded, failed, interrupted) ends the current attempt:
+        ``outcome`` (succeeded, failed, interrupted, cancelled) ends the current attempt:
         its summary entry gets the end time, outcome and reason, and the
         task's ``report.json`` becomes that attempt's report with the summary
         of all attempts. The report is written before the status file, so a
@@ -452,7 +469,7 @@ class TaskQueue:
             # the sends that ended after the worker wrote its report, and
             # those of a worker that never wrote one.
             report["requests"] = load_records(records)
-        if outcome == "interrupted":
+        if outcome in ("interrupted", "cancelled"):
             # The attempt did not run to its end: say so, invent nothing.
             report.update(complete=False, incomplete_reason=reason)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -541,10 +558,52 @@ class TaskQueue:
             "queue_position": position if state == "queued" else None,
             # The reason of the last failure, while waiting for a rerun and once failed.
             "error": status.get("error") if state in ("waiting_rerun", "failed") else None,
+            "cancel_requested": bool(status.get("cancel_requested", False)),
+            "cleanup_error": status.get("cleanup_error"),
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
             "kept_source_algorithms": status.get("kept_source_algorithms", 0),
             "files": td.available_files(directory),
         }
+
+    def cancel(self, task_id: str) -> tuple[int, dict] | None:
+        """Cancel the task: ``(HTTP status, the task as status() gives it)``, or None if unknown.
+
+        A queued task, or one waiting for a rerun, is cancelled (200): the
+        accepted cancel is saved first, then the task leaves the queue and
+        the rerun timer and becomes ``cancelled``. A cancelled one answers
+        200 again; a finished one 409, unchanged. A running one answers 409
+        too, unchanged, until cancelling a running task comes (ticket 09).
+        """
+        directory = self.task_dir(task_id)
+        if directory is None:
+            return None
+        with self._cond:
+            state = td.read_status(directory)["state"]
+            if state in ("queued", "waiting_rerun"):
+                self._decide(task_id, "cancel_accepted", {"cancel_requested": True})
+                self._finish_cancel(task_id)
+                code = 200
+            else:
+                code = 200 if state == "cancelled" else 409
+        return code, self.status(task_id)
+
+    def _finish_cancel(self, task_id: str, attempt_ended: bool = False) -> None:
+        """Complete an accepted cancel: out of the queue and the rerun timer, ``cancelled``.
+
+        ``attempt_ended``: an attempt was under way (a running task at
+        startup); its summary entry ends as cancelled.
+        """
+        with self._cond:
+            self._waiting.pop(task_id, None)
+            self._due.pop(task_id, None)
+            self._decide(
+                task_id,
+                "cancelled",
+                {"state": "cancelled", "next_attempt_at": None},
+                outcome="cancelled" if attempt_ended else None,
+                reason=CANCELLED_REASON if attempt_ended else None,
+            )
+            self._cond.notify_all()
 
     # -- the runner ----------------------------------------------------------
 
@@ -577,6 +636,9 @@ class TaskQueue:
                     if self._next_task() != task_id:
                         continue
                     del self._waiting[task_id]
+                    status = td.read_status(self.tasks_dir / task_id)
+                    if status["state"] != "queued" or status.get("cancel_requested"):
+                        continue  # cancelled meanwhile: never started
                     attempt = self._start_attempt(task_id)
                 self._run_attempt(task_id, attempt)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
@@ -894,7 +956,13 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             return self._not_found()
 
         def do_POST(self):
-            if self.path.split("?", 1)[0].rstrip("/") != "/tasks":
+            parts = self.path.split("?", 1)[0].strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
+                answer = queue.cancel(parts[1])
+                if answer is None:
+                    return self._not_found()
+                return self._json(*answer)
+            if parts != ["tasks"]:
                 return self._not_found()
             length = int(self.headers.get("Content-Length") or 0)
             fields = _parse_multipart(
