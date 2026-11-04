@@ -325,8 +325,9 @@ class ModelClient:
             try:
                 try:
                     content = target._send(target_body, timing)
-                except ModelCallError:  # an HTTP error no resend fixes
+                except ModelCallError as e:  # an HTTP error no resend fixes
                     record(target.role, target.model, attempt, timing, "http_error")
+                    e.rejections = rejections  # e.g. the gloss rewrite keeps what passed
                     raise
                 except _RetryableError:  # recorded below
                     raise
@@ -631,6 +632,7 @@ class _Hedged:
         self._winner: _Candidate | None = None
         self._sent = 0  # send numbers given out
         self._active: list[_Candidate] = []  # started and not ended (a copy: nor given up)
+        self._started: list[_Candidate] = []  # every send started; guarded by ``_lock``
         self._failed: list[_Candidate] = []
 
     def run(self) -> str:
@@ -723,6 +725,8 @@ class _Hedged:
             return  # the original has just ended: its end is on its way
         self._sent += 1
         self._active.append(candidate)
+        with self._lock:
+            self._started.append(candidate)
         if hedge:
             logger.warning(
                 "model request has run %gs on flash with no answer (page %s); "
@@ -772,6 +776,10 @@ class _Hedged:
                 result = "cancelled_for_winner"
             elif candidate.error is None:
                 self._winner, result = candidate, "succeeded"
+            others = [c for c in self._started if c is not candidate]
+        if result == "succeeded":
+            for other in others:  # at once, before anything else (spec section 8)
+                other.cancel()
         if timing.started_at is not None:
             self.record(client.role, client.model, candidate.number, timing, result, candidate.hedge)
         self._events.put(("ended", candidate))

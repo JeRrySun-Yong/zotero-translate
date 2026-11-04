@@ -503,3 +503,53 @@ def test_a_credential_error_after_a_rejected_copy_is_not_taken_for_an_answer(tmp
 
     assert failure.value.category == "permanent"
     assert not failure.value.answered
+
+
+# Independent acceptance, round 1: the off path (and every request that is
+# not hedged) keeps the rejections when a later send fails with an HTTP error
+# no resend fixes, so the gloss rewrite keeps the glosses that passed, as
+# before ticket 15.
+def test_an_unhedged_request_keeps_its_rejections_when_a_401_follows(tmp_path):
+    with FakeModel() as argon_fake, FakeModel() as flash:
+        argon_fake.inject_error("401", nth=2)
+        models, _ = _models(flash, argon_fake, tmp_path)
+
+        def validate(content: str) -> None:
+            raise ValueError("first answer rejected")
+
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                models.argon.complete(MESSAGES, validate=validate, kind="gloss_rewrite")
+        finally:
+            models.close()
+
+    assert failure.value.category == "permanent"
+    assert not failure.value.answered  # as before: the 401 fails the request
+    assert [str(r) for r in failure.value.rejections] == ["first answer rejected"]
+
+
+# Independent acceptance, round 1: 「胜者出现后立即中止败者」: the loser is
+# cancelled as the winner is chosen, not after the winner's record is written.
+def test_the_loser_is_cancelled_before_the_winners_record_is_written(tmp_path):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")  # no answer until the client disconnects
+        models, log = _models(flash, argon, tmp_path)
+        append = log.append
+
+        def slow_winner_record(**fields) -> None:
+            if fields["result"] == "succeeded":
+                time.sleep(2.0)
+            append(**fields)
+
+        log.append = slow_winner_record
+        caller = threading.Thread(
+            target=models.flash.complete, args=(MESSAGES,), kwargs={"kind": "translation_batch"}
+        )
+        try:
+            caller.start()
+            assert _wait_until(lambda: len(argon.requests) == 1)
+            # Well before the winner's record (2 s) is written.
+            assert _wait_until(lambda: flash.requests[0].disconnected, timeout=1.0)
+            caller.join()
+        finally:
+            models.close()
