@@ -278,6 +278,7 @@ class Endpoint:
         on_start: Callable[[], None] | None = None,
         on_end: Callable[[], None] | None = None,
         give_up: threading.Event | None = None,
+        on_created: Callable[[Send], None] | None = None,
     ) -> Send | None:
         """Wait for a slot, then send ``body`` to ``path`` in the send's own thread.
 
@@ -287,6 +288,9 @@ class Endpoint:
         ``SendCancelled`` if the endpoint closes (or is closed) first.
         When ``give_up`` is set before a slot is taken, nothing is sent and
         this returns None (a hedged copy whose original has ended).
+        ``on_created(send)`` runs once the slot is taken and before the
+        send's thread starts, so that a caller can cancel the send from then
+        on; a send cancelled before its thread starts sends nothing.
         """
         waiting = time.monotonic()
         with self._budget:
@@ -305,6 +309,12 @@ class Endpoint:
             if on_start is not None:
                 on_start()
         send.slot_wait_seconds = time.monotonic() - waiting
+        if on_created is not None:
+            try:
+                on_created(send)
+            except BaseException:
+                self._release(send, on_end)
+                raise
         thread = threading.Thread(
             target=self._run, args=(send, path, body, timeout, on_end), name="model-request", daemon=True
         )
@@ -314,18 +324,23 @@ class Endpoint:
     def _run(self, send: Send, path: str, body: dict, timeout, on_end) -> None:
         _current.send = send
         try:
-            send._exchange(self._http, path, body, timeout)
+            if not send.cancelled.is_set():  # cancelled before its thread ran: nothing goes out
+                send._exchange(self._http, path, body, timeout)
         finally:
             # The send's connection has ended: only now is its slot given back.
             _current.send = None
-            with self._budget:
-                self._in_flight -= 1
-                self._sends.discard(send)
-                if on_end is not None:
-                    on_end()
-                self._budget.notify_all()
-            self._event("slot_released", send)
-            send._end()
+            self._release(send, on_end)
+
+    def _release(self, send: Send, on_end) -> None:
+        """Give the send's slot back: it has ended."""
+        with self._budget:
+            self._in_flight -= 1
+            self._sends.discard(send)
+            if on_end is not None:
+                on_end()
+            self._budget.notify_all()
+        self._event("slot_released", send)
+        send._end()
 
     def _event(self, name: str, send: Send | None) -> None:
         if self._on_event is not None:

@@ -473,7 +473,9 @@ class ModelClient:
         """Send one chat completion; return its status code and whole body.
 
         With ``give_up``: raise ``_GaveUp``, sending nothing, if it is set
-        before a slot is free. ``on_out(send)`` runs as the send goes out.
+        before a slot is free. ``on_out(send)`` runs as the send takes its
+        slot, before its thread starts (``Endpoint.start``'s ``on_created``),
+        so that a cancel from then on reaches the send before it goes out.
 
         The endpoint gives the send a slot and sends it in its own thread,
         which sets the send's start right before the HTTP call, so that a
@@ -493,11 +495,10 @@ class ModelClient:
             on_start=self._send_started,
             on_end=self._send_ended,
             give_up=give_up,
+            on_created=on_out,
         )
         if send is None:
             raise _GaveUp()
-        if on_out is not None:
-            on_out(send)
         try:
             ended = send.wait(self.settings.timeout_seconds)
             if not ended:
@@ -572,6 +573,7 @@ class _Candidate:
         self.done = False  # its send has ended
         self.content: str | None = None  # a valid answer
         self.error: BaseException | None = None  # how it failed
+        self.record_error: BaseException | None = None  # its record could not be written
         self._lock = threading.Lock()
         self._send = None
         self._cancelled = False
@@ -660,9 +662,16 @@ class _Hedged:
                 self._active.remove(candidate)
                 with self._lock:
                     winner = self._winner
-                if winner is not None:
-                    # The winner's end, or a loser's that got here first: the
-                    # winner's answer is already there.
+                if winner is not None and winner is not candidate:
+                    # A loser's end that got here before the winner's: the
+                    # losers are cancelled already (by the winner's thread);
+                    # wait for the winner's end, i.e. its record written.
+                    continue
+                if candidate.record_error is not None:
+                    # As without hedging: a record that cannot be written
+                    # fails the request with that error.
+                    raise candidate.record_error
+                if winner is not None:  # the winner's end
                     self._cancel_others(winner)
                     cache = self.flash._cache
                     if cache is not None:
@@ -783,9 +792,18 @@ class _Hedged:
         if result == "succeeded":
             for other in others:  # at once, before anything else (spec section 8)
                 other.cancel()
-        if timing.started_at is not None:
-            self.record(client.role, client.model, candidate.number, timing, result, candidate.hedge)
-        self._events.put(("ended", candidate))
+        try:
+            if timing.started_at is not None:
+                self.record(client.role, client.model, candidate.number, timing, result, candidate.hedge)
+        except BaseException as e:  # noqa: BLE001 - the coordinator raises it
+            candidate.record_error = e
+            if result == "cancelled_for_winner":
+                # Nobody waits for a loser's end: say it here.
+                logger.warning(
+                    "the record of a losing model request send could not be written: %s", e
+                )
+        finally:  # every send that went for a slot ends exactly once
+            self._events.put(("ended", candidate))
 
     def _cancel_others(self, winner: _Candidate) -> None:
         for other in list(self._active):
