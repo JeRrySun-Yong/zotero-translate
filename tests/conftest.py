@@ -12,15 +12,29 @@ own process group, and ``stop_service`` ends the whole group, then every
 process with a process marker of one of its tasks (task subprocesses run in
 groups of their own, M3 ticket 04). pytest tears the fixtures down when it
 is interrupted with SIGINT, and SIGTERM is made to interrupt it the same way.
+
+The suite also runs in parallel processes (M3 ticket 18): ``pytest -n auto``
+starts ``PARALLEL_PROCESSES`` of them (pytest-xdist), and ``--dist loadfile``
+(pyproject.toml) keeps each test file in one. Nothing the fixtures make is
+shared between tests: ports are picked free, data directories and
+environment files live in the test's own temporary directory, the service
+gives tasks random ids, and ``stop_service`` ends only the processes of
+tasks in its own data directory. A task a test writes into a data directory
+takes a random id too, which ``launch_service`` checks (another test run may
+be going on in another worktree, see ``_assert_random_task_ids``). The
+default data directory (``ZT_DATA_DIR``) is never the user's: each test has
+one of its own, a module fixture shares its test process's.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -42,6 +56,9 @@ TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 # The environment variable that carries a task process's process marker
 # "<task_id>:<attempt>" (spec section 2).
 MARK_ENV = "ZT_PROCESS_MARK"
+# The test processes ``pytest -n auto`` starts: each runs at most one paper
+# task at a time, about 2 GB.
+PARALLEL_PROCESSES = 3
 
 
 class ServiceClient:
@@ -170,6 +187,7 @@ def launch_service(
     client's ``output`` collects the service's whole standard output.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
+    _assert_random_task_ids(data_dir)
     if env_file is None:
         base_url = model if isinstance(model, str) else model.base_url
         env_file = write_env_file(root, base_url, FAKE_API_KEY, FAKE_MODEL_NAME, request_timeout)
@@ -199,6 +217,25 @@ def launch_service(
         daemon=True,
     ).start()
     return ServiceClient(json.loads(line)["url"], process, data_dir, output)
+
+
+def _assert_random_task_ids(data_dir: Path) -> None:
+    """Fail on a task directory a test seeded with a fixed task id.
+
+    The service reaps the processes of its tasks' ids when it starts, and
+    ``stop_service`` ends them too, so a fixed id would reach the processes
+    of another test run (another worktree) that seeded the same id. Seeded
+    tasks take ``uuid.uuid4().hex``, like the service's own.
+    """
+    tasks = Path(data_dir) / "tasks"
+    for task in tasks.iterdir() if tasks.is_dir() else ():
+        try:
+            parsed = uuid.UUID(task.name)
+        except ValueError:
+            parsed = None
+        assert parsed is not None and parsed.version == 4 and parsed.hex == task.name, (
+            f"fixed task id {task.name!r} in {tasks}: use uuid.uuid4().hex"
+        )
 
 
 def serve_command(
@@ -332,6 +369,29 @@ def pytest_configure(config) -> None:
     # fixtures are torn down and stop their services; by default Python
     # would exit at once and leave the services running.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+    # The default data directory of this test process, read when
+    # zotero_translate.settings is first imported, is a fresh one of its own:
+    # never the user's, never another parallel process's (each test then
+    # gets its own, see ``own_default_data_dir``).
+    default_data_dir = tempfile.mkdtemp(prefix="zt-test-data-")
+    os.environ["ZT_DATA_DIR"] = default_data_dir
+    config.add_cleanup(lambda: shutil.rmtree(default_data_dir, ignore_errors=True))
+
+
+@pytest.hookimpl(tryfirst=True)  # before pytest-xdist's own, whichever loaded first
+def pytest_xdist_auto_num_workers(config) -> int:
+    """``-n auto``: ``PARALLEL_PROCESSES``, or ``PYTEST_XDIST_AUTO_NUM_WORKERS`` when set.
+
+    This hook runs before pytest-xdist's, which would otherwise read that
+    variable, so it reads it too.
+    """
+    return int(os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") or PARALLEL_PROCESSES)
+
+
+@pytest.fixture(autouse=True)
+def own_default_data_dir(tmp_path, monkeypatch):
+    """A test's subprocesses default to a data directory, and model cache, of its own."""
+    monkeypatch.setenv("ZT_DATA_DIR", str(tmp_path / "default-data-dir"))
 
 
 @pytest.fixture

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -54,9 +55,14 @@ def _env_files(model: FakeModel, root: Path, timeout: float | None = None) -> li
 
 
 def _run_worker(
-    tmp_path: Path, task_id: str, env_files: list[str], extra_env: dict | None = None, args=None
+    tmp_path: Path, label: str, env_files: list[str], extra_env: dict | None = None, args=None
 ) -> tuple[int, list[dict], Path]:
-    """Run the worker on EXCERPT as the service does; return its exit code, reports, task dir."""
+    """Run the worker on EXCERPT as the service does; return its exit code, reports, task dir.
+
+    The task id is the directory's name: ``label`` and a random part, so no
+    other test run on the machine has a task, and process marker, of that id.
+    """
+    task_id = f"{label}-{uuid.uuid4().hex[:12]}"
     directory = tmp_path / "tasks" / task_id
     directory.mkdir(parents=True)
     (directory / td.SOURCE_PDF).write_bytes(EXCERPT.read_bytes())
@@ -145,7 +151,7 @@ def test_a_worker_that_succeeds_ends_at_once_with_its_records_and_children_gone(
     report_path = td.attempt_report_path(directory, 1)
     assert json.loads(report_path.read_text("utf-8"))["state"] == "succeeded"
     _assert_records_whole(report_path)
-    _assert_no_process_left("t17ok")
+    _assert_no_process_left(directory.name)
 
 
 def test_a_worker_whose_paper_task_fails_ends_at_once_with_exit_code_1(tmp_path):
@@ -163,12 +169,12 @@ def test_a_worker_whose_paper_task_fails_ends_at_once_with_exit_code_1(tmp_path)
         ("dossier", "succeeded"),
         ("term_list", "http_error"),
     ]
-    _assert_no_process_left("t17fail")
+    _assert_no_process_left(directory.name)
 
 
 def test_a_worker_that_cannot_read_its_settings_ends_at_once_with_its_child_gone(tmp_path):
     missing = ["--env-file", str(tmp_path / "missing.env"), "--argon-env-file", str(tmp_path / "x")]
-    code, reports, _ = _run_worker(
+    code, reports, directory = _run_worker(
         tmp_path, "t17settings", missing, {"ZT_TEST_WORKER_SPAWN_CHILD": "1"}
     )
 
@@ -176,7 +182,7 @@ def test_a_worker_that_cannot_read_its_settings_ends_at_once_with_its_child_gone
     assert [(r["type"], r["outcome"], r["category"]) for r in reports] == [
         ("result", "failed", "permanent")
     ]
-    _assert_no_process_left("t17settings")
+    _assert_no_process_left(directory.name)
 
 
 def test_a_worker_given_bad_arguments_ends_at_once_with_exit_code_2(tmp_path):
