@@ -65,6 +65,35 @@ test("a running row names the attempt when the service has started more than one
   assert.equal(core.taskRow({ title: "A", state: "queued", attempt: 2, queuePosition: 1 }).status, "排队中（第 1 位）");
 });
 
+test("a row waiting for an automatic rerun says so, about when, which rerun and the last reason", () => {
+  const waiting = {
+    title: "A",
+    state: "waiting_rerun",
+    stage: "生成论文档案",
+    progress: 2,
+    rerunsUsed: 0,
+    rerunsMax: 2,
+    nextAttemptInSeconds: 55,
+    error: "生成论文档案失败：管线模型服务端出错（HTTP 500）",
+  };
+  assert.equal(
+    core.taskRow(waiting).status,
+    "等待自动重跑（约 1 分钟后，第 1 次自动重跑，共 2 次），上次失败：生成论文档案失败：管线模型服务端出错（HTTP 500）",
+  );
+  assert.equal(
+    core.taskRow({ ...waiting, rerunsUsed: 1, nextAttemptInSeconds: 241, error: "管线模型请求超时（480 秒）" }).status,
+    "等待自动重跑（约 5 分钟后，第 2 次自动重跑，共 2 次），上次失败：管线模型请求超时（480 秒）",
+  );
+  // Due now (0 seconds left) still reads "about 1 minute", never "0 minutes".
+  assert.match(core.taskRow({ ...waiting, nextAttemptInSeconds: 0 }).status, /约 1 分钟后/);
+  assert.equal(core.taskRow({ ...waiting, rerunsUsed: 1 }).stage, "生成论文档案");
+});
+
+test("after the reruns, a failed row shows the last attempt's reason", () => {
+  const row = core.taskRow({ title: "A", state: "failed", attempt: 3, rerunsUsed: 2, error: "管线模型拒绝了请求（HTTP 400）" });
+  assert.equal(row.status, "失败：管线模型拒绝了请求（HTTP 400）");
+});
+
 test("a failed row shows the reason", () => {
   const row = core.taskRow({ title: "A", state: "failed", stage: "翻译与审校", progress: 30, error: "管线模型请求连续失败（第 2 页附近）" });
   assert.equal(row.status, "失败：管线模型请求连续失败（第 2 页附近）");

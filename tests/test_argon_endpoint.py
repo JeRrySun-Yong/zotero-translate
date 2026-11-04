@@ -116,9 +116,9 @@ def test_an_argon_key_echoed_in_a_400_response_is_redacted(start_service):
         service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
 
         task_id = service.submit()
-        final = service.wait(task_id)
+        final = service.wait_first_failure(task_id)
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"  # the attempt failed; retryable (M3 ticket 05)
     assert "Bearer [redacted]" in final["error"], final["error"]
     for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
         assert key not in final["error"]
@@ -304,9 +304,9 @@ def test_a_forwarded_request_failing_twice_on_argon_fails_the_task_with_its_page
         argon.fail_same_request(["500", "timeout"], kind="translate_batch")
         service = start_service(flash, argon=argon, request_timeout=SMALL_TIMEOUT)
 
-        final = service.wait(service.submit())
+        final = service.wait_first_failure(service.submit())
 
-        assert final["state"] == "failed"
+        assert final["state"] == "waiting_rerun"  # the attempt failed; retryable (M3 ticket 05)
         assert "第 1 页" in final["error"], final["error"]
         [timed_out] = [r for r in flash.requests if r.fault][:1]
         assert [r.fault for r in _sends(flash, timed_out)] == ["timeout", "timeout"]

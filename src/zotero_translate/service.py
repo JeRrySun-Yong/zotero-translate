@@ -5,9 +5,13 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
-- ``GET /tasks/{task_id}`` -> state, stage, progress, attempt (attempts
-  started, interrupted ones included; 0 until the first starts), queue
-  position, error, kept source paragraphs and downloadable files
+- ``GET /tasks/{task_id}`` -> state (queued, running, waiting_rerun,
+  succeeded, failed), stage, progress, attempt (attempts started,
+  interrupted ones included; 0 until the first starts), reruns_used and
+  reruns_max (2), next_attempt_in_seconds (only while waiting_rerun), queue
+  position (only while queued), error (the last failure's reason, only
+  while waiting_rerun or failed), kept source paragraphs and downloadable
+  files
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -19,11 +23,24 @@ port is taken it exits with status 1 and a readable reason on stderr, and
 touches no task.
 
 Tasks run one at a time, ordered by queue class (tasks interrupted by a
-restart first, then first attempts) and, within a class, by submission
-time; class and sort key are saved, so the order survives a restart. The
-service alone writes the
-task state: every transition goes through ``TaskQueue._decide``, under one
-lock, and is saved with the counters it changes as one atomic replacement of
+restart first, by submission time; then due automatic reruns, by due time,
+then submission time; then first attempts, by submission time); class and
+sort key are saved, so the order survives a restart.
+
+An attempt that fails with category ``retryable`` (anything but a
+credential error or unreadable settings; also a subprocess that exits
+without a result) puts the task in ``waiting_rerun`` with a saved due time,
+60 seconds later before the first rerun and 300 before the second (event
+等待自动重跑). When it is due, the task is queued as a rerun and the rerun
+counted, in one transition (event 自动重跑开始); it does not preempt the
+running task, and no first attempt starts while a due rerun is not yet
+queued. After 2 reruns, or on a ``permanent`` failure, the task fails with
+that attempt's reason. A restart keeps a waiting task's due time and counts
+no rerun again; an interrupted rerun attempt is requeued as interrupted,
+using no rerun.
+
+The service alone writes the task state: every transition goes through
+``TaskQueue._decide``, under one lock, and is saved with the counters it changes as one atomic replacement of
 the status file. Each attempt runs in its own subprocess
 (``zotero_translate.worker``), which reports progress and its result over a
 pipe; the service adopts only reports of the task's current attempt while the
@@ -42,8 +59,8 @@ Each attempt writes its own task report, ``attempts/<n>/report.json``; when
 an attempt ends, the service copies it to the task's ``report.json`` with a
 summary of all attempts (number, start and end time, outcome, reason). The
 service writes one line per task event to standard output (the service log):
-submitted, started, interrupted, requeued, succeeded, failed, cleanup error,
-report dropped. No API key and no HTTP poll is logged.
+submitted, started, interrupted, requeued, waiting for a rerun, rerun
+started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
 
 When the service starts (``TaskQueue.restore``), a task an earlier service
 left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
@@ -60,15 +77,23 @@ production): ``ZT_TEST_PAUSE_AFTER_MARKER`` (after the process marker is saved,
 before the subprocess starts) and ``ZT_TEST_PAUSE_BEFORE_ADOPT`` (after the
 subprocess has exited, before its result is adopted) name a directory. At the
 pause the service creates ``<directory>/<task_id>-<attempt>.paused`` and waits
-until that file is deleted. ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
+until that file is deleted. ``ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE`` is a pause
+of the same kind when a rerun is due, before it is queued (the attempt in
+the file name is the one that failed), and ``ZT_TEST_PAUSE_BEFORE_REAP``
+when the queue has picked the next task, before its earlier processes are
+reaped (the attempt is the one about to start). ``ZT_TEST_RERUN_WAITS_SECONDS``
+("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
+``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
 makes it start a child that sleeps for an hour, by multiprocessing's spawn
 method like the engine (``zotero_translate.worker``).
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an
-error of the service itself while it carries an attempt through fails that
-task with a readable reason, and the runner goes on with the next task.
+error of the service itself while an attempt runs ends that attempt as a
+retryable failure (an automatic rerun while reruns remain), an error at any
+other point fails the task, both with a readable reason, and the runner goes
+on with the next task.
 """
 
 from __future__ import annotations
@@ -77,6 +102,7 @@ import datetime
 import errno
 import fcntl
 import json
+import math
 import os
 import re
 import subprocess
@@ -102,17 +128,24 @@ RESTART_ERROR = "翻译服务重启，任务中断"
 MANY_RESTARTS_ERROR = "翻译服务多次重启，任务中断"
 UPGRADE_ERROR = "升级前未完成的任务，请重试"
 MAX_INTERRUPTIONS = 3  # in a row; the third fails the task
+RERUNS_MAX = 2  # automatic reruns after the first attempt
+RERUN_WAITS_SECONDS = (60.0, 300.0)  # before the first and the second rerun
 LOCK_FILE = "service.lock"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
+PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
+PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
+RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Queue classes (spec section 1, "排队顺序"), in the order they run: tasks
-# interrupted by a restart, then (ticket 05) due automatic reruns, then
-# first attempts; within a class by the sort key, the submission time.
+# interrupted by a restart, by submission time; due automatic reruns, by due
+# time, then submission time; first attempts, by submission time. The sort
+# key is the submission time, or [due time, submission time] for a rerun.
 INTERRUPTED_QUEUE_CLASS = "interrupted"
+RERUN_QUEUE_CLASS = "rerun"
 FIRST_QUEUE_CLASS = "first"
-_QUEUE_RANK = {INTERRUPTED_QUEUE_CLASS: 0, FIRST_QUEUE_CLASS: 2}
+_QUEUE_RANK = {INTERRUPTED_QUEUE_CLASS: 0, RERUN_QUEUE_CLASS: 1, FIRST_QUEUE_CLASS: 2}
 
 # The state fields a new task starts with (spec section 1), besides state,
 # stage, progress and the kept source counts.
@@ -134,6 +167,8 @@ _EVENTS = {
     "started": "开始",
     "interrupted": "中断",  # the attempt was cut short by a restart
     "requeued": "重新排队并开始新尝试",
+    "waiting_rerun": "等待自动重跑",  # the attempt failed, retryable; a rerun is due later
+    "rerun_started": "自动重跑开始",  # the rerun is due and queued
     "succeeded": "成功",
     "failed": "失败",
     "cleanup_error": "进程回收出错",
@@ -154,8 +189,10 @@ class TaskQueue:
         self.env_file = Path(env_file)
         self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
-        # Waiting tasks: task ID -> (rank of its queue class, sort key).
-        self._waiting: dict[str, tuple[int, float]] = {}
+        # Waiting tasks: task ID -> (rank of its queue class, *sort key).
+        self._waiting: dict[str, tuple] = {}
+        # Tasks waiting for an automatic rerun: task ID -> (due time, submission time).
+        self._due: dict[str, tuple[float, float]] = {}
         # Tasks whose processes could not be reaped: no new attempt starts
         # while there is one (spec section 2, "回收失败").
         self._cleanup_blocked: set[str] = set()
@@ -168,8 +205,9 @@ class TaskQueue:
         A task left running was interrupted: after its processes are reaped
         it is queued again, ahead of the others, unless this is its third
         interruption in a row, which fails it. A queued task keeps its queue
-        class and sort key. A task directory from before M3 keeps its final
-        state; queued, it is queued as a first attempt; running, it fails.
+        class and sort key; a task waiting for a rerun keeps its due time.
+        A task directory from before M3 keeps its final state; queued, it
+        is queued as a first attempt; running, it fails.
         An error with one task fails that task alone, with a readable reason.
         """
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +243,11 @@ class TaskQueue:
             return  # left as it is until its processes are reaped
         if state == "queued":
             self._enqueue(task_id, status["queue_class"], status["queue_key"])
+        elif state == "waiting_rerun":
+            # Its saved due time stands; a rerun already queued is "queued".
+            self._schedule_rerun(
+                task_id, float(status["next_attempt_at"]), _submitted_at(directory)
+            )
         elif state == "running":
             interruptions = status.get("consecutive_interruptions", 0) + 1
             if interruptions < MAX_INTERRUPTIONS:
@@ -240,9 +283,15 @@ class TaskQueue:
                     then=(("failed", MANY_RESTARTS_ERROR),),
                 )
 
-    def _enqueue(self, task_id: str, queue_class: str, queue_key: float) -> None:
+    def _enqueue(self, task_id: str, queue_class: str, queue_key: float | list) -> None:
+        key = tuple(queue_key) if isinstance(queue_key, (list, tuple)) else (queue_key,)
         with self._cond:
-            self._waiting[task_id] = (_QUEUE_RANK[queue_class], queue_key)
+            self._waiting[task_id] = (_QUEUE_RANK[queue_class], *key)
+            self._cond.notify_all()
+
+    def _schedule_rerun(self, task_id: str, due: float, submitted_at: float) -> None:
+        with self._cond:
+            self._due[task_id] = (due, submitted_at)
             self._cond.notify_all()
 
     def _queue_order(self) -> list[str]:
@@ -272,6 +321,59 @@ class TaskQueue:
 
     def start(self) -> None:
         threading.Thread(target=self._run_forever, name="task-runner", daemon=True).start()
+        threading.Thread(target=self._rerun_forever, name="rerun-timer", daemon=True).start()
+
+    # -- automatic reruns ----------------------------------------------------
+
+    def _rerun_forever(self) -> None:
+        """Queue each waiting task when its rerun is due, by due time, then submission time."""
+        while True:
+            with self._cond:
+                while True:
+                    now = time.time()
+                    order = sorted((due, submitted, t) for t, (due, submitted) in self._due.items())
+                    if order and order[0][0] <= now:
+                        break
+                    self._cond.wait(order[0][0] - now if order else None)
+                task_id = order[0][2]
+                entry = self._due[task_id]
+            # It stays among the due ones until it is queued, so the runner
+            # does not start a first attempt meanwhile. Only this entry is
+            # removed: once queued, the rerun's attempt may fail and schedule
+            # the next rerun before this thread gets here.
+            try:
+                self._queue_rerun(task_id)
+            except Exception as e:  # noqa: BLE001 - one task's error must not stop the reruns
+                self._fail_after_error(task_id, e)
+            finally:
+                with self._cond:
+                    if self._due.get(task_id) is entry:
+                        del self._due[task_id]
+                    self._cond.notify_all()
+
+    def _queue_rerun(self, task_id: str) -> None:
+        """The rerun is due: queue the task as a rerun and count it, in one transition."""
+        directory = self.tasks_dir / task_id
+        _test_pause(PAUSE_BEFORE_RERUN_QUEUE, task_id, td.read_status(directory)["attempt"])
+        with self._cond:
+            status = td.read_status(directory)
+            if status["state"] != "waiting_rerun" or status.get("cancel_requested"):
+                return
+            queue_key = [status["next_attempt_at"], _submitted_at(directory)]
+            self._decide(
+                task_id,
+                "rerun_started",
+                {
+                    "state": "queued",
+                    "stage": td.QUEUED_STAGE,
+                    "progress": 0,
+                    "reruns_used": status["reruns_used"] + 1,
+                    "next_attempt_at": None,
+                    "queue_class": RERUN_QUEUE_CLASS,
+                    "queue_key": queue_key,
+                },
+            )
+            self._enqueue(task_id, RERUN_QUEUE_CLASS, queue_key)
 
     # -- the arbiter ---------------------------------------------------------
 
@@ -409,14 +511,24 @@ class TaskQueue:
             status = td.read_status(directory)
             order = self._queue_order()
             position = order.index(task_id) + 1 if task_id in order else None
+        state = status["state"]
+        due = status.get("next_attempt_at")
         return {
             "task_id": task_id,
-            "state": status["state"],
+            "state": state,
             "stage": status["stage"],
             "progress": status["progress"],
             "attempt": status.get("attempt", 0),
-            "queue_position": position,
-            "error": status.get("error"),
+            "reruns_used": status.get("reruns_used", 0),
+            "reruns_max": RERUNS_MAX,
+            "next_attempt_in_seconds": (
+                max(0, math.ceil(due - time.time()))
+                if state == "waiting_rerun" and due is not None
+                else None
+            ),
+            "queue_position": position if state == "queued" else None,
+            # The reason of the last failure, while waiting for a rerun and once failed.
+            "error": status.get("error") if state in ("waiting_rerun", "failed") else None,
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
             "kept_source_algorithms": status.get("kept_source_algorithms", 0),
             "files": td.available_files(directory),
@@ -424,34 +536,67 @@ class TaskQueue:
 
     # -- the runner ----------------------------------------------------------
 
+    def _next_task(self) -> str | None:
+        """The waiting task to start next; None while there is none, scheduling
+        is blocked, or a due rerun not yet queued would go ahead of it."""
+        if not self._waiting or self._cleanup_blocked:
+            return None
+        task_id = self._queue_order()[0]
+        if self._waiting[task_id][0] > _QUEUE_RANK[RERUN_QUEUE_CLASS]:
+            now = time.time()
+            if any(due <= now for due, _ in self._due.values()):
+                return None
+        return task_id
+
     def _run_forever(self) -> None:
         while True:
             with self._cond:
-                while not self._waiting or self._cleanup_blocked:
+                while (task_id := self._next_task()) is None:
                     self._cond.wait()
-                task_id = self._queue_order()[0]
-                place = self._waiting.pop(task_id)
             try:
-                # The processes of its earlier attempts go first.
+                next_attempt = td.read_status(self.tasks_dir / task_id).get("attempt", 0) + 1
+                _test_pause(PAUSE_BEFORE_REAP, task_id, next_attempt)
+                # The processes of its earlier attempts go first. Meanwhile the
+                # task stays queued, in its place, so a rerun that comes due or
+                # a requeue can still go ahead of it.
                 if not self._reap(task_id):
-                    with self._cond:
-                        self._waiting[task_id] = place
                     continue
-                self._run_attempt(task_id)
+                with self._cond:
+                    if self._next_task() != task_id:
+                        continue
+                    del self._waiting[task_id]
+                    attempt = self._start_attempt(task_id)
+                self._run_attempt(task_id, attempt)
             except Exception as e:  # noqa: BLE001 - one task's error must not stop the queue
                 self._fail_after_error(task_id, e)
 
     def _fail_after_error(
-        self, task_id: str, error: Exception, what: str = "翻译服务处理任务出错"
+        self,
+        task_id: str,
+        error: Exception,
+        what: str = "翻译服务处理任务出错",
+        category: str = "retryable",
+        attempt_error: str | None = None,
+        attempt_ended: bool = False,
     ) -> None:
-        """Fail a task the service itself could not carry through; ``what`` begins the reason.
+        """End a task the service itself could not carry through; ``what`` begins the reason.
+
+        An error while the service adopts an attempt's result
+        (``attempt_ended``) ends that attempt as a failure of ``category`` (``retryable`` unless the attempt's own
+        result was ``permanent``): a retryable one waits for an automatic
+        rerun while reruns remain (spec section 1), else the task fails.
+        When the attempt had failed on its own, ``attempt_error`` is its
+        reason and stays the task's reason; the service's error is printed. An error at any
+        other point (taking over at startup, queueing a due rerun, starting
+        an attempt) fails the task.
 
         Best effort and never raises: the service goes on with the other
         tasks. The task's report.json is written if it can be; a status file
         that cannot be read is replaced by one that says the task failed.
         """
-        reason = f"{what}：{type(error).__name__}: {error}"
-        print(f"task={task_id}: {reason}", file=sys.stderr, flush=True)
+        service_error = f"{what}：{type(error).__name__}: {error}"
+        print(f"task={task_id}: {service_error}", file=sys.stderr, flush=True)
+        reason = attempt_error or service_error
         traceback.print_exception(error, file=sys.stderr)
         directory = self.tasks_dir / task_id
         with self._cond:
@@ -464,12 +609,22 @@ class TaskQueue:
                     td.write_json(directory / td.STATUS_FILE, status)
                 if status.get("state") in td.TERMINAL_STATES:
                     return
+                reruns_used = status.get("reruns_used", 0)
+                rerun = (
+                    attempt_ended
+                    and category == "retryable"
+                    and status.get("state") == "running"
+                    and reruns_used < RERUNS_MAX
+                )
                 changes = {
                     "state": "failed",
                     "error": reason,
-                    "failure_category": "retryable",
+                    "failure_category": category,
                     "consecutive_interruptions": 0,
                 }
+                if rerun:
+                    due = time.time() + _rerun_waits()[reruns_used]
+                    changes.update(state="waiting_rerun", next_attempt_at=due)
                 if status.get("attempts"):
                     attempts = [dict(a) for a in status["attempts"]]
                     attempts[-1].update(ended_at=time.time(), outcome="failed", reason=reason)
@@ -481,12 +636,14 @@ class TaskQueue:
                     except Exception:  # noqa: BLE001 - the state matters more than the report
                         traceback.print_exc()
                 td.write_status(directory, **changes)
-                self._log(task_id, "failed", status.get("attempt", 0), reason)
+                self._log(task_id, changes["state"], status.get("attempt", 0), reason)
+                if rerun:
+                    self._schedule_rerun(task_id, changes["next_attempt_at"], _submitted_at(directory))
             except Exception:  # noqa: BLE001 - nothing more can be done for this task
                 traceback.print_exc()
 
-    def _run_attempt(self, task_id: str) -> None:
-        """Start the task's next attempt, run it, and adopt its result."""
+    def _start_attempt(self, task_id: str) -> int:
+        """Save the task as running its next attempt; return the attempt number."""
         with self._cond:
             status = td.read_status(self.tasks_dir / task_id)
             attempt = status.get("attempt", 0) + 1
@@ -511,11 +668,29 @@ class TaskQueue:
                     ],
                 },
             )
+        return attempt
+
+    def _run_attempt(self, task_id: str, attempt: int) -> None:
+        """Run the started attempt and adopt its result."""
         try:
             result = self._run(task_id, attempt)
         except Exception as e:  # noqa: BLE001 - reported as this attempt's failure
             result = _failure(f"无法启动论文任务：{e}", "retryable")
         _test_pause(PAUSE_BEFORE_ADOPT, task_id, attempt)
+        try:
+            self._adopt_result(task_id, attempt, result)
+        except Exception as e:  # noqa: BLE001 - the attempt's own category stands
+            failed = result["outcome"] == "failed"
+            self._fail_after_error(
+                task_id,
+                e,
+                category=result.get("category", "retryable") if failed else "retryable",
+                attempt_error=result.get("error") if failed else None,
+                attempt_ended=True,
+            )
+
+    def _adopt_result(self, task_id: str, attempt: int, result: dict) -> None:
+        """End the attempt with its result: succeeded, waiting for a rerun, or failed."""
         if result["outcome"] == "succeeded":
             self._adopt(
                 task_id,
@@ -534,19 +709,33 @@ class TaskQueue:
                 outcome="succeeded",
             )
         else:
-            self._adopt(
-                task_id,
-                attempt,
-                "failed",
-                {
-                    "state": "failed",
-                    "error": result["error"],
-                    "failure_category": result["category"],
-                    "consecutive_interruptions": 0,
-                },
-                outcome="failed",
-                reason=result["error"],
-            )
+            directory = self.tasks_dir / task_id
+            reruns_used = td.read_status(directory).get("reruns_used", 0)
+            fields = {
+                "error": result["error"],
+                "failure_category": result["category"],
+                "consecutive_interruptions": 0,
+            }
+            if result["category"] == "retryable" and reruns_used < RERUNS_MAX:
+                due = time.time() + _rerun_waits()[reruns_used]
+                if self._adopt(
+                    task_id,
+                    attempt,
+                    "waiting_rerun",
+                    {**fields, "state": "waiting_rerun", "next_attempt_at": due},
+                    outcome="failed",
+                    reason=result["error"],
+                ):
+                    self._schedule_rerun(task_id, due, _submitted_at(directory))
+            else:
+                self._adopt(
+                    task_id,
+                    attempt,
+                    "failed",
+                    {**fields, "state": "failed"},
+                    outcome="failed",
+                    reason=result["error"],
+                )
 
     def _run(self, task_id: str, attempt: int) -> dict:
         """Run one attempt's subprocess until it exits; return its result report."""
@@ -649,6 +838,18 @@ def _submitted_at(directory: Path) -> float:
 
 def _failure(error: str, category: str) -> dict:
     return {"outcome": "failed", "error": error, "category": category}
+
+
+def _rerun_waits() -> tuple[float, float]:
+    """Seconds to wait before the first and the second rerun.
+
+    Test only: ``ZT_TEST_RERUN_WAITS_SECONDS`` replaces them.
+    """
+    setting = os.environ.get(RERUN_WAITS_SETTING)
+    if not setting:
+        return RERUN_WAITS_SECONDS
+    first, second = (float(part) for part in setting.split(","))
+    return first, second
 
 
 def _test_pause(setting: str, task_id: str, attempt: int) -> None:

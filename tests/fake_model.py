@@ -4,7 +4,7 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, 400, 401, timeout, slow, empty content, invalid
+- inject errors (500, 429, 400, 401, 403, timeout, slow, empty content, invalid
   JSON) on the N-th request of a kind, or on the first request of a kind and then on
   each resend of that same request (``fail_same_request``; a resend may
   name another model, as a request forwarded to argon does). "timeout" sends
@@ -110,7 +110,7 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
-_ERRORS = {"500", "429", "400", "400_echo", "401", "timeout", "slow", "empty", "invalid_json"}
+_ERRORS = {"500", "429", "400", "400_echo", "401", "403", "timeout", "slow", "empty", "invalid_json"}
 
 # The body of an injected HTTP 400: several lines, the message first, then
 # padding that a 200-character excerpt cuts off.
@@ -194,7 +194,7 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "400_echo", "401", "timeout", "slow",
+        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "timeout", "slow",
         "empty", "invalid_json".
         """
         assert error in _ERRORS, error
@@ -274,8 +274,8 @@ class FakeModel:
             if fault == "400_echo":
                 echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
                 return _send_json(handler, 400, {"error": echo})
-            if fault == "401":
-                return _send_json(handler, 401, {"error": {"message": "injected 401"}})
+            if fault in ("401", "403"):
+                return _send_json(handler, int(fault), {"error": {"message": f"injected {fault}"}})
             if fault == "timeout":
                 time.sleep(3600)
                 return None

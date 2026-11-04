@@ -18,15 +18,15 @@ var ZoteroTranslate = {
   ITEM_MENU_ID: "zotero-translate-itemmenu",
   TOOLS_MENU_ID: "zotero-translate-toolsmenu",
   // States in which the service still has the task: polled, and saved for restarts.
-  POLLED_STATES: ["queued", "running", "attaching"],
+  POLLED_STATES: ["queued", "running", "waiting_rerun", "attaching"],
   // A source PDF with a task in one of these states is not submitted again.
-  ACTIVE_STATES: ["submitting", "queued", "running", "attaching"],
+  ACTIVE_STATES: ["submitting", "queued", "running", "waiting_rerun", "attaching"],
   // Task fields saved for restarts.
   SAVED_FIELDS: ["sourceItemID", "itemID", "title", "sourceFileName", "serviceUrl", "taskId", "state"],
 
   // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
   // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
-  // progress, attempt, queuePosition, error}
+  // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error}
   tasks: [],
   // Why items of the latest submission were skipped; shown in the task window.
   notices: [],
@@ -154,6 +154,9 @@ var ZoteroTranslate = {
       stage: null,
       progress: null,
       attempt: null,
+      rerunsUsed: null,
+      rerunsMax: null,
+      nextAttemptInSeconds: null,
       queuePosition: null,
       error: null,
     });
@@ -245,6 +248,9 @@ var ZoteroTranslate = {
         stage: status.stage,
         progress: status.progress,
         attempt: status.attempt,
+        rerunsUsed: status.reruns_used,
+        rerunsMax: status.reruns_max,
+        nextAttemptInSeconds: status.next_attempt_in_seconds,
         queuePosition: status.queue_position,
         error: status.error,
         keptSourceParagraphs: status.kept_source_paragraphs,

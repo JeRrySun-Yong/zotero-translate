@@ -9,8 +9,9 @@ otherwise pollute real runs; the pipeline model client keeps its own
 response cache.
 
 Requests are retried by the pipeline model client. A request that fails for
-good is raised as the engine's ``TranslationRequestError``, which makes the
-engine fail the translation stage instead of keeping the source text. The
+good is raised as the engine's ``TranslationRequestError``, with the
+failure category of the ``ModelCallError``, which makes the engine fail the
+translation stage instead of keeping the source text. The
 inherited OpenAI SDK retry on HTTP 429 does not apply: our overrides replace
 the decorated methods.
 """
@@ -59,4 +60,4 @@ class PipelineTranslator(OpenAITranslator):
         try:
             return self.model_client.complete(messages, validate=validate, page=page)
         except ModelCallError as e:
-            raise TranslationRequestError(str(e)) from e
+            raise TranslationRequestError(str(e), category=e.category) from e

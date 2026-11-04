@@ -231,9 +231,9 @@ def test_a_review_request_failing_for_good_fails_the_task(fake_model, start_serv
     service = start_service(fake_model)
 
     task_id = service.submit()
-    final = service.wait(task_id)
+    final = service.wait_first_failure(task_id)
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"  # the attempt failed; retryable (M3 ticket 05)
     assert "第 1 页" in final["error"], final["error"]
     report = service.report(task_id)
     assert [b["page"] for b in report["failed_batches"]][:1] == [1]

@@ -164,9 +164,9 @@ def test_dossier_without_the_spec_fields_is_retried_then_fails_the_task(
     fake_model.respond("dossier", lambda body: json.dumps(incomplete, ensure_ascii=False))
     service = start_service(fake_model)
 
-    final = service.wait(service.submit())
+    final = service.wait_first_failure(service.submit())
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"  # the attempt failed; retryable (M3 ticket 05)
     assert "论文档案" in final["error"], final["error"]
     assert len(fake_model.requests_of("dossier")) == 4  # first attempt + 3 retries
     assert fake_model.requests_of("translate_batch") == []

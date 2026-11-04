@@ -15,6 +15,7 @@ import psutil
 
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
+from tests.conftest import TERMINAL_STATES
 from tests.conftest import launch_service
 from tests.conftest import serve_command
 from tests.conftest import stop_service
@@ -298,11 +299,14 @@ def test_report_json_gives_the_failure_when_the_worker_cannot_read_its_settings(
             stop_service(service)
 
 
-def test_a_task_the_service_cannot_finish_fails_and_the_next_task_still_runs(tmp_path):
+def test_a_task_the_service_cannot_finish_is_rerun_then_fails_and_the_next_task_still_runs(tmp_path):
+    # An error of the service itself while an attempt runs ends that attempt
+    # as a retryable failure (spec section 1): reruns, then failure.
     pauses = tmp_path / "pauses"
     pauses.mkdir()
+    env = {"ZT_TEST_PAUSE_BEFORE_ADOPT": str(pauses), "ZT_TEST_RERUN_WAITS_SECONDS": "0.5,0.5"}
     with FakeModel() as model:
-        service = launch_service(model, tmp_path, env={"ZT_TEST_PAUSE_BEFORE_ADOPT": str(pauses)})
+        service = launch_service(model, tmp_path, env=env)
         try:
             broken = service.submit()
             flag = _wait_for_file(pauses / f"{broken}-1.paused", timeout=300)
@@ -310,13 +314,25 @@ def test_a_task_the_service_cannot_finish_fails_and_the_next_task_still_runs(tmp
             (service.data_dir / "tasks" / broken / "report.json").mkdir()
             flag.unlink()
 
-            failed = service.wait(broken)
+            waiting = service.wait_for(broken, lambda s: s["state"] != "running", timeout=60)
+            assert waiting["state"] in ("waiting_rerun", "queued", "running")
+            nxt = service.submit()
+            deadline = time.monotonic() + 300
+            while not all(service.status(t)["state"] in TERMINAL_STATES for t in (broken, nxt)):
+                assert time.monotonic() < deadline, "tasks never finished"
+                for flag in pauses.glob("*.paused"):
+                    flag.unlink()
+                time.sleep(0.1)
+
+            failed = service.status(broken)
             assert failed["state"] == "failed"
             assert "翻译服务处理任务出错" in failed["error"]
-
-            nxt = service.submit()
-            _wait_for_file(pauses / f"{nxt}-1.paused", timeout=300).unlink()
-            assert service.wait(nxt)["state"] == "succeeded"
+            assert failed["attempt"] == 3
+            assert failed["reruns_used"] == 2
+            assert service.status(nxt)["state"] == "succeeded"
+            events = [line.split(" event=", 1)[1].split(" ", 1)[0] for line in service.log_lines(broken)]
+            assert events.count("等待自动重跑") == 2
+            assert events[-1] == "失败"
         finally:
             stop_service(service)
 

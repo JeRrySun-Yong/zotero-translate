@@ -12,7 +12,8 @@ Reliability (ADR 0002):
   answers the caller's ``validate`` rejects are retried, at most
   ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
   When the attempts are used up, ``complete`` raises ``ModelCallError`` with
-  a readable Chinese reason.
+  a readable Chinese reason and a failure category: ``permanent`` for HTTP
+  401 and 403 (the key), ``retryable`` for everything else.
 - Before the n-th resend, a network error (the endpoint cannot be reached,
   or the connection breaks before an answer; not a timeout, not an HTTP
   status) waits ``connection_retry_seconds[n - 1]``, by default 5, 15 and 45
@@ -76,11 +77,16 @@ class ModelCallError(Exception):
 
     ``answered`` is True when at least one attempt got an answer that the
     caller's ``validate`` rejected, i.e. the endpoint did answer.
+
+    ``category`` is the failure category (spec section 1): ``permanent`` for
+    a credential error (HTTP 401, 403), which a rerun of the paper task
+    cannot fix; ``retryable`` for every other failure.
     """
 
-    def __init__(self, message: str, answered: bool = False):
+    def __init__(self, message: str, answered: bool = False, category: str = "retryable"):
         super().__init__(message)
         self.answered = answered
+        self.category = category
 
 
 # Consecutive timeouts after which a flash request goes to argon (ADR 0004).
@@ -255,7 +261,9 @@ class ModelClient:
         if status_code == 400:
             raise _RetryableError("管线模型拒绝了请求（HTTP 400）" + self._body_excerpt(data))
         if status_code in (401, 403):
-            raise ModelCallError(f"管线模型拒绝了请求（HTTP {status_code}）")
+            raise ModelCallError(
+                f"管线模型拒绝了请求（HTTP {status_code}）", category="permanent"
+            )
         if status_code >= 400:
             raise ModelCallError(
                 f"管线模型拒绝了请求（HTTP {status_code}）" + self._body_excerpt(data)
