@@ -20,7 +20,10 @@ build-backend = "hatchling.build"
 packages = ["src/zotero_translate"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "pytest-xdist>=3.8.0",
+]
 
 [tool.uv]
 # BabelDOC 0.6.4 imports bitstring.BitStream, which bitstring 5.0 removed.
@@ -31,4 +34,8 @@ babeldoc = { path = "engine", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# With -n (pytest-xdist), each test file runs whole in one process, so module
+# fixtures run once; -n auto means 3 processes (tests/conftest.py). Without -n
+# the suite runs serially.
+addopts = "--dist loadfile"
 markers = ["real_model: calls the real pipeline model; skipped unless ZT_REAL_MODEL_SMOKE=1"]

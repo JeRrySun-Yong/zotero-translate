@@ -12,15 +12,26 @@ own process group, and ``stop_service`` ends the whole group, then every
 process with a process marker of one of its tasks (task subprocesses run in
 groups of their own, M3 ticket 04). pytest tears the fixtures down when it
 is interrupted with SIGINT, and SIGTERM is made to interrupt it the same way.
+
+The suite also runs in parallel processes (M3 ticket 18): ``pytest -n auto``
+starts ``PARALLEL_PROCESSES`` of them (pytest-xdist), and ``--dist loadfile``
+(pyproject.toml) keeps each test file in one. Nothing the fixtures make is
+shared between tests: ports are picked free, data directories and
+environment files live in the test's own temporary directory, task ids are
+random, and ``stop_service`` ends only the processes of tasks in its own
+data directory. A test that leaves the data directory to its default
+(``ZT_DATA_DIR``) gets one of its own too, never the user's.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -42,6 +53,9 @@ TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 # The environment variable that carries a task process's process marker
 # "<task_id>:<attempt>" (spec section 2).
 MARK_ENV = "ZT_PROCESS_MARK"
+# The test processes ``pytest -n auto`` starts: each runs at most one paper
+# task at a time, about 2 GB.
+PARALLEL_PROCESSES = 3
 
 
 class ServiceClient:
@@ -330,6 +344,25 @@ def pytest_configure(config) -> None:
     # fixtures are torn down and stop their services; by default Python
     # would exit at once and leave the services running.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+    # The default data directory of this test process, read when
+    # zotero_translate.settings is first imported, is a fresh one of its own:
+    # never the user's, never another parallel process's (each test then
+    # gets its own, see ``own_default_data_dir``).
+    default = tempfile.mkdtemp(prefix="zt-test-data-")
+    os.environ["ZT_DATA_DIR"] = default
+    config.add_cleanup(lambda: shutil.rmtree(default, ignore_errors=True))
+
+
+@pytest.hookimpl(tryfirst=True)  # before pytest-xdist's own, whichever loaded first
+def pytest_xdist_auto_num_workers(config) -> int:
+    """``-n auto``: ``PARALLEL_PROCESSES``, or ``PYTEST_XDIST_AUTO_NUM_WORKERS`` when set."""
+    return int(os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") or PARALLEL_PROCESSES)
+
+
+@pytest.fixture(autouse=True)
+def own_default_data_dir(tmp_path, monkeypatch):
+    """A test's subprocesses default to a data directory, and model cache, of its own."""
+    monkeypatch.setenv("ZT_DATA_DIR", str(tmp_path / "default-data-dir"))
 
 
 @pytest.fixture
