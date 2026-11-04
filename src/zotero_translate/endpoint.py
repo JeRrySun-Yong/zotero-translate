@@ -359,9 +359,9 @@ class _Backend(httpcore.NetworkBackend):
             raise httpcore.ConnectTimeout(str(e)) from e
         except OSError as e:
             raise httpcore.ConnectError(str(e)) from e
-        self._endpoint._event("connected", send)
         stream = _Stream(sock, self._endpoint)
-        try:
+        try:  # every way out but the return closes the socket
+            self._endpoint._event("connected", send)
             for option in socket_options or []:
                 sock.setsockopt(*option)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -410,8 +410,9 @@ class _Stream(httpcore.NetworkStream):
 
     def shutdown_for(self, send: Send) -> None:
         """Shut the connection down if ``send`` is still using it (see ``shutdown``)."""
-        with self._lock:
-            if self._owner is send and send.exchanging:
+        with self._lock:  # ``close`` takes it too: the socket stays open meanwhile
+            if self._owner is send and send.exchanging and not self._closed:
+                self._endpoint._event("cancel_reaching", send)
                 self.shutdown()
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
@@ -438,7 +439,12 @@ class _Stream(httpcore.NetworkStream):
             raise httpcore.WriteError(str(e)) from e
 
     def shutdown(self) -> None:
-        """Wake the thread blocked on this connection: it then fails and closes it."""
+        """Wake the thread blocked on this connection: it then fails and closes it.
+
+        Called with ``_lock`` held, so the socket object (or the handshake's
+        duplicate) is still open and its descriptor cannot belong to another
+        connection.
+        """
         try:
             # The plain socket's shutdown, also for a TLS socket, whose own
             # would tear down its TLS state under the reading thread.
@@ -447,36 +453,47 @@ class _Stream(httpcore.NetworkStream):
             pass  # already closed
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._sock.close()
-        with self._lock:
+        with self._lock:  # never while a cancel is shutting the socket down
+            if self._closed:
+                return
+            self._closed = True
+            self._sock.close()
             owner = self._owner
         self._endpoint._event("connection_closed", owner)
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
         """Upgrade to TLS; a cancel during the handshake ends it (see ``_handshake_sock``)."""
-        self._use()
-        raw = self._sock
-        spare = raw.dup()  # the same socket under another descriptor
-        with self._lock:
-            self._handshake_sock = spare
-        try:
-            raw.settimeout(timeout)
-            tls = ssl_context.wrap_socket(raw, server_hostname=server_hostname)
+        try:  # every way out but the return closes the socket
+            self._endpoint._event("tls_handshake", getattr(_current, "send", None))
+            self._use()  # a send cancelled since its connect stops here
+            raw = self._sock
+            spare = raw.dup()  # the same socket under another descriptor
+            with self._lock:
+                self._handshake_sock = spare
+            try:
+                raw.settimeout(timeout)
+                # On failure the TLS socket closes the descriptor it took
+                # over; ``raw`` is detached by then. A cancel meanwhile only
+                # ever shuts down ``spare``, which is still open.
+                tls = ssl_context.wrap_socket(raw, server_hostname=server_hostname)
+            except BaseException:
+                with self._lock:
+                    self._handshake_sock = None
+                    spare.close()
+                raise
+            with self._lock:
+                self._sock = tls
+                self._handshake_sock = None
+                spare.close()
         except socket.timeout as e:
             self.close()
             raise httpcore.ConnectTimeout(str(e)) from e
         except OSError as e:
             self.close()
             raise httpcore.ConnectError(str(e)) from e
-        finally:
-            with self._lock:
-                self._handshake_sock = None
-                spare.close()
-        with self._lock:
-            self._sock = tls
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def get_extra_info(self, info: str):

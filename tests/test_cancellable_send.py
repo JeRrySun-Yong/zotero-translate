@@ -96,6 +96,16 @@ class Events:
             return [(name, in_flight) for name, s, in_flight in self.seen if s is send]
 
 
+def wait_for_event(events: Events, name: str, send, timeout: float) -> bool:
+    """True if ``send`` gets the event ``name`` within ``timeout`` seconds."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if name in [n for n, _ in events.of(send)]:
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _endpoint(settings: ModelSettings, **kwargs) -> tuple[Endpoint, Events]:
     events = Events()
     endpoint = Endpoint(settings, on_event=events, **kwargs)
@@ -258,6 +268,152 @@ def test_a_send_cancelled_during_the_tls_handshake_ends_at_once():
         server.close()
 
     names = [name for name, _ in events.of(send)]
+    assert names.index("connection_closed") < names.index("slot_released")
+
+
+class _HeldServer:
+    """A TCP server that holds each connection it accepts until told to drop it.
+
+    ``answer`` connections get a whole HTTP answer once their request has
+    arrived; the others get nothing.
+    """
+
+    def __init__(self, answer: bool = False):
+        self.answer = answer
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen(8)
+        self.port = self.server.getsockname()[1]
+        self.received = threading.Event()  # some bytes of the first connection arrived
+        self.disconnected = threading.Event()  # the first connection's client went
+        # End the first connection from the server's side: the client reads
+        # its end; the server's own descriptor stays open meanwhile.
+        self.drop = threading.Event()
+        self._first = True
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                connection, _ = self.server.accept()
+            except OSError:
+                return
+            first, self._first = self._first, False
+            threading.Thread(target=self._hold, args=(connection, first), daemon=True).start()
+
+    def _hold(self, connection: socket.socket, first: bool) -> None:
+        with connection:
+            connection.settimeout(0.05)
+            dropped = False
+            while True:
+                if first and self.drop.is_set() and not dropped:
+                    connection.shutdown(socket.SHUT_WR)
+                    dropped = True
+                try:
+                    data = connection.recv(65536)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    data = b""
+                if not data:
+                    if first:
+                        self.disconnected.set()
+                    return
+                if first:
+                    self.received.set()
+                elif self.answer and b"\r\n\r\n" in data:
+                    payload = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+                    connection.sendall(
+                        b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
+                        + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                        + payload
+                    )
+                    return
+
+    def close(self) -> None:
+        self.server.close()
+
+
+def test_a_cancel_about_to_shut_a_connection_down_and_its_close_never_overlap():
+    # A's cancel has checked that the connection is A's and is about to
+    # shut it down; meanwhile A's thread loses the connection (the server
+    # drops it) and closes it. Were the close allowed to finish then, the
+    # descriptor could go to B's new connection before the shutdown runs.
+    held = _HeldServer(answer=True)
+    descriptors: list[int] = []
+
+    def recording_connector(host, port, timeout, cancelled):
+        sock = connect(host, port, timeout, cancelled)
+        descriptors.append(sock.fileno())
+        return sock
+
+    paused = threading.Event()
+    resume = threading.Event()
+    events = Events()
+
+    def on_event(name: str, send) -> None:
+        events(name, send)
+        if name == "cancel_reaching":
+            paused.set()
+            resume.wait(5)
+
+    settings = ModelSettings(base_url=f"http://127.0.0.1:{held.port}/v1", api_key="k", concurrency=4)
+    endpoint = Endpoint(settings, connector=recording_connector, on_event=on_event)
+    events.endpoint = endpoint
+    try:
+        a = endpoint.start(PATH, _body("a"))
+        assert held.received.wait(5)
+        time.sleep(0.3)  # the whole request is out: A's thread waits in its read
+        canceller = threading.Thread(target=a.cancel)
+        canceller.start()
+        assert paused.wait(5)  # the cancel is between its check and the shutdown
+
+        held.drop.set()  # A's thread now reads the end of the connection and closes it
+        time.sleep(0.5)
+        # B opens a new connection now; it would get A's descriptor if A's
+        # socket had been closed under the paused cancel.
+        b = endpoint.start(PATH, _body("b"))
+        assert b.wait(5)
+        resume.set()
+        canceller.join(5)
+        assert a.wait(5)
+        assert descriptors[1] != descriptors[0], (
+            f"A's socket closed while its cancel was about to shut it down: B's new "
+            f"connection got A's descriptor {descriptors[0]}"
+        )
+        assert _content(b.result()) == "ok"  # B's connection is untouched
+    finally:
+        resume.set()
+        endpoint.close()
+        held.close()
+
+
+def test_a_send_cancelled_just_before_its_tls_handshake_closes_its_connection_first():
+    held = _HeldServer()
+    events = Events()
+
+    def on_event(name: str, send) -> None:
+        events(name, send)
+        if name == "tls_handshake":
+            send.cancel()  # after the TCP connect, before the handshake
+
+    settings = ModelSettings(base_url=f"https://127.0.0.1:{held.port}/v1", api_key="k", concurrency=1)
+    endpoint = Endpoint(settings, on_event=on_event)
+    events.endpoint = endpoint
+    try:
+        send = endpoint.start(PATH, _body("tls"))
+        assert send.wait(5)
+        with pytest.raises(SendCancelled):
+            send.result()
+        assert endpoint.in_flight == 0
+        assert held.disconnected.wait(2)  # the server saw the client go
+        assert not held.received.is_set()  # not even a ClientHello went out
+    finally:
+        endpoint.close()
+        held.close()
+
+    names = [name for name, _ in events.of(send)]
+    assert "connection_closed" in names, names
     assert names.index("connection_closed") < names.index("slot_released")
 
 
