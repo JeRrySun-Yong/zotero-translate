@@ -566,7 +566,7 @@ class _Candidate:
         self.timing = _SendTiming()
         self.give_up = threading.Event()  # set: a copy still waiting for a slot is not sent
         self.out_at: float | None = None  # monotonic clock as it went out
-        self.hedged = False  # a copy of it was due
+        self.copy_due = False  # its copy was due (sent or not)
         self.copy: _Candidate | None = None  # its copy, once started
         self.done = False  # its send has ended
         self.content: str | None = None  # a valid answer
@@ -656,13 +656,17 @@ class _Hedged:
                 if kind == "out":
                     continue
                 self._active.remove(candidate)
-                if candidate is self._winner:
-                    self._cancel_others(candidate)
+                with self._lock:
+                    winner = self._winner
+                if winner is not None:
+                    # The winner's end, or a loser's that got here first: the
+                    # winner's answer is already there.
+                    self._cancel_others(winner)
                     cache = self.flash._cache
                     if cache is not None:
-                        client = candidate.client
-                        cache.put(self.key, candidate.content, endpoint=client.role, model=client.model)
-                    return candidate.content
+                        client = winner.client
+                        cache.put(self.key, winner.content, endpoint=client.role, model=client.model)
+                    return winner.content
                 error = candidate.error
                 if not isinstance(error, (_RetryableError, ModelCallError)):
                     raise error  # e.g. the client closed: unchanged, as without hedging
@@ -698,7 +702,7 @@ class _Hedged:
         try:
             return self._events.get(timeout=timeout)
         except queue.Empty:
-            due.hedged = True
+            due.copy_due = True
             return "hedge_due", due
 
     def _hedge_candidate(self) -> _Candidate | None:
@@ -706,7 +710,7 @@ class _Hedged:
         if len(self._active) != 1 or self._sent >= self.attempts:
             return None
         [candidate] = self._active
-        if candidate.client is not self.flash or candidate.hedged or candidate.out_at is None:
+        if candidate.client is not self.flash or candidate.copy_due or candidate.out_at is None:
             return None
         with self._lock:
             return None if self._winner is not None else candidate
@@ -798,8 +802,9 @@ class _Hedged:
         ]
         last = (credential or failed)[-1]
         if isinstance(last.error, ModelCallError):
+            # As without hedging: an HTTP error no resend fixes is the
+            # request's error as it is (``answered`` false), not a rejection.
             error = last.error
-            error.answered = error.answered or bool(rejections)
             error.rejections = rejections
             return error
         on_argon = sum(1 for c in failed if c.client is self.argon)

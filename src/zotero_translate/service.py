@@ -118,6 +118,8 @@ makes it start a child that sleeps for an hour, by multiprocessing's spawn
 method like the engine (``zotero_translate.worker``).
 ``ZT_TEST_DOWNLOAD_DELAY_SECONDS`` ("<file>=<seconds>[,...]", e.g.
 "dual=30") waits that long before sending that file of any task.
+``ZT_TEST_HEDGE_AFTER_SECONDS`` (read by each worker, which inherits it;
+``zotero_translate.settings``) replaces the 400-second hedging threshold.
 
 One task's error never stops the queue: a worker report the service cannot
 use is dropped with a log line (event 丢弃上报) and the attempt goes on; an

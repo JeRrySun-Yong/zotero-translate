@@ -452,3 +452,54 @@ def test_a_review_whose_candidates_all_fail_falls_back_as_without_hedging(tmp_pa
 
     # The second answer's verdicts: its item 0, and the source for item 1.
     assert hedged == unhedged == {0: "它分 3 个部分。", 1: None}
+
+
+# Spec section 8: 「缓存只写一次，写在原请求的键下，败者不能写，也不能覆盖」, and the
+# winner stands even when the loser's end reaches the coordinator first.
+def test_a_valid_answer_after_the_winner_loses_and_cannot_overwrite_the_cache(tmp_path):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE + 0.4, "flash"))
+        argon.respond("other", _later(0.1, "argon"))
+        models, log = _models(flash, argon, tmp_path)
+        append = log.append
+
+        def slow_winner_record(**fields) -> None:
+            # The winner's record is slow to write: the loser ends meanwhile,
+            # before the coordinator hears of the winner and cancels it.
+            if fields["result"] == "succeeded":
+                time.sleep(1.0)
+            append(**fields)
+
+        log.append = slow_winner_record
+        try:
+            assert models.flash.complete(MESSAGES, kind="translation_batch") == "argon"
+        finally:
+            models.close()
+
+    assert _summary(_records(log, 2)) == [
+        (1, "flash", "cancelled_for_winner", False),
+        (2, "argon", "succeeded", True),
+    ]
+    key = ResponseCache.key(models.flash._body(MESSAGES))
+    assert ResponseCache(tmp_path / "cache").entry(key)["content"] == "argon"
+
+
+# 「错误的优先级」: a credential error after a rejected answer still fails the
+# request as a credential error (``answered`` false), as without hedging.
+def test_a_credential_error_after_a_rejected_copy_is_not_taken_for_an_answer(tmp_path):
+    with FakeModel(delay=HEDGE * 2) as flash, FakeModel() as argon:
+        flash.inject_error("401")
+        argon.respond("other", lambda body: "bad")
+        models, _ = _models(flash, argon, tmp_path)
+
+        def validate(content: str) -> None:
+            raise ValueError(content)
+
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                models.flash.complete(MESSAGES, validate=validate, kind="review")
+        finally:
+            models.close()
+
+    assert failure.value.category == "permanent"
+    assert not failure.value.answered
