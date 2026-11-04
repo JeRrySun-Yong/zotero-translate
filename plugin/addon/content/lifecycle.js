@@ -63,7 +63,9 @@ var ZoteroTranslateLifecycle = (() => {
   // Time limits of one request, from sending it to reading the whole answer.
   const UPLOAD_LIMIT_MS = 120000;
   const QUERY_LIMIT_MS = 10000;
-  const CANCEL_LIMIT_MS = 30000; // more than the service's 15 seconds to reap the task's processes
+  // More than the up to 15 seconds (10 after the termination signal, 5 after
+  // the forced kill) the service takes to reap the task's processes before it answers.
+  const CANCEL_LIMIT_MS = 30000;
   const DOWNLOAD_LIMIT_MS = 120000; // each PDF
   // Task states in the service's answers that the plugin acts on; any other
   // answer counts as one that cannot be read (a disconnection).
@@ -89,7 +91,6 @@ var ZoteroTranslateLifecycle = (() => {
     "state",
     "disconnectedSince",
     "generation",
-    "cancelRequested",
   ];
 
   /** The service could not be reached, did not answer in full within the
@@ -124,7 +125,7 @@ var ZoteroTranslateLifecycle = (() => {
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
       // service stopped answering, or null), generation (0 for a new task, one more for
-      // each retry), cancelRequested (the user cancelled), cleanupError (why the
+      // each retry), cleanupError (why the
       // service has not confirmed the cancel yet, or null)}
       tasks: [],
       // Why items of the latest submission were skipped; shown in the task window.
@@ -200,7 +201,7 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || !CANCELLABLE_STATES.includes(task.state)) {
           return;
         }
-        Object.assign(task, { state: "cancelling", cancelRequested: true, cleanupError: null });
+        Object.assign(task, { state: "cancelling", cleanupError: null });
         endOperation(task);
         changed(); // the intent is saved before the request goes out
         if (started) {
@@ -307,7 +308,6 @@ var ZoteroTranslateLifecycle = (() => {
         keptSourceParagraphs: null,
         keptSourceAlgorithms: null,
         disconnectedSince: null,
-        cancelRequested: false,
         cleanupError: null,
       });
       changed();
@@ -337,13 +337,8 @@ var ZoteroTranslateLifecycle = (() => {
     /** Ask the service about the task; on success, attach its PDFs. An
      *  answer that comes after the operation ended (a cancel) is dropped. */
     async function query(task, operation) {
-      let answer;
-      try {
-        answer = await exchange(Core.serviceUrl(task.serviceUrl, "tasks", task.taskId), { signal: operation.abort.signal }, QUERY_LIMIT_MS, readStatus);
-      } catch {
-        return isCurrent(task, operation) && disconnected(task);
-      }
-      if (!isCurrent(task, operation)) {
+      const answer = await operationExchange(task, operation, ["tasks", task.taskId], {}, QUERY_LIMIT_MS, readStatus);
+      if (!answer) {
         return;
       }
       if (answer.status === 404) {
@@ -373,23 +368,39 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** One request of the task's current operation, to `path` under the
+     *  task's service address: the answer, or null when it no longer counts
+     *  (the operation has ended) or the service cannot be reached (then the
+     *  task is disconnected). */
+    async function operationExchange(task, operation, path, options, limitMs, read) {
+      let answer;
+      try {
+        answer = await exchange(Core.serviceUrl(task.serviceUrl, ...path), { ...options, signal: operation.abort.signal }, limitMs, read);
+      } catch {
+        answer = null;
+      }
+      if (!isCurrent(task, operation)) {
+        return null;
+      }
+      if (!answer) {
+        disconnected(task);
+      }
+      return answer;
+    }
+
     /** Send the cancel: 200, 409 (the task had ended) or 404 (the service no
      *  longer has it) make the task cancelled; a 503 keeps it cancelling,
      *  with the service's reason; no answer keeps it cancelling, disconnected. */
     async function sendCancel(task, operation) {
-      let answer;
-      try {
-        answer = await exchange(
-          Core.serviceUrl(task.serviceUrl, "tasks", task.taskId, "cancel"),
-          { method: "POST", signal: operation.abort.signal },
-          CANCEL_LIMIT_MS,
-          readCancelAnswer,
-          [503],
-        );
-      } catch {
-        return isCurrent(task, operation) && disconnected(task);
-      }
-      if (!isCurrent(task, operation)) {
+      const answer = await operationExchange(
+        task,
+        operation,
+        ["tasks", task.taskId, "cancel"],
+        { method: "POST", bodyStatuses: [503] },
+        CANCEL_LIMIT_MS,
+        readCancelAnswer,
+      );
+      if (!answer) {
         return;
       }
       if ([200, 409, 404].includes(answer.status)) {
@@ -443,11 +454,11 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** One request to the service, with `limitMs` to send it and read the
      *  whole answer: {status, body}, where body is read(response) for a
-     *  success status or one of `readStatuses`, and null otherwise (that body
-     *  is not read; the request is aborted). Throws Unreachable when there is
-     *  no connection, the time limit passes, the answer cannot be read, or
-     *  `options.signal` (the task's operation) is aborted. */
-    async function exchange(url, { signal, ...options }, limitMs, read, readStatuses = []) {
+     *  success status or one of `options.bodyStatuses`, and null otherwise
+     *  (that body is not read; the request is aborted). Throws Unreachable
+     *  when there is no connection, the time limit passes, the answer cannot
+     *  be read, or `options.signal` (the task's operation) is aborted. */
+    async function exchange(url, { signal, bodyStatuses = [], ...options }, limitMs, read) {
       const abort = new AbortController();
       if (signal) {
         signal.addEventListener("abort", () => abort.abort(), { once: true });
@@ -467,7 +478,7 @@ var ZoteroTranslateLifecycle = (() => {
           debug(`zotero-translate: ${url}: ${e}`);
           throw new Unreachable("无法连接翻译服务");
         }
-        if (!response.ok && !readStatuses.includes(response.status)) {
+        if (!response.ok && !bodyStatuses.includes(response.status)) {
           return { status: response.status, body: null };
         }
         try {
@@ -506,11 +517,13 @@ var ZoteroTranslateLifecycle = (() => {
       return status;
     }
 
-    /** The answer to a cancel: the task (200), or the reason it is not
-     *  cancelled yet (503); one without them cannot be read. */
+    /** The answer to a cancel: the cancelled task (200), or the task with
+     *  the reason it is not cancelled yet (503); any other answer cannot be read. */
     async function readCancelAnswer(response) {
       const body = await response.json();
-      if (response.status === 503 ? typeof body?.cleanup_error !== "string" : typeof body?.state !== "string") {
+      const readable =
+        response.status === 503 ? typeof body?.cleanup_error === "string" : body?.state === "cancelled";
+      if (!readable) {
         throw new Error(`无法解析的取消回答：${JSON.stringify(body)}`);
       }
       return body;
@@ -541,7 +554,6 @@ var ZoteroTranslateLifecycle = (() => {
       lifecycle.tasks = saved.map((task) => ({
         disconnectedSince: null,
         generation: 0,
-        cancelRequested: false,
         ...task,
         cleanupError: null,
         key: nextKey++,

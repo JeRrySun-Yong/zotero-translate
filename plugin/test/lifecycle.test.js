@@ -216,7 +216,7 @@ test("after Zotero restarts, saved tasks are queried again and still attached", 
   before.lifecycle.stop();
   assert.equal(before.clock.timers.size, 0);
   assert.deepEqual(JSON.parse(before.saved), [
-    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running", disconnectedSince: null, generation: 0, cancelRequested: false },
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running", disconnectedSince: null, generation: 0 },
   ]);
 
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1") });
@@ -486,9 +486,9 @@ test("tasks saved before disconnections were recorded are restored and queried e
   const env = environment({ saved, routes: { [QUERY("t1")]: status("running"), [QUERY("t2")]: status("queued") } });
   env.lifecycle.start();
   assert.deepEqual(env.status(), ["翻译中", "排队中"]);
-  assert.deepEqual(JSON.parse(env.saved).map((t) => [t.taskId, t.state, t.disconnectedSince, t.generation, t.cancelRequested]), [
-    ["t1", "running", null, 0, false],
-    ["t2", "queued", null, 0, false],
+  assert.deepEqual(JSON.parse(env.saved).map((t) => [t.taskId, t.state, t.disconnectedSince, t.generation]), [
+    ["t1", "running", null, 0],
+    ["t2", "queued", null, 0],
   ]);
   await env.clock.advance(4000);
   assert.deepEqual(env.times(QUERY("t1")), [2000, 4000]);
@@ -530,7 +530,7 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
   before.lifecycle.submit(SOURCE);
   await settle();
   assert.deepEqual(JSON.parse(before.saved), [
-    { ...SOURCE, serviceUrl: SERVICE, taskId: null, state: "submitting", disconnectedSince: null, generation: 0, cancelRequested: false },
+    { ...SOURCE, serviceUrl: SERVICE, taskId: null, state: "submitting", disconnectedSince: null, generation: 0 },
   ]);
   before.lifecycle.stop();
 
@@ -714,7 +714,7 @@ for (const code of [200, 409, 404]) {
       return code === 404 ? json(404, { error: "翻译服务中找不到该任务" }) : cancelledAnswer("t1", code);
     };
     await env.lifecycle.cancel(rowOf(env).key);
-    assert.deepEqual(cancelSeenSaved.map((t) => [t.taskId, t.state, t.cancelRequested]), [["t1", "cancelling", true]]);
+    assert.deepEqual(cancelSeenSaved.map((t) => [t.taskId, t.state]), [["t1", "cancelling"]]);
     assert.equal(env.requests.at(-1), CANCEL("t1"));
     assert.equal(env.clock.now(), 2000); // at once
     assert.deepEqual(env.status(), ["已取消"]);
@@ -756,6 +756,7 @@ const UNANSWERED_CANCELS = {
   "HTTP 500": () => json(500, { detail: "boom" }),
   "HTTP 502 from a proxy": () => new Response("Bad Gateway", { status: 502 }),
   "a 200 answer that is not JSON": () => new Response("<html>", { status: 200 }),
+  "a 200 answer whose state is not cancelled": () => json(200, { task_id: "t1", state: "queued", cancel_requested: true }),
   "a 503 answer that is not JSON": () => new Response("Service Unavailable", { status: 503 }),
 };
 
@@ -815,7 +816,7 @@ test("a cancel while the service cannot be reached shows 取消中, survives a Z
   assert.deepEqual(before.status(), [CANCELLING_DISCONNECTED]);
   assert.equal(before.lifecycle.tasks[0].disconnectedSince, 4000); // kept from before the click
   before.lifecycle.stop();
-  assert.deepEqual(savedOf(before).map((t) => [t.taskId, t.state, t.cancelRequested, t.disconnectedSince]), [["t1", "cancelling", true, 4000]]);
+  assert.deepEqual(savedOf(before).map((t) => [t.taskId, t.state, t.disconnectedSince]), [["t1", "cancelling", 4000]]);
 
   // The service is back and has run the task to its end meanwhile.
   const after = environment({ saved: before.saved, routes: succeededRoutes("t1"), time: 4000 + 3 * MINUTE });
@@ -835,7 +836,7 @@ test("a cancel while the service cannot be reached shows 取消中, survives a Z
 });
 
 test("a cancelling task restored without a disconnection sends its cancel 2 seconds after start", async () => {
-  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "cancelling", disconnectedSince: null, generation: 0, cancelRequested: true }]);
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "cancelling", disconnectedSince: null, generation: 0 }]);
   const env = environment({ saved, routes: { [CANCEL("t1")]: cancelledAnswer("t1") } });
   env.lifecycle.start();
   assert.deepEqual(env.status(), [CANCELLING]);
@@ -945,14 +946,13 @@ test("a retry of a cancelled task starts a new generation with nothing of the ol
   const task = env.lifecycle.tasks[0];
   assert.equal(task.taskId, "t2");
   assert.equal(task.generation, 1);
-  assert.equal(task.cancelRequested, false);
   assert.equal(task.disconnectedSince, null);
   assert.equal(task.error, null);
   assert.equal(task.cleanupError, null);
   for (const field of ["attempt", "rerunsUsed", "rerunsMax", "nextAttemptInSeconds", "queuePosition", "stage", "progress"]) {
     assert.equal(task[field], null, field);
   }
-  assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.state, t.generation, t.cancelRequested]), [["t2", "queued", 1, false]]);
+  assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.state, t.generation]), [["t2", "queued", 1]]);
 
   query.answer(status("succeeded", { stage: "完成", progress: 100 })); // t1's late answer
   await settle();

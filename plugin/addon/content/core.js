@@ -83,9 +83,10 @@ var ZoteroTranslateCore = (() => {
     };
     if (task.state === "cancelling") {
       if (task.disconnectedSince != null) {
-        return { ...row, status: "取消中（翻译服务暂时连不上）" };
+        return { ...row, status: `${STATUS_LABELS.cancelling}（翻译服务暂时连不上）` };
       }
-      return { ...row, status: task.cleanupError ? `取消中：${task.cleanupError}` : "取消中" };
+      const label = STATUS_LABELS.cancelling;
+      return { ...row, status: task.cleanupError ? `${label}：${task.cleanupError}` : label };
     }
     if (task.disconnectedSince != null && UNFINISHED_STATES.includes(task.state)) {
       const minutes = Math.max(1, Math.floor((now - task.disconnectedSince) / 60000));
