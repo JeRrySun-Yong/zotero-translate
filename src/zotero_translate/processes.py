@@ -14,16 +14,21 @@ ordinary processes of the service's user (ticket 02). A process that has
 exited but is not yet reaped by its parent (a zombie) counts as exited.
 Reaping fails only when the scan itself fails, or when a marked process
 still lives after the forced kill.
+
+Test only: while the file named by ``ZT_TEST_REAP_SCAN_ERROR`` exists, the
+scan fails.
 """
 
 from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import psutil
 
 MARK_ENV = "ZT_PROCESS_MARK"
+SCAN_ERROR_SETTING = "ZT_TEST_REAP_SCAN_ERROR"  # test only
 TERM_WAIT_SECONDS = 10.0
 KILL_WAIT_SECONDS = 5.0
 
@@ -54,6 +59,9 @@ def marked_processes(task_id: str) -> list[psutil.Process]:
 def reap(task_id: str) -> None:
     """End every process of ``task_id``; raise ``ReapError`` if that cannot be confirmed."""
     try:
+        flag = os.environ.get(SCAN_ERROR_SETTING)
+        if flag and Path(flag).exists():
+            raise OSError(f"测试设置 {SCAN_ERROR_SETTING}")
         processes = marked_processes(task_id)
     except Exception as e:  # the scan itself failed
         raise ReapError(f"无法扫描进程：{type(e).__name__}: {e}") from e

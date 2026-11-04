@@ -28,7 +28,7 @@ DOWNLOAD_FILES = {**OUTPUT_FILES, "terms": TERMS_FILE}
 
 QUEUED_STAGE = "排队中"
 DONE_STAGE = "完成"
-TERMINAL_STATES = {"succeeded", "failed"}
+TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 
 
 def read_status(task_dir: Path) -> dict:

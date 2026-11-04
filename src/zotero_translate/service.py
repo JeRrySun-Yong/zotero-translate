@@ -6,12 +6,18 @@ HTTP interface (the contract with the translation plugin):
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
 - ``GET /tasks/{task_id}`` -> state (queued, running, waiting_rerun,
-  succeeded, failed), stage, progress, attempt (attempts started,
+  succeeded, failed, cancelled), stage, progress, attempt (attempts started,
   interrupted ones included; 0 until the first starts), reruns_used and
   reruns_max (2), next_attempt_in_seconds (only while waiting_rerun), queue
   position (only while queued), error (the last failure's reason, only
-  while waiting_rerun or failed), kept source paragraphs and downloadable
-  files
+  while waiting_rerun or failed), cancel_requested (the service accepted a
+  cancel and is reaping the task's processes), cleanup_error (why the task's processes could not be reaped, or
+  null), kept source paragraphs and downloadable files
+- ``POST /tasks/{task_id}/cancel`` -> the same object as the query: 200 when
+  the task is cancelled (a queued task, one waiting for a rerun, once its
+  processes are reaped; or one already cancelled), 503 when its processes
+  could not be reaped (cleanup_error says why), 409 when it has succeeded or failed, and for now when
+  it is running (cancelling a running task is ticket 09's), unchanged
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
@@ -64,7 +70,14 @@ to that file's records, which include the sends that ended after the worker
 wrote its report (``zotero_translate.request_log``). The service writes
 one line per task event to standard output (the service log):
 submitted, started, interrupted, requeued, waiting for a rerun, rerun
-started, succeeded, failed, cleanup error, report dropped. No API key and no HTTP poll is logged.
+started, cancel accepted, cancelled, succeeded, failed, cleanup error,
+report dropped. No API key and no HTTP poll is logged.
+
+A cancel is saved as accepted (event 接受取消); then the task's processes
+are reaped by marker, and only after all have exited does the task become
+``cancelled`` (event 已取消). A task with an accepted cancel is never
+started: not when its rerun comes due, not when it reaches the head of the
+queue, and not after a restart, which reaps and completes the cancel.
 
 When the service starts (``TaskQueue.restore``), a task an earlier service
 left running was interrupted (reason "翻译服务重启，任务中断"; the attempt's
@@ -85,7 +98,12 @@ until that file is deleted. ``ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE`` is a pause
 of the same kind when a rerun is due, before it is queued (the attempt in
 the file name is the one that failed), and ``ZT_TEST_PAUSE_BEFORE_REAP``
 when the queue has picked the next task, before its earlier processes are
-reaped (the attempt is the one about to start). ``ZT_TEST_RERUN_WAITS_SECONDS``
+reaped (the attempt is the one about to start), and
+``ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED`` when a cancel has been saved as
+accepted, before the task's processes are reaped (the attempt is the task's
+current one, 0 before the first). ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
+while it exists, scanning for a task's processes fails, so reaping fails
+(``zotero_translate.processes``). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
 ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
@@ -141,6 +159,7 @@ PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
+PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -175,6 +194,8 @@ _EVENTS = {
     "requeued": "重新排队并开始新尝试",
     "waiting_rerun": "等待自动重跑",  # the attempt failed, retryable; a rerun is due later
     "rerun_started": "自动重跑开始",  # the rerun is due and queued
+    "cancel_accepted": "接受取消",  # saved first: the task never runs again
+    "cancelled": "已取消",
     "succeeded": "成功",
     "failed": "失败",
     "cleanup_error": "进程回收出错",
@@ -247,7 +268,11 @@ class TaskQueue:
             return
         if not self._reap(task_id):
             return  # left as it is until its processes are reaped
-        if state == "queued":
+        if status.get("cancel_requested") and state in ("queued", "waiting_rerun"):
+            # Accepted before the restart, its processes now reaped: completed
+            # now, no interruption, no rerun. (A running task's cancel is ticket 09's.)
+            self._finish_cancel(task_id)
+        elif state == "queued":
             self._enqueue(task_id, status["queue_class"], status["queue_key"])
         elif state == "waiting_rerun":
             # Its saved due time stands; a rerun already queued is "queued".
@@ -304,24 +329,33 @@ class TaskQueue:
         """The waiting tasks in the order they will run."""
         return sorted(self._waiting, key=self._waiting.__getitem__)
 
-    def _reap(self, task_id: str) -> bool:
+    def _reap(self, task_id: str, then=None) -> bool:
         """Reap the task's processes by marker; on failure record why, block scheduling, return False.
 
-        Retrying a failed reap is ticket 09's: until then the task stays
-        as it is and no new attempt starts.
+        On success ``then()``, if given, runs under the same lock as the
+        unblocking, so no other thread's failed reap of the task comes in
+        between. A finished task (e.g. cancelled meanwhile by another
+        thread) never blocks scheduling: its failure is recorded and
+        logged only, and a repeated cancel reaps it again. Retrying a failed
+        reap every 30 seconds is ticket 09's: until then the task stays as
+        it is and, unless it has finished, no new attempt starts.
         """
         try:
             processes.reap(task_id)
         except processes.ReapError as e:
-            reason = f"{e}；暂停调度新的尝试"
             with self._cond:
+                finished = td.read_status(self.tasks_dir / task_id)["state"] in td.TERMINAL_STATES
+                reason = str(e) if finished else f"{e}；暂停调度新的尝试"
                 self._decide(task_id, "cleanup_error", {"cleanup_error": reason}, reason=reason)
-                self._cleanup_blocked.add(task_id)
+                if not finished:
+                    self._cleanup_blocked.add(task_id)
             return False
         with self._cond:
             if td.read_status(self.tasks_dir / task_id).get("cleanup_error"):
                 td.write_status(self.tasks_dir / task_id, cleanup_error=None)
             self._cleanup_blocked.discard(task_id)
+            if then is not None:
+                then()
             self._cond.notify_all()
         return True
 
@@ -363,6 +397,7 @@ class TaskQueue:
         _test_pause(PAUSE_BEFORE_RERUN_QUEUE, task_id, td.read_status(directory)["attempt"])
         with self._cond:
             status = td.read_status(directory)
+            # A cancel accepted while this thread waited (still reaping, or done) wins.
             if status["state"] != "waiting_rerun" or status.get("cancel_requested"):
                 return
             queue_key = [status["next_attempt_at"], _submitted_at(directory)]
@@ -541,10 +576,70 @@ class TaskQueue:
             "queue_position": position if state == "queued" else None,
             # The reason of the last failure, while waiting for a rerun and once failed.
             "error": status.get("error") if state in ("waiting_rerun", "failed") else None,
+            "cancel_requested": bool(status.get("cancel_requested", False)),
+            "cleanup_error": status.get("cleanup_error"),
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
             "kept_source_algorithms": status.get("kept_source_algorithms", 0),
             "files": td.available_files(directory),
         }
+
+    def cancel(self, task_id: str) -> tuple[int, dict] | None:
+        """Cancel the task: ``(HTTP status, the task as status() gives it)``, or None if unknown.
+
+        A queued task, or one waiting for a rerun: the accepted cancel is
+        saved first, and from then on the task is neither started nor
+        rerun; then every process with its marker is reaped, outside the
+        lock, so queries are answered meanwhile; only when all have exited
+        does the task become ``cancelled`` (200). When the reaping fails,
+        the task keeps its state, its ``cleanup_error`` says why, no new
+        attempt starts (``_reap``), and the answer is 503; a repeated
+        cancel tries again. A cancelled task answers 200 again, and when a
+        reap of its processes failed after the cancel (``cleanup_error``), reaps again first; a finished
+        one 409, unchanged. A running one answers 409 too, unchanged, until
+        cancelling a running task comes (ticket 09).
+        """
+        directory = self.task_dir(task_id)
+        if directory is None:
+            return None
+        with self._cond:
+            status = td.read_status(directory)
+            state = status["state"]
+            if state == "cancelled" and status.get("cleanup_error"):
+                retry_reap = True  # a reap that failed after the cancel: try again
+            elif state not in ("queued", "waiting_rerun"):
+                return (200 if state == "cancelled" else 409), self.status(task_id)
+            else:
+                retry_reap = False
+            if not retry_reap and not status.get("cancel_requested"):
+                self._decide(task_id, "cancel_accepted", {"cancel_requested": True})
+            self._waiting.pop(task_id, None)
+            self._due.pop(task_id, None)
+            self._cond.notify_all()
+        if retry_reap:
+            self._reap(task_id)
+            return 200, self.status(task_id)
+        _test_pause(PAUSE_AFTER_CANCEL_ACCEPTED, task_id, status.get("attempt", 0))
+        if not self._reap(task_id, then=lambda: self._finish_cancel(task_id)):
+            return 503, self.status(task_id)
+        return 200, self.status(task_id)
+
+    def _finish_cancel(self, task_id: str) -> None:
+        """Complete an accepted cancel whose processes are reaped: ``cancelled``.
+
+        ``cancel_requested`` is true only while the cancel is under way, so
+        the cancelled state clears it.
+        """
+        with self._cond:
+            self._waiting.pop(task_id, None)
+            self._due.pop(task_id, None)
+            if td.read_status(self.tasks_dir / task_id)["state"] in td.TERMINAL_STATES:
+                return  # a concurrent cancel completed it
+            self._decide(
+                task_id,
+                "cancelled",
+                {"state": "cancelled", "next_attempt_at": None, "cancel_requested": False},
+            )
+            self._cond.notify_all()
 
     # -- the runner ----------------------------------------------------------
 
@@ -568,6 +663,9 @@ class TaskQueue:
             try:
                 next_attempt = td.read_status(self.tasks_dir / task_id).get("attempt", 0) + 1
                 _test_pause(PAUSE_BEFORE_REAP, task_id, next_attempt)
+                with self._cond:
+                    if task_id not in self._waiting:
+                        continue  # cancelled meanwhile: the cancel reaped it
                 # The processes of its earlier attempts go first. Meanwhile the
                 # task stays queued, in its place, so a rerun that comes due or
                 # a requeue can still go ahead of it.
@@ -576,6 +674,8 @@ class TaskQueue:
                 with self._cond:
                     if self._next_task() != task_id:
                         continue
+                    # A cancel takes the task out of _waiting under this lock
+                    # when it is accepted, so a task still here is not cancelled.
                     del self._waiting[task_id]
                     attempt = self._start_attempt(task_id)
                 self._run_attempt(task_id, attempt)
@@ -730,15 +830,18 @@ class TaskQueue:
             }
             if result["category"] == "retryable" and reruns_used < RERUNS_MAX:
                 due = time.time() + _rerun_waits()[reruns_used]
-                if self._adopt(
-                    task_id,
-                    attempt,
-                    "waiting_rerun",
-                    {**fields, "state": "waiting_rerun", "next_attempt_at": due},
-                    outcome="failed",
-                    reason=result["error"],
-                ):
-                    self._schedule_rerun(task_id, due, _submitted_at(directory))
+                # One lock for both, so a cancel never sees the task waiting
+                # without its rerun scheduled (and leaves no stale entry).
+                with self._cond:
+                    if self._adopt(
+                        task_id,
+                        attempt,
+                        "waiting_rerun",
+                        {**fields, "state": "waiting_rerun", "next_attempt_at": due},
+                        outcome="failed",
+                        reason=result["error"],
+                    ):
+                        self._schedule_rerun(task_id, due, _submitted_at(directory))
             else:
                 self._adopt(
                     task_id,
@@ -894,7 +997,13 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             return self._not_found()
 
         def do_POST(self):
-            if self.path.split("?", 1)[0].rstrip("/") != "/tasks":
+            parts = self.path.split("?", 1)[0].strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
+                answer = queue.cancel(parts[1])
+                if answer is None:
+                    return self._not_found()
+                return self._json(*answer)
+            if parts != ["tasks"]:
                 return self._not_found()
             length = int(self.headers.get("Content-Length") or 0)
             fields = _parse_multipart(
