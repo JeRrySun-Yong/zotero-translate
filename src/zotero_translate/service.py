@@ -87,6 +87,8 @@ the file name is the one that failed), and ``ZT_TEST_PAUSE_BEFORE_REAP``
 when the queue has picked the next task, before its earlier processes are
 reaped (the attempt is the one about to start). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
+``ZT_TEST_WORKER_EXIT_GRACE_SECONDS`` replaces the 60 seconds a worker
+may take to exit after its result (``WORKER_EXIT_GRACE_SECONDS``).
 ``ZT_TEST_WORKER_BAD_REPORTS`` makes the
 subprocess send two malformed reports, and ``ZT_TEST_WORKER_SPAWN_CHILD``
 makes it start a child that sleeps for an hour, by multiprocessing's spawn
@@ -142,6 +144,11 @@ PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
+# How long a worker may take to exit once it has sent a valid result; then
+# the service ends its processes by marker (M3 ticket 13: a worker once hung
+# in a native library's exit handler, after Python's own shutdown).
+WORKER_EXIT_GRACE_SECONDS = 60.0
+EXIT_GRACE_SETTING = "ZT_TEST_WORKER_EXIT_GRACE_SECONDS"  # replaces WORKER_EXIT_GRACE_SECONDS
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Queue classes (spec section 1, "排队顺序"), in the order they run: tasks
@@ -806,12 +813,35 @@ class TaskQueue:
                     )
                 if result is not None:
                     break
+        if result is not None:
+            self._wait_for_exit(task_id, attempt, process)
         exit_code = process.wait()
         if result is None:
             # It may have left processes behind; a failed reap blocks scheduling.
             self._reap(task_id)
             return _failure(f"论文任务进程异常退出（退出码 {exit_code}）", "retryable")
         return result
+
+    def _wait_for_exit(self, task_id: str, attempt: int, process: subprocess.Popen) -> None:
+        """Give a worker that sent its result a bounded time to exit, then end its processes.
+
+        The result stands: the worker has written everything it reports on.
+        """
+        grace = float(os.environ.get(EXIT_GRACE_SETTING) or WORKER_EXIT_GRACE_SECONDS)
+        try:
+            process.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            with (self.tasks_dir / task_id / td.LOG_FILE).open("a", encoding="utf-8") as log:
+                log.write(
+                    f"service: the worker of attempt {attempt} did not exit {grace:g} s after "
+                    "sending its result; its processes are ended by marker\n"
+                )
+        except OSError:
+            pass
+        self._reap(task_id)
 
     def _take_report(self, task_id: str, attempt: int, line: str) -> dict | None:
         """Adopt a progress report, or return a valid result of this attempt.
