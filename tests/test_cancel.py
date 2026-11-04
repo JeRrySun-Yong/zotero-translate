@@ -7,7 +7,7 @@ task or one waiting for an automatic rerun; when the reaping fails it answers
 task is never started: not when its rerun comes due, not when it reaches the
 head of the queue, not after a restart; a restart completes an accepted
 cancel. Cancelling again answers 200; a finished task answers 409, an
-unknown one 404. Until ticket 09, a running task also answers 409.
+unknown one 404. Cancelling a running task is in ``test_cancel_running``.
 
 Only the HTTP interface, the service log, the status files and the process
 table are looked at.
@@ -190,23 +190,16 @@ def test_a_task_cancelled_after_the_queue_picked_it_does_not_start(
     assert _events(service, task_id) == ["提交", "接受取消", "已取消"]
 
 
-def test_finished_and_running_tasks_answer_409_unchanged_and_unknown_ones_404(
-    tmp_path, fake_model, start_service
-):
-    pauses = _pauses(tmp_path)
+def test_finished_tasks_answer_409_unchanged_and_unknown_ones_404(fake_model, start_service):
     fake_model.inject_error("401", kind="dossier")  # the first task fails at once
-    service = start_service(fake_model, env={PAUSE_AFTER_MARKER: str(pauses)})
+    service = start_service(fake_model)
 
     failed = service.submit()
-    _wait_for_file(pauses / f"{failed}-1.paused").unlink()
     assert service.wait(failed, timeout=600)["state"] == "failed"
     succeeded = service.submit()
-    _wait_for_file(pauses / f"{succeeded}-1.paused").unlink()
     assert service.wait(succeeded, timeout=600)["state"] == "succeeded"
-    running = service.submit()
-    _wait_for_file(pauses / f"{running}-1.paused", timeout=600)  # held: it stays running
 
-    for task_id, state in ((failed, "failed"), (succeeded, "succeeded"), (running, "running")):
+    for task_id, state in ((failed, "failed"), (succeeded, "succeeded")):
         before = service.status(task_id)
         response = _cancel(service, task_id)
         assert response.status_code == 409, (state, response.text)

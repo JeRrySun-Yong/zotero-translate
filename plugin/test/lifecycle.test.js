@@ -775,7 +775,7 @@ function held() {
   };
 }
 
-test("queued and waiting rows, also while disconnected, have 取消; other rows do not (running: ticket 09)", async () => {
+test("queued, running and waiting rows, also while disconnected, have 取消; other rows do not", async () => {
   const env = await submitted({ [QUERY("t1")]: status("queued", { queue_position: 1 }) });
   assert.equal(rowOf(env).canCancel, true); // queued, before the first query
   await env.clock.advance(2000);
@@ -791,10 +791,7 @@ test("queued and waiting rows, also while disconnected, have 取消; other rows 
   env.routes[QUERY("t1")] = status("running");
   await env.clock.advance(10000);
   assert.deepEqual(env.status(), ["翻译中"]);
-  assert.equal(rowOf(env).canCancel, false);
-  await env.lifecycle.cancel(rowOf(env).key); // not offered: nothing happens
-  assert.equal(env.lifecycle.tasks[0].state, "running");
-  assert.ok(!env.requests.includes(CANCEL("t1")));
+  assert.equal(rowOf(env).canCancel, true);
 
   const submitting = environment({ routes: { [UPLOAD]: never } });
   submitting.lifecycle.start();
@@ -838,6 +835,34 @@ for (const code of [200, 409, 404]) {
     assert.equal(env.clock.timers.size, 0);
   });
 }
+
+test("a running task's cancel is sent at once; 200 makes the row 已取消, nothing attached", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["翻译中"]);
+  env.routes[CANCEL("t1")] = cancelledAnswer("t1", 200);
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.equal(env.requests.at(-1), CANCEL("t1"));
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(env.lifecycle.tasks[0].state, "cancelled");
+  env.routes[QUERY("t1")] = status("succeeded");
+  await env.clock.advance(60000);
+  assert.equal(env.times(QUERY("t1")).length, 1);
+  assert.deepEqual(env.imports, []);
+});
+
+test("a running task's cancel answered 503 shows 取消中 with the service's reason", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  env.routes[CANCEL("t1")] = json(503, { task_id: "t1", state: "running", cancel_requested: true, cleanup_error: "无法扫描进程：OSError: x；暂停调度新的尝试" });
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["取消中：无法扫描进程：OSError: x；暂停调度新的尝试"]);
+  assert.equal(rowOf(env).canCancel, false);
+  env.routes[CANCEL("t1")] = cancelledAnswer("t1", 200);
+  await env.clock.advance(10000);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.imports, []);
+});
 
 test("a cancel answered 503 shows 取消中 with the service's reason and is sent again every 10 seconds until 200", async () => {
   const env = await submitted({ [QUERY("t1")]: status("queued") });

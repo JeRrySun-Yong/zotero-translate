@@ -14,7 +14,7 @@
  * or a 404 for the task or one of its PDFs, fails the task. An upload that
  * cannot reach the service fails at once, naming the service address.
  *
- * "取消" on a queued or waiting task (also while disconnected) first saves
+ * "取消" on a queued, running or waiting task (also while disconnected) first saves
  * the cancel intent and makes the task `cancelling`, which ends whatever
  * operation the task has under way: its request is aborted, and its answer,
  * whenever it comes, is dropped. The cancel request goes out at once; the
@@ -101,8 +101,8 @@ var ZoteroTranslateLifecycle = (() => {
   // States in which the plugin has a next operation for the task: query the
   // service, (attaching) download and import the PDFs, or (cancelling) send the cancel.
   const SCHEDULED_STATES = ACTIVE_STATES.filter((state) => !["submitting", "attach_failed"].includes(state));
-  // States whose rows offer "取消"; a running task's cancel comes with ticket 09.
-  const CANCELLABLE_STATES = ["queued", "waiting_rerun"];
+  // States whose rows offer "取消".
+  const CANCELLABLE_STATES = ["queued", "running", "waiting_rerun"];
   // Further states whose rows offer "取消", which ends the task here, without a cancel
   // request: the service has already succeeded. Not while a PDF is being imported.
   const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
