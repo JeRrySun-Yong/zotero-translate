@@ -9,8 +9,9 @@ It records the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
-concurrency limit, requests, timeouts and the maximum number of requests in
-flight), the batches whose requests failed for good and the
+concurrency limit, i.e. the size of its endpoint's budget, whether flash and
+argon share that budget (same address and key), requests, timeouts and the
+maximum number of its requests in flight, and of the budget's), the batches whose requests failed for good and the
 term list counts with the spellings dropped because the source lacks them,
 the promoted basic terms, the promoted glosses request and the gloss checks,
 for each key concept the pages of its first-mention glosses in the
@@ -120,10 +121,12 @@ class TaskReport:
                 "endpoints": {
                     name: {
                         "model": c.model,
-                        "concurrency": c.settings.concurrency,
+                        "concurrency": c.concurrency,
+                        "shared_budget": self.models.shared_budget,
                         "requests": c.request_count,
                         "timeouts": c.timeout_count,
                         "max_in_flight": c.max_in_flight,
+                        "budget_max_in_flight": c.endpoint.max_in_flight,
                     }
                     for name, c in endpoints.items()
                 },
