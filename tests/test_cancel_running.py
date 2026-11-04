@@ -69,6 +69,16 @@ def _worker_and_children(service, task_id: str) -> tuple[psutil.Process, list[ps
         time.sleep(0.1)
 
 
+def _marked_while_polling(task_id: str) -> list[psutil.Process]:
+    """``marked_processes``, tolerating psutil's SystemError for a process that exits mid-read."""
+    for _ in range(5):
+        try:
+            return marked_processes([task_id])
+        except SystemError:
+            time.sleep(0.05)
+    return marked_processes([task_id])
+
+
 def _attempt_outcomes(service, task_id: str) -> list[str]:
     return [a["outcome"] for a in service.report(task_id)["attempts"]]
 
@@ -136,7 +146,7 @@ def test_a_task_cancelled_after_its_marker_was_saved_never_starts_its_worker(
 
     other = service.submit()
     seen = []
-    service.wait(other, on_poll=lambda s: seen.extend(marked_processes([task_id])))
+    service.wait(other, on_poll=lambda s: seen.extend(_marked_while_polling(task_id)))
     assert service.status(other)["state"] == "succeeded"
     assert seen == [], "the cancelled task's worker started"
     assert service.status(task_id)["state"] == "cancelled"
