@@ -12,8 +12,10 @@ environment file outside the repository:
 Both files hold ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY``, and optionally
 ``AI_DEFAULT_MODEL`` and ``ZT_REQUEST_TIMEOUT_SECONDS``. The argon file may
 also set ``ZT_CONCURRENCY``, its limit of requests in flight; flash's limit
-comes from the ``--concurrency`` option. The plugin cannot change any of
-these settings.
+comes from the ``--concurrency`` option. When both files name the same
+address and key, the two are one endpoint with one budget of flash's limit,
+and argon's ``ZT_CONCURRENCY`` is ignored (``PipelineModels``). The plugin
+cannot change any of these settings.
 """
 
 from __future__ import annotations
