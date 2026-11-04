@@ -140,11 +140,11 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
-from collections.abc import Callable
 from pathlib import Path
 
 from zotero_translate import __version__
@@ -372,6 +372,8 @@ class TaskQueue:
                 reason = str(e) if finished else f"{e}；暂停调度新的尝试"
                 if status.get("cleanup_error") != reason:
                     self._decide(task_id, "cleanup_error", {"cleanup_error": reason}, reason=reason)
+                # A plain retry (then None, e.g. a repeated cancel) keeps
+                # the transition an earlier failed reap was waiting for.
                 if then is not None or task_id not in self._reap_retries:
                     self._reap_retries[task_id] = then
                 if not finished:
@@ -383,11 +385,13 @@ class TaskQueue:
                 td.write_status(self.tasks_dir / task_id, cleanup_error=None)
             self._cleanup_blocked.discard(task_id)
             self._reap_retries.pop(task_id, None)
-            if status.get("cancel_requested") and status["state"] not in td.TERMINAL_STATES:
-                self._finish_cancel(task_id)
-            elif then is not None:
-                then()
-            self._cond.notify_all()
+            try:
+                if status.get("cancel_requested") and status["state"] not in td.TERMINAL_STATES:
+                    self._finish_cancel(task_id)
+                elif then is not None:
+                    then()
+            finally:
+                self._cond.notify_all()  # scheduling may resume, even if then() failed
         return True
 
     def _retry_reaps_forever(self) -> None:
@@ -661,9 +665,11 @@ class TaskQueue:
             self._reap(task_id)
             return 200, self.status(task_id)
         _test_pause(PAUSE_AFTER_CANCEL_ACCEPTED, task_id, status.get("attempt", 0))
-        if not self._reap(task_id):  # on success it completes the cancel
-            return 503, self.status(task_id)
-        return 200, self.status(task_id)
+        self._reap(task_id)  # on success it completes the cancel
+        # Another thread's reap (the runner's, a retry) may have completed it
+        # even when this one failed: a cancelled task answers 200.
+        answer = self.status(task_id)
+        return (200 if answer["state"] == "cancelled" else 503), answer
 
     def _finish_cancel(self, task_id: str) -> None:
         """Complete an accepted cancel whose processes are reaped: ``cancelled``.

@@ -10,8 +10,9 @@ the transition it was about to make. A result the worker reports after the
 cancel is dropped. A restart while the processes are being reaped completes
 the cancel, counting no interruption and no rerun.
 
-Only the HTTP interface, the service log, the status files, the task report
-and the process table are looked at.
+Only the HTTP interface, the service log, the task report and the process
+table are looked at. Like ``test_requeue``, two tests kill a worker directly
+to leave its spawned child behind; there is no other way to stage that.
 """
 
 import json
@@ -36,7 +37,6 @@ from tests.test_cancel import _events
 from tests.test_cancel import _kill
 from tests.test_cancel import _leftover
 from tests.test_cancel import _pauses
-from tests.test_cancel import _status_path
 from tests.test_cancel import _wait_for_file
 
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
@@ -73,10 +73,6 @@ def _attempt_outcomes(service, task_id: str) -> list[str]:
     return [a["outcome"] for a in service.report(task_id)["attempts"]]
 
 
-def _saved(service, task_id: str) -> dict:
-    return json.loads(_status_path(service, task_id).read_text("utf-8"))
-
-
 def test_a_running_task_with_a_spawned_child_is_cancelled_and_leaves_no_process(
     tmp_path, fake_model, start_service
 ):
@@ -96,7 +92,6 @@ def test_a_running_task_with_a_spawned_child_is_cancelled_and_leaves_no_process(
         during = service.status(task_id)
         assert during["state"] == "running"
         assert during["cancel_requested"] is True
-        assert _saved(service, task_id)["cancel_requested"] is True
         assert service.http.get("/health").status_code == 200
         started = time.monotonic()
         paused.unlink()
@@ -185,8 +180,8 @@ def test_a_restart_while_a_running_tasks_processes_are_reaped_completes_the_canc
             leftover = _leftover(task_id)  # a process the restarted service must reap
             threading.Thread(target=_cancel_ignoring_errors, args=(services[0], task_id), daemon=True).start()
             _wait_for_file(accepted / f"{task_id}-1.paused")
-            saved = _saved(services[0], task_id)
-            assert (saved["state"], saved["cancel_requested"]) == ("running", True)
+            during = services[0].status(task_id)
+            assert (during["state"], during["cancel_requested"]) == ("running", True)
             _kill(services[0])
 
             gate.set()
@@ -196,10 +191,10 @@ def test_a_restart_while_a_running_tasks_processes_are_reaped_completes_the_canc
             assert cancelled["cancel_requested"] is False
             assert cancelled["attempt"] == 1
             assert cancelled["reruns_used"] == 0
-            assert _saved(services[1], task_id)["consecutive_interruptions"] == 0
             assert leftover.poll() is not None, "the leftover process outlived the restart"
             assert marked_processes([task_id]) == []
             assert _events(services[1], task_id) == ["已取消"]
+            # No interruption counted: the attempt ended as cancelled.
             assert _attempt_outcomes(services[1], task_id) == ["cancelled"]
 
             other = services[1].submit()
