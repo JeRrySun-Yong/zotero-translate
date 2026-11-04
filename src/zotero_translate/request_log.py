@@ -12,7 +12,7 @@ failed paper task does not wait for its algorithm requests). When an attempt
 ends (after the worker process has exited), the translation service
 replaces the report's ``requests`` with the file's (``load_records``).
 ``run`` does the same with ``update_report`` as its process exits, after
-Python has joined the threads still sending.
+the threads still sending are joined (``zotero_translate.process_exit``).
 
 A record has these fields:
 

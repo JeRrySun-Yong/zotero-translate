@@ -12,8 +12,11 @@ model response cache in the data directory.
 and 1 when another service holds the data directory or the port is taken.
 ``run`` exits with 0 when the paper task succeeds, 1 when it fails (the
 task report's ``state`` is ``failed`` and its ``error`` says why) and 2 when
-an environment file is missing or incomplete. A script that logs the exit
-status must read ``$?`` before anything else runs: in
+an environment file is missing or incomplete. It ends the process itself
+(``zotero_translate.process_exit``) once the paper task is over and
+``report.json`` is up to date, skipping native libraries' exit handlers,
+which sometimes hang (``main`` does not return for ``run``). A script that
+logs the exit status must read ``$?`` before anything else runs: in
 ``echo "$(date) exit=$?"`` the command substitution resets it to 0.
 """
 
@@ -28,6 +31,7 @@ import time
 from pathlib import Path
 
 from zotero_translate import settings as s
+from zotero_translate.process_exit import run_then_exit
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         return serve_forever(
             args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
         )
-    return _run(args)
+    run_then_exit(lambda: _run(args))
 
 
 def _add_model_options(parser: argparse.ArgumentParser) -> None:
@@ -103,9 +107,9 @@ def _run(args) -> int:
         shutil.copyfile(args.pdf, source)
     started = time.monotonic()
     # A failed paper task does not wait for its algorithm requests, so sends
-    # can end after the report is written. Python joins those threads at
-    # exit before it runs atexit handlers: then the report's request records
-    # are made whole from requests.jsonl.
+    # can end after the report is written. The exit (``run_then_exit``)
+    # joins those threads before it runs the atexit handlers: then the
+    # report's request records are made whole from requests.jsonl.
     atexit.register(update_report, args.output_dir / "report.json")
     try:
         result = run_paper_task(

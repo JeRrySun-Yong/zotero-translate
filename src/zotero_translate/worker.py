@@ -28,6 +28,12 @@ kill), then itself, and reports nothing after that. Whatever survives, for
 example when the subprocess itself is killed, the service reaps by process
 marker (``zotero_translate.processes``).
 
+The subprocess exits with 0 when the paper task succeeded and 1 when the
+attempt failed, once the report is written, the result is sent and the
+model client is closed. It ends through ``zotero_translate.process_exit``,
+which skips native libraries' exit handlers: one of them sometimes hangs
+after Python's own shutdown, and the service waits for the subprocess.
+
 Test only: ``ZT_TEST_WORKER_SPAWN_CHILD=1`` makes the subprocess start a
 long-running child the way the engine does (``multiprocessing``, spawn);
 ``ZT_TEST_WORKER_BAD_REPORTS=1``, see ``BAD_REPORTS``.
@@ -49,6 +55,7 @@ from zotero_translate import processes
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import PaperTaskError
 from zotero_translate.paper_task import run_paper_task
+from zotero_translate.process_exit import run_then_exit
 from zotero_translate.settings import SettingsError
 from zotero_translate.settings import load_pipeline_settings
 
@@ -179,4 +186,4 @@ def _exit_when_orphaned(parent: int) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_then_exit(main)
