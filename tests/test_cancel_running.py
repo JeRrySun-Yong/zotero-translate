@@ -146,6 +146,15 @@ def test_a_task_cancelled_after_its_marker_was_saved_never_starts_its_worker(
 
     other = service.submit()
     seen = []
+    # The other task waits at the same pause point; meanwhile, and while it
+    # runs, no process of the cancelled task may show up.
+    other_paused = pauses / f"{other}-1.paused"
+    deadline = time.monotonic() + 120
+    while not other_paused.exists():
+        assert time.monotonic() < deadline, "the other task never reached its pause"
+        seen.extend(_marked_while_polling(task_id))
+        time.sleep(0.1)
+    other_paused.unlink()
     service.wait(other, on_poll=lambda s: seen.extend(_marked_while_polling(task_id)))
     assert service.status(other)["state"] == "succeeded"
     assert seen == [], "the cancelled task's worker started"
