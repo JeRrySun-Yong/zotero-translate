@@ -241,6 +241,10 @@ def main():
     print("main done")
     if sys.argv[2] == "raise":
         raise ValueError("broken")
+    if sys.argv[2] == "ctrl-c":
+        import os, signal
+        os.kill(os.getpid(), signal.SIGINT)  # as Ctrl-C in a terminal
+        time.sleep(10)
     return int(sys.argv[2])
 """
 
@@ -271,4 +275,13 @@ def test_an_exception_out_of_main_is_printed_and_ends_the_process_with_1(tmp_pat
 
     assert result.returncode == 1
     assert "ValueError: broken" in result.stderr
+    assert (tmp_path / "handler").read_text() == "after record"
+
+
+def test_ctrl_c_ends_the_process_by_sigint_as_python_does_after_the_exit_steps(tmp_path):
+    # Python ends a process interrupted by Ctrl-C by SIGINT (exit status 130 in a shell).
+    result = _exit_script(tmp_path, "ctrl-c")
+
+    assert result.returncode == -signal.SIGINT
+    assert "KeyboardInterrupt" in result.stderr
     assert (tmp_path / "handler").read_text() == "after record"

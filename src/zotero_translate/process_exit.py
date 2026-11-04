@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import signal
 import sys
 import threading
 from typing import Callable
@@ -42,21 +43,29 @@ def run_then_exit(main: Callable[[], object]) -> NoReturn:
     """Run ``main``, then end the process with its exit status, as ``SystemExit`` would.
 
     ``main`` returns the exit status (None means 0), or raises: ``SystemExit``
-    gives its code, any other exception is printed and gives 1.
+    gives its code; ``KeyboardInterrupt`` (Ctrl-C) is printed and the process
+    ends by SIGINT, as Python's does (130 in a shell); any other exception is
+    printed and gives 1.
     """
+    interrupted = False
     try:
         status = main()
     except SystemExit as e:
         status = e.code
+    except KeyboardInterrupt:
+        sys.excepthook(*sys.exc_info())
+        status, interrupted = 128 + signal.SIGINT, True
     except BaseException:  # noqa: BLE001 - printed as Python would, then exit 1
         sys.excepthook(*sys.exc_info())
         status = 1
-    _exit_now(_exit_code(status))
+    _exit_now(_exit_code(status), interrupted)
 
 
-def _exit_now(code: int) -> NoReturn:
+def _exit_now(code: int, interrupted: bool = False) -> NoReturn:
     """End the process with ``code`` after the steps in the module docstring.
 
+    ``interrupted``: end it by SIGINT instead (its default action, which
+    runs no exit handler either); ``code`` only if the signal does not end it.
     Call it from the main thread, as the last thing the process does.
     """
     threading._shutdown()  # what the interpreter calls first on exit
@@ -66,6 +75,9 @@ def _exit_now(code: int) -> NoReturn:
             stream.flush()
         except Exception:  # noqa: BLE001 - a closed stream must not stop the exit
             pass
+    if interrupted:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
     os._exit(code)
 
 
