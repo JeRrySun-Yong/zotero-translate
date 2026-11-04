@@ -51,10 +51,10 @@ def run_then_exit(main: Callable[[], object]) -> NoReturn:
     except BaseException:  # noqa: BLE001 - printed as Python would, then exit 1
         sys.excepthook(*sys.exc_info())
         status = 1
-    exit_now(_exit_code(status))
+    _exit_now(_exit_code(status))
 
 
-def exit_now(code: int) -> NoReturn:
+def _exit_now(code: int) -> NoReturn:
     """End the process with ``code`` after the steps in the module docstring.
 
     Call it from the main thread, as the last thing the process does.

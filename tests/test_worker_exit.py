@@ -19,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import EXCERPT
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
@@ -35,7 +37,10 @@ from zotero_translate.request_log import REQUESTS_FILE
 from zotero_translate.request_log import load_records
 
 HANG_AT_EXIT = {
-    "PYTHONPATH": str(Path(__file__).parent / "hang_at_exit"),
+    "PYTHONPATH": os.pathsep.join(
+        [str(Path(__file__).parent / "hang_at_exit")]
+        + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+    ),
     "ZT_TEST_HANG_AT_EXIT": "1",
 }
 PAPER_SECONDS = 240  # how long a paper task may take; a process hanging at exit never ends
@@ -78,11 +83,8 @@ def _run_worker(
     reader = threading.Thread(target=read)
     reader.start()
     try:
-        code = process.wait(timeout=PAPER_SECONDS)
+        code = _wait_or_kill(process)
     finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
         reader.join()
     return code, reports, directory
 
@@ -100,13 +102,24 @@ def _run_command(tmp_path: Path, pdf: Path, env_files: list[str]) -> tuple[int, 
         env={**os.environ, **HANG_AT_EXIT},
         start_new_session=True,
     )
+    return _wait_or_kill(process), output_dir
+
+
+def _wait_or_kill(process: subprocess.Popen) -> int:
+    """The exit code of ``process``; after PAPER_SECONDS its process group is killed."""
     try:
-        code = process.wait(timeout=PAPER_SECONDS)
+        return process.wait(timeout=PAPER_SECONDS)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-    return code, output_dir
+
+
+def test_the_hang_at_exit_is_armed_for_a_process_that_exits_normally():
+    # Without this, a shadowed hook would let every test below pass unproven.
+    command = [sys.executable, "-c", "import sys; sys.exit(0)"]
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(command, env={**os.environ, **HANG_AT_EXIT}, timeout=5)
 
 
 def _assert_records_whole(report_path: Path) -> list[dict]:

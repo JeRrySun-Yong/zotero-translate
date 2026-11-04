@@ -30,7 +30,7 @@ marker (``zotero_translate.processes``).
 
 The subprocess exits with 0 when the paper task succeeded and 1 when the
 attempt failed, once the report is written, the result is sent and the
-model client is closed. It ends through ``zotero_translate.process_exit``,
+model client is closed; 2 for bad arguments, 3 when the service is gone. It ends through ``zotero_translate.process_exit``,
 which skips native libraries' exit handlers: one of them sometimes hangs
 after Python's own shutdown, and the service waits for the subprocess.
 

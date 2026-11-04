@@ -35,6 +35,7 @@ from zotero_translate.process_exit import run_then_exit
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command; ``serve`` returns its exit code, ``run`` ends the process itself."""
     parser = argparse.ArgumentParser(prog="zotero-translate")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -59,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         return serve_forever(
             args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
         )
-    run_then_exit(lambda: _run(args))
+    run_then_exit(lambda: _run(args))  # does not return
 
 
 def _add_model_options(parser: argparse.ArgumentParser) -> None:
