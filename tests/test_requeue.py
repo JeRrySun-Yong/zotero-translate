@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 import psutil
@@ -393,9 +394,9 @@ def test_a_worker_whose_service_is_gone_ends_its_children_and_then_itself(tmp_pa
             stop_service(service)
 
 
-def _old_task(tasks: Path, name: str, state: str, **status) -> str:
+def _old_task(tasks: Path, state: str, **status) -> str:
     """Write a task directory as the service before M3 left it."""
-    task_id = (name * 32)[:32]
+    task_id = uuid.uuid4().hex  # random, like the service's (conftest _assert_random_task_ids)
     directory = tasks / task_id
     directory.mkdir(parents=True)
     shutil.copy(EXCERPT, directory / "source.pdf")
@@ -423,11 +424,11 @@ def _old_task(tasks: Path, name: str, state: str, **status) -> str:
 def test_task_directories_from_before_the_upgrade(tmp_path, fake_model, start_service):
     data_dir = tmp_path / "old-data"
     tasks = data_dir / "tasks"
-    succeeded = _old_task(tasks, "a", "succeeded", stage="完成", progress=100)
+    succeeded = _old_task(tasks, "succeeded", stage="完成", progress=100)
     (tasks / succeeded / "mono.pdf").write_bytes(b"%PDF-old")
-    failed = _old_task(tasks, "b", "failed", stage="翻译与审校", progress=40, error="旧的失败")
-    running = _old_task(tasks, "c", "running", stage="翻译与审校", progress=50)
-    queued = _old_task(tasks, "d", "queued")
+    failed = _old_task(tasks, "failed", stage="翻译与审校", progress=40, error="旧的失败")
+    running = _old_task(tasks, "running", stage="翻译与审校", progress=50)
+    queued = _old_task(tasks, "queued")
     terminal_before = {
         t: (tasks / t / "status.json").read_bytes() for t in (succeeded, failed)
     }
@@ -463,7 +464,7 @@ def test_a_task_that_cannot_be_restored_fails_alone_and_the_others_are_restored(
             # Its report.json cannot be written.
             (tasks / broken / "report.json").mkdir()
             # A status file that is not JSON at all.
-            unreadable = "e" * 32
+            unreadable = uuid.uuid4().hex
             (tasks / unreadable).mkdir()
             (tasks / unreadable / "task.json").write_text(
                 json.dumps({"task_id": unreadable, "filename": "坏.pdf", "submitted_at": time.time()}),

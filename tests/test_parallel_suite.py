@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import PARALLEL_PROCESSES
 
 REPO = Path(__file__).resolve().parent.parent
@@ -85,3 +87,15 @@ def test_a_test_gets_a_default_data_dir_of_its_own(tmp_path):
     from zotero_translate.settings import DEFAULT_DATA_DIR
 
     assert not DEFAULT_DATA_DIR.is_relative_to(Path.home() / "Library")
+
+
+def test_a_service_is_not_started_on_a_task_directory_with_a_fixed_task_id(tmp_path, start_service):
+    # The service reaps the processes of its tasks' ids at startup, and
+    # stop_service ends them too: with a fixed id, those of another test run
+    # (another worktree) that seeded the same id. Seeded tasks take
+    # uuid.uuid4().hex, like the service's own.
+    data_dir = tmp_path / "data"
+    (data_dir / "tasks" / ("d" * 32)).mkdir(parents=True)
+
+    with pytest.raises(AssertionError, match="fixed task id"):
+        start_service("http://127.0.0.1:9/v1", data_dir=data_dir)

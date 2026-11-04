@@ -19,8 +19,9 @@ starts ``PARALLEL_PROCESSES`` of them (pytest-xdist), and ``--dist loadfile``
 shared between tests: ports are picked free, data directories and
 environment files live in the test's own temporary directory, the service
 gives tasks random ids, and ``stop_service`` ends only the processes of
-tasks in its own data directory. A test that names its own task ids makes
-them unique too (another test run may be going on in another worktree). The
+tasks in its own data directory. A task a test writes into a data directory
+takes a random id too, which ``launch_service`` checks (another test run may
+be going on in another worktree, see ``_assert_random_task_ids``). The
 default data directory (``ZT_DATA_DIR``) is never the user's: each test has
 one of its own, a module fixture shares its test process's.
 """
@@ -185,6 +186,7 @@ def launch_service(
     output.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
+    _assert_random_task_ids(data_dir)
     if env_file is None:
         base_url = model if isinstance(model, str) else model.base_url
         env_file = write_env_file(root, base_url, FAKE_API_KEY, FAKE_MODEL_NAME, request_timeout)
@@ -213,6 +215,25 @@ def launch_service(
         daemon=True,
     ).start()
     return ServiceClient(json.loads(line)["url"], process, data_dir, output)
+
+
+def _assert_random_task_ids(data_dir: Path) -> None:
+    """Fail on a task directory a test seeded with a fixed task id.
+
+    The service reaps the processes of its tasks' ids when it starts, and
+    ``stop_service`` ends them too, so a fixed id would reach the processes
+    of another test run (another worktree) that seeded the same id. Seeded
+    tasks take ``uuid.uuid4().hex``, like the service's own.
+    """
+    tasks = Path(data_dir) / "tasks"
+    for task in tasks.iterdir() if tasks.is_dir() else ():
+        try:
+            parsed = uuid.UUID(task.name)
+        except ValueError:
+            parsed = None
+        assert parsed is not None and parsed.version == 4 and parsed.hex == task.name, (
+            f"fixed task id {task.name!r} in {tasks}: use uuid.uuid4().hex"
+        )
 
 
 def serve_command(
