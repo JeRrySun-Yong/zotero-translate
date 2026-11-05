@@ -1,11 +1,81 @@
-<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+<vbox id="zotero-translate-prefs"
+      xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
       xmlns:html="http://www.w3.org/1999/xhtml">
+  <html:style>
+    #zotero-translate-prefs [hidden] { display: none !important; }
+    #zotero-translate-prefs .zt-status { padding: 6px 10px; border-radius: 4px; font-weight: 600; }
+    #zotero-translate-prefs .zt-status[data-running="true"] { background: #e3f4e1; color: #1d5b1a; }
+    #zotero-translate-prefs .zt-status[data-running="false"] { background: #fde7e5; color: #8a1c12; }
+    #zotero-translate-prefs .zt-help { margin: 6px 0 0; user-select: text; }
+    #zotero-translate-prefs table { width: 100%; border-collapse: collapse; margin: 4px 0 8px; }
+    #zotero-translate-prefs th, #zotero-translate-prefs td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
+    #zotero-translate-prefs tbody tr { cursor: pointer; }
+    #zotero-translate-prefs tbody tr[data-selected="true"] { background: #dbe8fb; }
+    #zotero-translate-prefs .zt-fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; align-items: center; }
+    #zotero-translate-prefs .zt-fields input { width: 100%; box-sizing: border-box; }
+    #zotero-translate-prefs .zt-buttons { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+    #zotero-translate-prefs .zt-result { margin: 8px 0 0; font-weight: 600; }
+    #zotero-translate-prefs .zt-result[data-ok="true"] { color: #1d5b1a; }
+    #zotero-translate-prefs .zt-result[data-ok="false"] { color: #8a1c12; }
+    #zotero-translate-prefs .zt-note { margin: 4px 0 0; color: #666; user-select: text; }
+  </html:style>
+
   <groupbox>
     <label><html:h2>翻译服务</html:h2></label>
-    <hbox align="center">
-      <label control="zotero-translate-service-url" value="翻译服务地址"/>
-      <html:input id="zotero-translate-service-url" type="text" size="40"
-                  preference="extensions.zotero-translate.serviceUrl"/>
+    <html:div id="zotero-translate-status" class="zt-status">正在连接翻译服务…</html:div>
+    <html:p id="zotero-translate-status-help" class="zt-help" hidden="hidden"/>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>模型配置</html:h2></label>
+    <html:p class="zt-note">之后提交的论文用当前配置（●）；已提交的论文仍用提交时的配置。点一行编辑它。</html:p>
+    <html:table>
+      <html:thead>
+        <html:tr><html:th>当前</html:th><html:th>名称</html:th><html:th>模型</html:th><html:th>状态</html:th><html:th>密钥</html:th></html:tr>
+      </html:thead>
+      <html:tbody id="zotero-translate-profiles"/>
+    </html:table>
+    <hbox>
+      <html:button id="zotero-translate-new">新建配置</html:button>
     </hbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2 id="zotero-translate-form-title">新建配置</html:h2></label>
+    <html:div id="zotero-translate-fields" class="zt-fields">
+      <html:label for="zotero-translate-name">名称</html:label>
+      <html:input id="zotero-translate-name" type="text" placeholder="例如 DeepSeek"/>
+      <html:label for="zotero-translate-base-url">地址</html:label>
+      <html:input id="zotero-translate-base-url" type="text" placeholder="OpenAI 兼容接口的地址，例如 https://api.example.com/v1"/>
+      <html:label for="zotero-translate-key">密钥</html:label>
+      <html:input id="zotero-translate-key" type="password" autocomplete="off"/>
+      <html:label for="zotero-translate-model">模型 ID</html:label>
+      <html:input id="zotero-translate-model" type="text" placeholder="例如 deepseek/deepseek-v4.1-flash"/>
+      <html:label for="zotero-translate-concurrency">并发上限</html:label>
+      <html:input id="zotero-translate-concurrency" type="text" inputmode="numeric" placeholder="默认 16；按端点允许的并发填，例如 32"/>
+      <html:label for="zotero-translate-timeout">请求超时（秒，可选）</html:label>
+      <html:input id="zotero-translate-timeout" type="text" inputmode="numeric" placeholder="默认 480；回答慢的模型可填 900"/>
+    </html:div>
+    <html:p id="zotero-translate-builtin" class="zt-note" hidden="hidden"/>
+    <html:p id="zotero-translate-key-note" class="zt-note">密钥只发给本机翻译服务保存，Zotero 不保存。“测试连接”会先保存改动。</html:p>
+    <html:div class="zt-buttons">
+      <html:button id="zotero-translate-test">测试连接</html:button>
+      <html:button id="zotero-translate-apply">应用</html:button>
+      <html:button id="zotero-translate-remove">删除</html:button>
+      <html:span id="zotero-translate-apply-hint" class="zt-note"/>
+    </html:div>
+    <html:p id="zotero-translate-result" class="zt-result" hidden="hidden"/>
+    <html:p id="zotero-translate-result-detail" class="zt-note" hidden="hidden"/>
+  </groupbox>
+
+  <groupbox>
+    <html:details>
+      <html:summary>高级</html:summary>
+      <hbox align="center">
+        <label control="zotero-translate-service-url" value="翻译服务地址"/>
+        <html:input id="zotero-translate-service-url" type="text" size="40"
+                    preference="extensions.zotero-translate.serviceUrl"/>
+      </hbox>
+    </html:details>
   </groupbox>
 </vbox>
