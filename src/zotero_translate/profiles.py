@@ -288,7 +288,11 @@ class ProfileStore:
             "model": profile.model,
             "concurrency": profile.concurrency,
             "request_timeout_seconds": profile.request_timeout_seconds,
-            "api_key": {"set": bool(profile.api_key), "last4": profile.api_key[-4:]},
+            # The last 4 characters only of a key long enough to keep the rest unknown.
+            "api_key": {
+                "set": bool(profile.api_key),
+                "last4": profile.api_key[-4:] if len(profile.api_key) >= 8 else "",
+            },
             "last_test": (
                 {k: test[k] for k in ("result", "message", "seconds", "http_status", "tested_at")}
                 if test
