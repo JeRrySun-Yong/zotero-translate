@@ -128,3 +128,12 @@ test("a cancelling row says so, with the service's reason or the disconnection; 
   assert.equal(core.taskRow({ title: "A", state: "cancelled" }).status, "已取消");
   assert.equal(core.taskRow({ title: "A", state: "cancelled", disconnectedSince: 0 }, 60000).status, "已取消");
 });
+
+test("the submission notice says how many PDFs the service took, and why the others were skipped", () => {
+  const skipped = ["B：该条目没有 PDF 附件", "C：已有未结束的翻译任务，本次提交已忽略"];
+  assert.deepEqual(core.submissionNotice({ submitted: 3, skipped: [] }), { headline: "已提交 3 篇", lines: [] });
+  assert.deepEqual(core.submissionNotice({ submitted: 1, skipped }), { headline: "已提交 1 篇", lines: skipped });
+  assert.deepEqual(core.submissionNotice({ submitted: 0, skipped }), { headline: "没有提交", lines: skipped });
+  // Uploads that failed have their own failure notices: nothing more to say.
+  assert.equal(core.submissionNotice({ submitted: 0, skipped: [] }), null);
+});

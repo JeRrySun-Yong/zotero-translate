@@ -124,7 +124,18 @@ var ZoteroTranslateCore = (() => {
     return { ...row, status: withReason ? `${status}：${task.error}` : status };
   }
 
-  return { OUTPUTS, UNFINISHED_STATES, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow };
+  /** The notice after "翻译为中文" ({headline, lines}): how many PDFs the
+   *  service took (`submitted`), and why the others were skipped (the
+   *  lifecycle's notices of this submission). Null when there is nothing to
+   *  say: the uploads that failed have their own failure notices. */
+  function submissionNotice({ submitted, skipped }) {
+    if (!submitted && !skipped.length) {
+      return null;
+    }
+    return { headline: submitted ? `已提交 ${submitted} 篇` : "没有提交", lines: [...skipped] };
+  }
+
+  return { OUTPUTS, UNFINISHED_STATES, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow, submissionNotice };
 })();
 
 if (typeof module !== "undefined") {

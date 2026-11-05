@@ -116,6 +116,8 @@ var ZoteroTranslateLifecycle = (() => {
   const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
   // States whose rows offer "重试".
   const RETRYABLE_STATES = ["failed", "cancelled"];
+  // Ended states: the plugin has nothing more to do for the task; "清除已结束" removes their rows.
+  const ENDED_STATES = ["done", "failed", "cancelled"];
   // States announced when a task changes into them -> the notice's outcome.
   const ANNOUNCED_OUTCOMES = { done: "done", failed: "failed", attach_failed: "failed" };
   // Task fields saved for restarts.
@@ -212,10 +214,12 @@ var ZoteroTranslateLifecycle = (() => {
       },
 
       /** Upload a source PDF, {sourceItemID, itemID, title, sourceFileName},
-       *  unless it already has an unfinished task. */
+       *  unless it already has an unfinished task. Returns the new task once
+       *  the upload has ended (its taskId set when the service took it, or
+       *  failed), or null when the PDF was skipped. */
       async submit(source) {
         if (skippedAsActive(source.sourceItemID, source.title)) {
-          return;
+          return null;
         }
         const task = {
           key: nextKey++,
@@ -227,6 +231,22 @@ var ZoteroTranslateLifecycle = (() => {
         };
         lifecycle.tasks.push(task);
         await upload(task);
+        return task;
+      },
+
+      /** The "清除已结束" button: remove the done, failed and cancelled
+       *  tasks (never saved; nothing more to do for them); the unfinished
+       *  ones stay as they are. */
+      clearEnded() {
+        const ended = lifecycle.tasks.filter((task) => ENDED_STATES.includes(task.state));
+        if (!ended.length) {
+          return;
+        }
+        for (const task of ended) {
+          announcedStates.delete(task.key);
+        }
+        lifecycle.tasks = lifecycle.tasks.filter((task) => !ENDED_STATES.includes(task.state));
+        changed();
       },
 
       /** The "重试" button of a failed or cancelled row: submit the same
@@ -287,7 +307,8 @@ var ZoteroTranslateLifecycle = (() => {
     };
 
     /** A task's row; `results` ({mono, dual}: the two attachments) only once
-     *  both PDFs are attached, for "打开译文", "打开双语" and "在库中显示". */
+     *  both PDFs are attached, for "打开译文", "打开双语" and "在库中显示";
+     *  `ended` for the rows "清除已结束" removes. */
     function rowOf(task, now) {
       return {
         ...Core.taskRow(task, now),
@@ -295,6 +316,7 @@ var ZoteroTranslateLifecycle = (() => {
         canRetry: RETRYABLE_STATES.includes(task.state),
         canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
         canContinue: task.state === "attach_failed",
+        ended: ENDED_STATES.includes(task.state),
         results: task.state === "done" ? { mono: task.attached.mono, dual: task.attached.dual } : null,
       };
     }

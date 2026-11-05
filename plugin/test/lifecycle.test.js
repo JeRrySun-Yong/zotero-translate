@@ -1682,3 +1682,100 @@ test("a notice that throws is logged; the task goes on", async () => {
   assert.equal(env.saved, "[]");
   assert.deepEqual(logged, ["no window"]);
 });
+
+// ---- the submission and "清除已结束" (M4 ticket 08) ----
+
+test("submit returns the new task, or null when the PDF already has an unfinished task", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  const task = await env.lifecycle.submit(SOURCE);
+  assert.deepEqual([task.taskId, task.state], ["t1", "queued"]);
+  assert.equal(await env.lifecycle.submit(SOURCE), null);
+
+  const refusedUpload = environment();
+  refusedUpload.lifecycle.start();
+  const failed = await refusedUpload.lifecycle.submit(SOURCE);
+  assert.deepEqual([failed.taskId, failed.state], [null, "failed"]);
+});
+
+test("清除已结束 removes only the done, cancelled and failed rows; unfinished ones stay, saved and still handled", async () => {
+  const UNFINISHED = ["queued", "running", "waiting_rerun", "attaching", "attach_failed", "cancelling"];
+  const saved = UNFINISHED.map((state, i) => ({
+    sourceItemID: 50 + i,
+    itemID: 40 + i,
+    title: `U-${state}`,
+    sourceFileName: "u.pdf",
+    serviceUrl: SERVICE,
+    taskId: `u${i}`,
+    state,
+    attached: {},
+    error: state === "attach_failed" ? "磁盘已满" : null,
+  }));
+  let uploads = 0;
+  const upload = held();
+  const env = environment({
+    saved: JSON.stringify(saved),
+    routes: {
+      // t1 succeeds, t2 fails, t3 is cancelled by the service; the fourth upload is still under way.
+      [UPLOAD]: (options) => (++uploads <= 3 ? json(201, { task_id: `t${uploads}` }) : upload.route(options)),
+      ...succeededRoutes("t1"),
+      [QUERY("t2")]: status("failed", { error: "HTTP 400" }),
+      [QUERY("t3")]: status("cancelled", { cancel_requested: true }),
+    },
+  });
+  env.lifecycle.start();
+  for (const [i, title] of ["Done", "Failed", "Cancelled"].entries()) {
+    await env.lifecycle.submit({ sourceItemID: 11 + i, itemID: 10 + i, title, sourceFileName: `${title}.pdf` });
+  }
+  const submitting = env.lifecycle.submit({ sourceItemID: 20, itemID: 21, title: "Submitting", sourceFileName: "s.pdf" });
+  await env.clock.advance(2000);
+  const states = () => env.lifecycle.tasks.map((t) => [t.title, t.state]);
+  assert.deepEqual(states().slice(6), [["Done", "done"], ["Failed", "failed"], ["Cancelled", "cancelled"], ["Submitting", "submitting"]]);
+  assert.deepEqual(
+    env.lifecycle.rows().map((row) => row.ended),
+    [false, false, false, false, false, false, true, true, true, false],
+  );
+
+  const savedBefore = env.saved;
+  let redraws = 0;
+  env.lifecycle.listeners.add(() => redraws++);
+  env.lifecycle.clearEnded();
+  assert.deepEqual(
+    env.lifecycle.rows().map((row) => row.title),
+    [...UNFINISHED.map((state) => `U-${state}`), "Submitting"],
+  );
+  assert.equal(redraws, 1);
+  assert.equal(env.saved, savedBefore); // ended tasks were never saved; the unfinished ones still are
+  assert.deepEqual(env.lifecycle.rows().map((row) => row.ended), Array(7).fill(false));
+
+  // The unfinished tasks go on: the queued one is queried again, the upload under way still lands.
+  env.routes[QUERY("u0")] = status("running", { progress: 30 });
+  upload.answer(json(201, { task_id: "t4" }));
+  await submitting;
+  await env.clock.advance(10000);
+  assert.deepEqual(states(), [...UNFINISHED.map((state, i) => [`U-${state}`, i === 0 ? "running" : state]), ["Submitting", "queued"]]);
+
+  // Nothing ended: nothing to clear, and no redraw.
+  const redrawsBefore = redraws;
+  env.lifecycle.clearEnded();
+  assert.equal(env.lifecycle.rows().length, 7);
+  assert.equal(redraws, redrawsBefore);
+});
+
+test("a cleared task's late answers change nothing, and a cleared failed PDF can be submitted again", async () => {
+  const query = held();
+  const env = await submitted({ [QUERY("t1")]: query.route, [CANCEL("t1")]: json(200, { state: "cancelled" }) });
+  await env.clock.advance(2000); // the query is under way
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  env.lifecycle.clearEnded();
+  query.answer(status("succeeded", { stage: "完成", progress: 100 }));
+  await env.clock.advance(10000);
+  assert.deepEqual(env.lifecycle.rows(), []);
+  assert.deepEqual(env.requests.filter((r) => r.includes("/files/")), []);
+
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("queued");
+  assert.equal((await env.lifecycle.submit(SOURCE)).taskId, "t2");
+  assert.deepEqual(env.status(), ["排队中"]);
+});
