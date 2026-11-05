@@ -1,5 +1,7 @@
-/* The "翻译任务" window: one row per task, updated after every poll, with a
- * "取消" button on rows that can be cancelled (no confirmation), a "重试"
+/* The "翻译任务" window: one row per task, updated after every poll and
+ * every second (for the elapsed time): title, stage, a progress bar with the
+ * percentage, the elapsed time (core.js), a short status word with its
+ * detail line in small type under it, and a "取消" button on rows that can be cancelled (no confirmation), a "重试"
  * button on failed and cancelled rows, a "继续挂回" button on rows whose
  * attaching failed, "打开译文", "打开双语" and "在库中显示" on rows whose
  * PDFs are attached, "清除已结束" (removes the done, failed and cancelled
@@ -19,13 +21,36 @@ const RESULT_BUTTONS = [
   ["showInLibrary", "在库中显示", (results) => Zotero.ZoteroTranslate.showInLibrary([results.mono, results.dual])],
 ];
 
+// How often the elapsed times are redrawn between polls.
+const TICK_MS = 1000;
+
+/** A new element of the window, with a class name. */
+function element(name, className) {
+  const el = document.createElementNS(XHTML, name);
+  if (className) {
+    el.className = className;
+  }
+  return el;
+}
+
+/** Set an element's text only when it changed. */
+function setText(el, text) {
+  if (el.textContent !== text) {
+    el.textContent = text;
+  }
+}
+
 function rowElement(key) {
   let tr = shownRows.get(key);
   if (!tr) {
     tr = document.createElementNS(XHTML, "tr");
-    for (let i = 0; i < 5; i++) {
-      tr.append(document.createElementNS(XHTML, "td"));
-    }
+    const progress = element("td", "progress");
+    const bar = element("progress");
+    bar.max = 100;
+    progress.append(bar, element("span", "percent"));
+    const status = element("td", "status");
+    status.append(element("div", "status-word"), element("div", "status-detail"));
+    tr.append(element("td", "title"), element("td", "stage"), progress, element("td", "elapsed"), status, element("td"));
     for (const [action, label] of [["cancel", "取消"], ["retry", "重试"], ["continueAttach", "继续挂回"]]) {
       const button = document.createElementNS(XHTML, "button");
       button.textContent = label;
@@ -64,11 +89,19 @@ function render() {
   document.getElementById("zotero-translate-clear-ended").disabled = !rows.some((row) => row.ended);
   for (const row of rows) {
     const tr = rowElement(row.key);
-    [row.title, row.stage, row.percent, row.status].forEach((text, i) => {
-      if (tr.children[i].textContent !== text) {
-        tr.children[i].textContent = text;
-      }
-    });
+    setText(tr.querySelector(".title"), row.title);
+    setText(tr.querySelector(".stage"), row.stage);
+    const bar = tr.querySelector("progress");
+    bar.hidden = row.progress == null;
+    if (row.progress != null && bar.value !== row.progress) {
+      bar.value = row.progress;
+    }
+    setText(tr.querySelector(".percent"), row.percent);
+    setText(tr.querySelector(".elapsed"), row.elapsed);
+    setText(tr.querySelector(".status-word"), row.status);
+    const detail = tr.querySelector(".status-detail");
+    setText(detail, row.detail);
+    detail.hidden = !row.detail;
     tr.querySelector('button[data-action="cancel"]').hidden = !row.canCancel;
     tr.querySelector('button[data-action="retry"]').hidden = !row.canRetry;
     tr.querySelector('button[data-action="continueAttach"]').hidden = !row.canContinue;
@@ -89,9 +122,15 @@ function render() {
   notices.hidden = lifecycle.notices.length === 0;
 }
 
+let tick = null;
+
 window.addEventListener("load", () => {
   document.getElementById("zotero-translate-clear-ended").addEventListener("click", () => lifecycle.clearEnded());
   lifecycle.listeners.add(render);
   render();
+  tick = setInterval(render, TICK_MS);
 });
-window.addEventListener("unload", () => lifecycle.listeners.delete(render));
+window.addEventListener("unload", () => {
+  clearInterval(tick);
+  lifecycle.listeners.delete(render);
+});
