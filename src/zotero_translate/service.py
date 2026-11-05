@@ -36,7 +36,8 @@ profile object: ``id`` (``"gemini"`` for the built-in one, else 12 hex
 digits), ``name``, ``builtin``, ``current`` (bool), ``tested`` (its last
 connection test succeeded, for its present settings; always true for
 Gemini), ``base_url``, ``model``; a user profile also has ``concurrency``,
-``request_timeout_seconds`` (null: the default 480), ``api_key`` (``{"set":
+``request_timeout_seconds`` (null: the default 480), ``stream`` (bool:
+streamed requests, M4 ticket 12; ``ZT_STREAM=1`` in its file), ``api_key`` (``{"set":
 true, "last4": "abcd"}``, never the key) and ``last_test`` (null, or
 ``{"result", "message", "seconds", "http_status", "tested_at"}``); Gemini
 has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
@@ -44,11 +45,12 @@ has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
 - ``GET /profiles`` -> ``{"current": id, "profiles": [Gemini, then the user
   profiles by name]}``; ``GET /profiles/{id}`` -> one profile object.
 - ``POST /profiles`` ``{"name", "base_url", "api_key", "model",
-  "concurrency"?, "request_timeout_seconds"?}`` -> ``201`` the new profile
-  (concurrency 1-256, default 16; timeout seconds up to 3600, or null).
+  "concurrency"?, "request_timeout_seconds"?, "stream"?}`` -> ``201`` the new profile
+  (concurrency 1-256, default 16; timeout seconds up to 3600, or null;
+  stream true or false, default false).
 - ``PUT /profiles/{id}`` with any of those fields -> ``200`` the profile; a
   field left out keeps its value (so does the key). A new address, key,
-  model or timeout makes it untested; if it was current, Gemini is current
+  model, timeout or stream setting makes it untested; if it was current, Gemini is current
   again (event 当前配置改回 Gemini).
 - ``DELETE /profiles/{id}`` ``{}`` -> ``200 {"deleted": id, "current": id}``;
   409 for Gemini and while an unfinished task recorded the profile.
@@ -59,8 +61,9 @@ has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
   that cannot be one; the service refuses such an address with 400 when a
   profile is saved), unreachable, unauthorized (HTTP 401, 403), model_not_found (HTTP 404, or a
   400 or 422 that names the model), timeout, unparseable, http_error (e.g.
-  429, 5xx). One request with the paper task's model, reasoning effort and
-  temperature, which must answer the JSON object ``{"ok": true}``
+  429, 5xx). One request with the paper task's model, reasoning effort,
+  temperature and stream setting (a stream that breaks off is
+  unparseable), which must answer the JSON object ``{"ok": true}``
   (``model_client.check_connection``). 409 for Gemini.
 - ``POST /profiles/{id}/apply`` ``{}`` -> ``200 {"current": id, "name"}``:
   the tasks submitted from now on use it; 409 unless it is tested. Gemini

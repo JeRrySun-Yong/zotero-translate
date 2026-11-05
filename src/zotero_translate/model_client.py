@@ -87,6 +87,19 @@ same address and API key, they are one endpoint and share one budget, of
 flash's concurrency setting; argon's own setting is ignored, and the log
 says so. The engine's own concurrency still comes from flash's setting.
 
+Streamed requests (M4 ticket 12): with ``settings.stream`` (a user
+profile's setting, ``ZT_STREAM=1``; off for the built-in Gemini, whose
+request bodies and cache keys stay as they were), the body asks for
+``"stream": true`` and the answer is the stream's content deltas, joined
+(``_streamed_content``); thinking deltas are not read. The endpoint reads
+the whole stream as it reads a plain body, so the request timeout, a
+cancel, a hedge's winner and closing the client end a stream in flight as
+they end any send. A stream that ends without a ``finish_reason`` broke off,
+and one with an ``event: error`` failed on the way; both are retried like
+an unparseable answer (recorded ``invalid_answer``).
+Why: Command Code's DeepSeek Fast answers a plain request that thinks
+longer than about 125 seconds with HTTP 524 (ticket 03).
+
 Closing a client cancels its sends in flight (a failed paper task does not
 wait for its algorithm requests to time out); they raise ``SendCancelled``.
 
@@ -414,12 +427,15 @@ class ModelClient:
         return self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
 
     def _body(self, messages: list[dict]) -> dict:
-        return {
+        body = {
             "model": self.settings.model,
             "messages": messages,
             "temperature": self.settings.temperature,
             "reasoning_effort": self.settings.reasoning_effort,
         }
+        if self.settings.stream:  # off: the body, and so its cache key, as before ticket 12
+            body["stream"] = True
+        return body
 
     def _send(
         self,
@@ -464,15 +480,91 @@ class ModelClient:
             raise ModelCallError(
                 f"管线模型拒绝了请求（HTTP {status_code}）" + self._body_excerpt(data)
             )
-        try:
-            content = json.loads(data)["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as e:
-            raise _RetryableError("无法解析管线模型的响应") from e
+        if self.settings.stream:
+            content = self._streamed_content(data)
+        else:
+            try:
+                content = json.loads(data)["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError) as e:
+                raise _RetryableError("无法解析管线模型的响应") from e
         if content is not None and not isinstance(content, str):  # e.g. an array or an object
             raise _RetryableError(f"管线模型回答的 content 不是文本（{type(content).__name__}）")
         if not content or not content.strip():
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
+
+    def _streamed_content(self, data: bytes):
+        """The answer of a streamed response: its server-sent events' content deltas, joined.
+
+        Each event's ``data`` is a chat completion chunk, up to ``data:
+        [DONE]``; comments (``:``) and other fields are skipped. Only
+        ``delta.content`` of the first choice counts: thinking deltas
+        (``reasoning``, ``reasoning_content``, ``reasoning_details``) are not
+        read. A stream with no ``finish_reason`` broke off before the answer
+        ended, and one whose ``finish_reason`` is ``error``, with an
+        ``error`` chunk, or with an ``event: error`` (whatever its data
+        holds, also after the answer finished) failed on the way: all are
+        retried. So is a chunk whose shape is not that of a chat completion
+        chunk (choices that are not a list of objects, a delta that is not an
+        object, a content that is not text): it cannot be read, like an
+        answer that does not parse, rather than end the request with a
+        ``TypeError``.
+        """
+        parts: list[str] = []
+        finish = None
+        done = False
+        unreadable = "无法解析管线模型的流式响应"
+        error_in_stream = "管线模型在流式回答中出错"
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise _RetryableError(unreadable) from e
+        for name, event in _sse_events(text):
+            if name == "error":
+                excerpt = self._body_excerpt(event.encode()) if event else ""
+                raise _RetryableError(error_in_stream + excerpt)
+            if done or event is None:
+                continue
+            if event == "[DONE]":
+                done = True
+                continue
+            try:
+                chunk = json.loads(event)
+            except ValueError as e:
+                raise _RetryableError(unreadable) from e
+            if not isinstance(chunk, dict):
+                raise _RetryableError(unreadable)
+            if "error" in chunk:
+                excerpt = self._body_excerpt(json.dumps(chunk["error"], ensure_ascii=False).encode())
+                raise _RetryableError(error_in_stream + excerpt)
+            choices = chunk.get("choices")
+            if choices is None:
+                choices = []
+            if not isinstance(choices, list):
+                raise _RetryableError(f"{unreadable}（choices 不是列表）")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise _RetryableError(f"{unreadable}（choice 不是对象）")
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta")
+                if delta is None:
+                    delta = {}
+                if not isinstance(delta, dict):
+                    raise _RetryableError(f"{unreadable}（delta 不是对象）")
+                content = delta.get("content")
+                if content is not None and not isinstance(content, str):
+                    raise _RetryableError(
+                        f"{unreadable}（content 不是文本：{type(content).__name__}）"
+                    )
+                if content:
+                    parts.append(content)
+                finish = choice.get("finish_reason") or finish
+        if finish is None:
+            raise _RetryableError("管线模型的流式回答在结束之前中断（没有 finish_reason）")
+        if finish == "error":
+            raise _RetryableError("管线模型的流式回答以出错结束（finish_reason 为 error）")
+        return "".join(parts)
 
     def _post(
         self,
@@ -555,6 +647,31 @@ class ModelClient:
     def close(self) -> None:
         """Cancel the endpoint's sends in flight and close it (also for a client sharing it)."""
         self.endpoint.close()
+
+
+_SSE_LINE_END = re.compile(r"\r\n|\r|\n")  # not str.splitlines: a JSON string may hold U+2028
+
+
+def _sse_events(text: str):
+    """The name and ``data`` of each server-sent event in ``text``, its ``data:`` lines joined.
+
+    ``data`` is None for an event without a ``data:`` line; ``name`` is ""
+    for an event without an ``event:`` field.
+    """
+    name = ""
+    lines: list[str] = []
+    for line in [*_SSE_LINE_END.split(text), ""]:  # the end of the body ends an event too
+        if not line:
+            if name or lines:
+                yield name, ("\n".join(lines) if lines else None)
+                name = ""
+                lines = []
+            continue
+        field, _, value = line.partition(":")
+        if field == "event":
+            name = value[1:] if value.startswith(" ") else value
+        elif field == "data":
+            lines.append(value[1:] if value.startswith(" ") else value)
 
 
 def _result_of(error: _RetryableError) -> str:
@@ -907,7 +1024,7 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
     """Send one small request with the paper task's parameters; tell the outcome.
 
     The body is built as for every paper task request (model, reasoning
-    effort, temperature: ``ModelClient._body``), and the answer's message
+    effort, temperature, streaming: ``ModelClient._body``), and the answer's message
     ``content`` must be the JSON object ``{"ok": true}``, fenced or not;
     a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
     is not read. One send: no retry, no cache, a timeout of at most

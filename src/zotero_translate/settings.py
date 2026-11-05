@@ -21,6 +21,12 @@ cannot change any of these settings: they are the built-in model profile
 such file for both roles, in ``DEFAULT_PROFILES_DIR``
 (``load_profile_settings``).
 
+``ZT_STREAM=1`` in an endpoint file (M4 ticket 12) makes its requests
+streamed (``ModelSettings.stream``); ``0`` or no line, as for Gemini's two
+files, leaves them as they were. It is a user profile's setting: Command
+Code's DeepSeek Fast answers a plain request that thinks longer than about
+125 seconds with HTTP 524. ``run`` reads it from the files it is given.
+
 Hedging (M3 ticket 15, ADR 0004) is on unless ``run`` or ``serve`` gets
 ``--no-hedging``: a flash send of a translation batch or a review that has
 run ``HEDGE_AFTER_SECONDS`` with no end gets a copy sent to argon. Test only:
@@ -92,6 +98,10 @@ class ModelSettings:
     # endpoint: together about a minute, the network outage of closure-02.
     connection_retry_seconds: tuple[float, ...] = (5.0, 15.0, 45.0)
     cache_dir: Path | None = None  # successful responses; None turns the cache off
+    # Streamed requests (M4 ticket 12, ``ZT_STREAM``): the body asks for an
+    # event stream, whose content deltas make the answer. Off for the
+    # built-in Gemini, whose request bodies (and cache keys) stay as they were.
+    stream: bool = False
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -241,6 +251,9 @@ def _endpoint_settings(
         timeout_seconds = _positive_seconds(values["ZT_REQUEST_TIMEOUT_SECONDS"])
         if timeout_seconds is None:
             raise SettingsError(f"环境文件 {env_file} 中的 ZT_REQUEST_TIMEOUT_SECONDS 不是正数")
+    stream = stream_setting(values.get("ZT_STREAM", ""))
+    if stream is None:
+        raise SettingsError(f"环境文件 {env_file} 中的 ZT_STREAM 要是 1 或 0")
     return ModelSettings(
         base_url=values["OPENAI_BASE_URL"].rstrip("/"),
         api_key=values["OPENAI_API_KEY"],
@@ -248,7 +261,13 @@ def _endpoint_settings(
         concurrency=concurrency,
         timeout_seconds=timeout_seconds,
         cache_dir=Path(cache_dir) if cache_dir else None,
+        stream=stream,
     )
+
+
+def stream_setting(text: str) -> bool | None:
+    """``ZT_STREAM`` of an endpoint file: ``1`` on, ``0`` or nothing off; None for any other value."""
+    return {"": False, "0": False, "1": True}.get(text.strip())
 
 
 def base_url_problem(base_url: str) -> str | None:

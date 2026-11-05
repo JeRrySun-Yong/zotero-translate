@@ -86,7 +86,8 @@ KIND_STAGES = {
 
 # Send results: an answer the caller accepted; a send cut off at the request
 # timeout; an HTTP error status; a network error before an answer; an answer
-# that was empty, did not parse or that the caller's check rejected; any other
+# that was empty, did not parse (a streamed answer that broke off before its
+# finish_reason included) or that the caller's check rejected; any other
 # error that ended the send (e.g. a closed client), which the caller then
 # sees unchanged; an answer from the cache (no send); a send of a hedged
 # request that ended after another send of it won (cancelled, or its answer

@@ -83,6 +83,40 @@ def test_a_task_submitted_after_apply_uses_the_profile_with_one_shared_budget(st
     assert KEY not in report_text and KEY not in log and KEY not in "\n".join(service.output)
 
 
+# M4 ticket 12: a profile with streaming on streams every request of its tasks.
+def test_a_task_of_a_streaming_profile_streams_every_request_and_records_them(start_service):
+    with FakeModel() as gemini, FakeModel() as deepseek:
+        service = start_service(gemini)
+        _apply_new_profile(service, deepseek, stream=True)
+        task_id = service.submit()
+        final = service.wait(task_id)
+        report = json.loads((service.data_dir / "tasks" / task_id / "report.json").read_text("utf-8"))
+
+    assert final["state"] == "succeeded", final["error"]
+    paper = _paper_requests(deepseek)
+    assert len(paper) > 2
+    assert all(r.body["stream"] is True for r in paper)
+    endpoints = report["model"]["endpoints"]
+    assert endpoints["flash"]["stream"] is endpoints["argon"]["stream"] is True
+    records = _records(service, task_id, 1)
+    sent = [r for r in records if r["result"] != "cache_hit"]
+    assert len(sent) == len(paper)
+    assert {(r["result"], r["http_status"]) for r in sent} == {("succeeded", 200)}
+
+
+def test_a_gemini_task_reports_streaming_off(start_service):
+    with FakeModel() as gemini:
+        service = start_service(gemini)
+        task_id = service.submit()
+        final = service.wait(task_id)
+        report = json.loads((service.data_dir / "tasks" / task_id / "report.json").read_text("utf-8"))
+
+    assert final["state"] == "succeeded", final["error"]
+    assert all("stream" not in r.body for r in gemini.requests)
+    endpoints = report["model"]["endpoints"]
+    assert endpoints["flash"]["stream"] is endpoints["argon"]["stream"] is False
+
+
 def test_tasks_keep_the_profile_they_were_submitted_with(tmp_path):
     """Applied while one task runs and one is queued: both, their requeue
     after a restart and their automatic rerun stay on Gemini; the task

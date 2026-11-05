@@ -143,6 +143,7 @@ class TaskReport:
                         "requests": c.request_count,
                         "timeouts": c.timeout_count,
                         "max_in_flight": c.max_in_flight,
+                        "stream": c.settings.stream,  # streamed requests (M4 ticket 12)
                     }
                     for name, c in endpoints.items()
                 },
