@@ -112,6 +112,9 @@ function render() {
   }
   document.getElementById("zotero-translate-empty").hidden = rows.length > 0;
   const notices = document.getElementById("zotero-translate-notices");
+  if ([...notices.children].map((li) => li.textContent).join("\n") === lifecycle.notices.join("\n")) {
+    return; // unchanged: the redraw every second leaves the list (and any selection in it) alone
+  }
   notices.replaceChildren(
     ...lifecycle.notices.map((text) => {
       const li = document.createElementNS(XHTML, "li");
