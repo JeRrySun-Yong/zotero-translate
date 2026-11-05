@@ -16,7 +16,10 @@ also set ``ZT_CONCURRENCY``, its limit of requests in flight; flash's limit
 comes from the ``--concurrency`` option. When both files name the same
 address and key, the two are one endpoint with one budget of flash's limit,
 and argon's ``ZT_CONCURRENCY`` is ignored (``PipelineModels``). The plugin
-cannot change any of these settings.
+cannot change any of these settings: they are the built-in model profile
+"Gemini". A user profile (ADR 0005, ``zotero_translate.profiles``) is one
+such file for both roles, in ``DEFAULT_PROFILES_DIR``
+(``load_profile_settings``).
 
 Hedging (M3 ticket 15, ADR 0004) is on unless ``run`` or ``serve`` gets
 ``--no-hedging``: a flash send of a translation batch or a review that has

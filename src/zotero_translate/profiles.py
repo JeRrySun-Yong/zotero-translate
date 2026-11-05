@@ -200,8 +200,10 @@ class ProfileStore:
             self._log(profile_id, "deleted", profile.name, None)
             return {"deleted": profile_id, "current": self.current()[0]}
 
-    def record_test(self, profile_id: str, check) -> dict:
-        """Save the outcome of a connection test (``model_client.ConnectionCheck``)."""
+    def record_test(self, profile_id: str, fingerprint: str, check) -> dict:
+        """Save the outcome of a connection test (``model_client.ConnectionCheck``)
+        of the settings with ``fingerprint``, which ``test_settings`` gave:
+        an edit while the test ran leaves the profile untested."""
         with self._lock:
             profile = self._existing(profile_id)
             state = self._state()
@@ -211,7 +213,7 @@ class ProfileStore:
                 "seconds": check.seconds,
                 "http_status": check.http_status,
                 "tested_at": time.time(),
-                "fingerprint": profile.fingerprint(),
+                "fingerprint": fingerprint,
             }
             self._save(state)
             self._log(profile_id, "tested", profile.name, check.message)
@@ -223,11 +225,13 @@ class ProfileStore:
                 "http_status": check.http_status,
             }
 
-    def test_settings(self, profile_id: str) -> ModelSettings:
+    def test_settings(self, profile_id: str) -> tuple[ModelSettings, str]:
+        """The settings a connection test of the profile uses, and their fingerprint."""
         with self._lock:
             if profile_id == BUILTIN_ID:
                 raise ProfileError(409, "内置配置 Gemini 不需要测试连接")
-            return self._existing(profile_id).model_settings()
+            profile = self._existing(profile_id)
+            return profile.model_settings(), profile.fingerprint()
 
     def apply(self, profile_id: str) -> dict:
         with self._lock:

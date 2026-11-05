@@ -320,7 +320,10 @@ def test_deleting_profiles(start_service, tmp_path):
     pause.mkdir()
     with FakeModel() as model:
         service = start_service(model, env={"ZT_TEST_PAUSE_AFTER_MARKER": str(pause)})
+        # Gemini is the service's start options: no edit, no delete, no test.
         assert _write(service, "DELETE", "/profiles/gemini").status_code == 409
+        assert _write(service, "PUT", "/profiles/gemini", {"name": "x"}).status_code == 409
+        assert _write(service, "POST", "/profiles/gemini/test").status_code == 409
 
         current = _create(service, model)
         assert _write(service, "POST", f"/profiles/{current['id']}/test").json()["ok"]

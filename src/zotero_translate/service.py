@@ -21,6 +21,66 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /tasks/{task_id}/files/mono`` and ``.../files/dual`` -> PDF
 - ``GET /tasks/{task_id}/files/terms`` -> the paper's term list as JSON
 - Unknown task ids return 404.
+- The task query also gives ``profile``, ``{"id", "name"}``: the model
+  profile the task recorded when it was submitted.
+
+Model profiles (M4 ticket 02, ADR 0005; ``zotero_translate.profiles``). A
+profile object: ``id`` (``"gemini"`` for the built-in one, else 12 hex
+digits), ``name``, ``builtin``, ``current`` (bool), ``tested`` (its last
+connection test succeeded, for its present settings; always true for
+Gemini), ``base_url``, ``model``; a user profile also has ``concurrency``,
+``request_timeout_seconds`` (null: the default 480), ``api_key`` (``{"set":
+true, "last4": "abcd"}``, never the key) and ``last_test`` (null, or
+``{"result", "message", "seconds", "http_status", "tested_at"}``); Gemini
+has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
+
+- ``GET /profiles`` -> ``{"current": id, "profiles": [Gemini, then the user
+  profiles by name]}``; ``GET /profiles/{id}`` -> one profile object.
+- ``POST /profiles`` ``{"name", "base_url", "api_key", "model",
+  "concurrency"?, "request_timeout_seconds"?}`` -> ``201`` the new profile
+  (concurrency 1-256, default 16; timeout seconds up to 3600, or null).
+- ``PUT /profiles/{id}`` with any of those fields -> ``200`` the profile; a
+  field left out keeps its value (so does the key). A new address, key,
+  model or timeout makes it untested; if it was current, Gemini is current
+  again (event 当前配置改回 Gemini).
+- ``DELETE /profiles/{id}`` ``{}`` -> ``200 {"deleted": id, "current": id}``;
+  409 for Gemini and while an unfinished task recorded the profile.
+- ``POST /profiles/{id}/test`` ``{}`` -> ``200 {"ok", "result", "message",
+  "seconds", "http_status"}`` once the test has run (it takes up to 60
+  seconds), whatever its outcome; ``result`` is one of succeeded,
+  unreachable, unauthorized (HTTP 401, 403), model_not_found (HTTP 404, or a
+  400 or 422 that names the model), timeout, unparseable, http_error (e.g.
+  429, 5xx). One request with the paper task's model, reasoning effort and
+  temperature, which must answer the JSON object ``{"ok": true}``
+  (``model_client.check_connection``). 409 for Gemini.
+- ``POST /profiles/{id}/apply`` ``{}`` -> ``200 {"current": id, "name"}``:
+  the tasks submitted from now on use it; 409 unless it is tested. Gemini
+  can always be applied.
+- Unknown profile ids return 404; a field that is missing, unknown or
+  invalid, 400 with ``error``. Every error answer is ``{"error": reason}``.
+
+Every profile request must name this service in its ``Host`` header
+(``127.0.0.1:<port>`` or ``localhost:<port>``), else 403: a page whose host
+name resolves to 127.0.0.1 cannot reach them. Every write (POST, PUT,
+DELETE) also needs the header ``X-Zotero-Translate: 1`` (else 403) and a
+JSON object body with ``Content-Type: application/json`` (else 415, or 400
+for a body that is not a JSON object): a web page cannot send such a
+request across origins without a CORS preflight, and the service answers
+every ``OPTIONS`` request with 403 and no ``Access-Control-*`` header.
+
+A task records the current profile when it is submitted (``task.json``:
+``profile_id``, ``profile_name``) and every attempt uses it, a requeue and
+an automatic rerun included: Gemini's attempts get the start options, a
+user profile's the profile's file (``--profile-file``), as it is when the
+attempt starts. Both roles of a user profile share its one endpoint and
+budget, with no hedging (``model_client.PipelineModels``). The current
+profile survives a restart (``<data_dir>/model-profiles.json``); when its
+file is gone, the current profile is Gemini again, with a log line. Profile
+events are logged as ``profile=<id> event=... name=... reason=...``:
+created (新建配置), edited (修改配置), deleted (删除配置), tested (测试连接,
+the outcome as reason), applied (应用配置), back to Gemini (当前配置改回
+Gemini). The profiles' files are in ``--profiles-dir``, by default
+``~/.config/zotero-translate/profiles`` (``ZT_PROFILES_DIR``).
 
 The service listens on 127.0.0.1 only and has no authentication. One service
 per data directory: it takes an exclusive lock on ``<data_dir>/service.lock``,
@@ -75,7 +135,8 @@ wrote its report (``zotero_translate.request_log``). The service writes
 one line per task event to standard output (the service log):
 submitted, started, interrupted, requeued, waiting for a rerun, rerun
 started, cancel accepted, cancelled, succeeded, failed, cleanup error,
-report dropped. No API key and no HTTP poll is logged.
+report dropped; and one line per model profile event (above). No API key
+and no HTTP poll is logged.
 
 A cancel is saved as accepted (event 接受取消); then the task's processes
 are reaped by marker, and only after all have exited does the task become
@@ -1232,8 +1293,9 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
                     return self._json(200, store.delete(rest[0], queue.profile_users(rest[0])))
                 if len(rest) == 2 and method == "POST" and rest[1] == "test":
                     # The request itself runs outside the store's lock.
-                    check = check_connection(store.test_settings(rest[0]))
-                    return self._json(200, store.record_test(rest[0], check))
+                    settings, fingerprint = store.test_settings(rest[0])
+                    check = check_connection(settings)
+                    return self._json(200, store.record_test(rest[0], fingerprint, check))
                 if len(rest) == 2 and method == "POST" and rest[1] == "apply":
                     return self._json(200, store.apply(rest[0]))
             except ProfileError as e:
