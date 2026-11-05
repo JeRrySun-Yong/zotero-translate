@@ -1,7 +1,9 @@
 /* The "翻译任务" window: one row per task, updated after every poll and
  * every second (for the elapsed time): title, stage, a progress bar with the
  * percentage, the elapsed time (core.js), a short status word with its
- * detail line in small type under it, and a "取消" button on rows that can be cancelled (no confirmation), a "重试"
+ * detail line in small type under it, and a "取消" button on rows that can be
+ * cancelled (the first press asks: it becomes "确认取消？" for a few seconds,
+ * lifecycle.js requestCancel), a "重试"
  * button on failed and cancelled rows, a "继续挂回" button on rows whose
  * attaching failed, "打开译文", "打开双语" and "在库中显示" on rows whose
  * PDFs are attached, "清除已结束" (removes the done, failed and cancelled
@@ -51,11 +53,15 @@ function rowElement(key) {
     const status = element("td", "status");
     status.append(element("div", "status-word"), element("div", "status-detail"));
     tr.append(element("td", "title"), element("td", "stage"), progress, element("td", "elapsed"), status, element("td", "buttons"));
-    for (const [action, label] of [["cancel", "取消"], ["retry", "重试"], ["continueAttach", "继续挂回"]]) {
+    for (const [action, label, method] of [
+      ["cancel", "取消", "requestCancel"],
+      ["retry", "重试", "retry"],
+      ["continueAttach", "继续挂回", "continueAttach"],
+    ]) {
       const button = document.createElementNS(XHTML, "button");
       button.textContent = label;
       button.dataset.action = action;
-      button.addEventListener("click", () => lifecycle[action](key));
+      button.addEventListener("click", () => lifecycle[method](key));
       tr.lastChild.append(button);
     }
     for (const [action, label, open] of RESULT_BUTTONS) {
@@ -102,7 +108,9 @@ function render() {
     const detail = tr.querySelector(".status-detail");
     setText(detail, row.detail);
     detail.hidden = !row.detail;
-    tr.querySelector('button[data-action="cancel"]').hidden = !row.canCancel;
+    const cancelButton = tr.querySelector('button[data-action="cancel"]');
+    cancelButton.hidden = !row.canCancel;
+    setText(cancelButton, row.confirmCancel ? "确认取消？" : "取消");
     tr.querySelector('button[data-action="retry"]').hidden = !row.canRetry;
     tr.querySelector('button[data-action="continueAttach"]').hidden = !row.canContinue;
     shownResults.set(row.key, row.results);

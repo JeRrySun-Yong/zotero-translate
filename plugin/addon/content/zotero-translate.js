@@ -1,9 +1,12 @@
-/* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
- * the "翻译任务" window (from the item menu and the Tools menu), the notice
+/* The translation plugin inside Zotero: the "翻译为中文" item menu entry
+ * (greyed with "（没有 PDF）" for a selection without a source PDF), the
+ * "翻译任务" window (from the item menu and the Tools menu), the notice
  * "已提交 N 篇" after a submission (a click opens the task window), the
  * notice when a task is done or fails (with
  * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
- * window), and the Zotero side of the task lifecycle
+ * window), the notice asking whether to translate a paper that already has
+ * a translation again ("已有译文" with "再翻译一次"), and the Zotero side of
+ * the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
  * PDFs, importing an output PDF as an attachment, the attachments'
  * identities, saving the tasks in a preference.
@@ -87,6 +90,10 @@ var ZoteroTranslate = {
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),
     });
+    this.menu = ZoteroTranslateItemMenu.createItemMenu({
+      sourcePdf: (item) => this.sourcePdf(item),
+      logError: (e) => Zotero.logError(e),
+    });
     this.lifecycle.start();
     for (const window of Zotero.getMainWindows()) {
       this.addToWindow(window);
@@ -116,7 +123,15 @@ var ZoteroTranslate = {
     itemTasksMenu.setAttribute("label", "翻译任务");
     itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
     itemPopup.append(itemMenu, itemTasksMenu);
-    itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
+    // Only the popup's own popupshowing/popuphidden events: a submenu's
+    // bubble up and must not close or replace this menu's source check.
+    this._menuDetach.set(
+      window,
+      this.menu.addToPopup(itemPopup, {
+        menu: () => doc.getElementById(this.ITEM_MENU_ID),
+        selection: () => window.ZoteroPane.getSelectedItems(),
+      }),
+    );
 
     const toolsMenu = doc.createXULElement("menuitem");
     toolsMenu.id = this.TOOLS_MENU_ID;
@@ -135,21 +150,21 @@ var ZoteroTranslate = {
   removeFromWindow(window) {
     window.removeEventListener("activate", this._onMainWindowActivate);
     this.notices.windowClosed(window);
+    this._menuDetach.get(window)?.();
+    this._menuDetach.delete(window);
     const doc = window.document;
-    doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
   },
 
-  // The entry shows for regular items (with or without a PDF) and for PDF
-  // attachments, with or without a parent item.
-  _onItemMenuShowing(event) {
-    const window = event.target.ownerGlobal;
-    const items = window.ZoteroPane.getSelectedItems();
-    const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
-    menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
-  },
+  // The entry shows for regular items and for attachments (with or without
+  // a parent item). A selection without a source PDF shows it greyed, saying
+  // so, instead of failing after the click (itemmenu.js).
+  menu: null,
+
+  // Main window -> the function that removes the item menu popup's listeners.
+  _menuDetach: new WeakMap(),
 
   /** Submit every selected item, one after another; the service runs them in
    *  turn. The task window does not open (the main window keeps the focus):
@@ -171,7 +186,14 @@ var ZoteroTranslate = {
     return this.lifecycle.submit(source);
   },
 
-  /** The item's source for the lifecycle, or why it has none (a string). */
+  /** The item's source for the lifecycle, or why it has none (a string).
+   *  `translated` tells the lifecycle that a translation output is already
+   *  there, so it asks before translating the paper again: one among a
+   *  regular item's attachments, or for a standalone PDF (whose outputs have
+   *  no link back to it) a task of this Zotero session that attached both
+   *  outputs. A task record removed by "清除已结束", and one of an earlier
+   *  session (ended tasks are not saved), are gone: such a standalone PDF is
+   *  translated again without the ask. */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
@@ -183,7 +205,20 @@ var ZoteroTranslate = {
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
+      translated: parent ? await this._hasTranslation(parent) : this.lifecycle.wasTranslated(source.id),
     };
+  },
+
+  /** Whether the item already has one of the plugin's translation outputs
+   *  among its attachments: the plugin's way of telling that the paper was
+   *  translated, also by an earlier Zotero session. A standalone PDF has no
+   *  such parent item: `_sourceOf` asks the lifecycle's task records
+   *  (`wasTranslated`) for it instead. */
+  async _hasTranslation(item) {
+    const attachments = await Zotero.Items.getAsync(item.getAttachments());
+    return attachments.some(
+      (attachment) => !attachment.deleted && ZoteroTranslateCore.isTranslationOutput(attachment.getField("title")),
+    );
   },
 
   /** The PDF to translate: the selected attachment itself, or the item's best
@@ -337,6 +372,9 @@ var ZoteroTranslate = {
     if (payload.outcome === "submitted") {
       return this._openSubmissionNotice(payload, dismissed);
     }
+    if (payload.outcome === "resubmit") {
+      return this._openResubmitNotice(payload, dismissed);
+    }
     const { outcome, row } = payload;
     const done = outcome === "done";
     const parent = Zotero.getMainWindow();
@@ -380,6 +418,57 @@ var ZoteroTranslate = {
         doc.defaultView.sizeToContent();
         Zotero.ProgressWindowSet.tile(doc.defaultView);
       }
+      doc.addEventListener("click", () => {
+        dismissed();
+        notice.close();
+      });
+    });
+    return {
+      parent,
+      raise: () => window?.focus(),
+      close: () => {
+        closed = true;
+        notice.close();
+      },
+    };
+  },
+
+  /** The 已有译文 notice (lifecycle.js submitBatch): "已有译文" with the
+   *  papers that already have a translation, "再翻译一次？" and a
+   *  "再翻译一次" link that submits them (lifecycle.resubmit); a click
+   *  anywhere else only closes it, so nothing is translated again without
+   *  that click. It stays until it is clicked, like the notices of ended
+   *  tasks. */
+  _openResubmitNotice({ titles, keys }, dismissed) {
+    const parent = Zotero.getMainWindow();
+    const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
+    let window = null; // once loaded
+    let closed = false;
+    notice.changeHeadline("已有译文");
+    const lines = titles.map((title) => new notice.ItemProgress("attachmentPDF", title));
+    for (const line of lines) {
+      line.setProgress(100);
+    }
+    notice.addDescription("再翻译一次？");
+    notice.show();
+    this._noticeDocument(lines[0]).then((doc) => {
+      if (!doc || closed) {
+        return;
+      }
+      window = doc.defaultView;
+      const link = doc.createXULElement("label");
+      link.setAttribute("value", "再翻译一次");
+      link.setAttribute("class", "zotero-text-link");
+      link.setAttribute("role", "link");
+      link.dataset.action = "resubmit";
+      Object.assign(link.style, { color: "LinkText", textDecoration: "underline", cursor: "pointer" });
+      link.addEventListener("click", () => ZoteroTranslate.lifecycle.resubmit(keys).catch((e) => Zotero.logError(e)));
+      const box = doc.createXULElement("hbox");
+      box.setAttribute("class", "zotero-progress-item-hbox");
+      box.append(link);
+      doc.getElementById("zotero-progress-text-box").append(box);
+      window.sizeToContent();
+      Zotero.ProgressWindowSet.tile(window);
       doc.addEventListener("click", () => {
         dismissed();
         notice.close();
