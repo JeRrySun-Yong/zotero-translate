@@ -4,6 +4,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTaskLifecycle } = require("../addon/content/lifecycle.js");
+const { createModelMenu } = require("../addon/content/model-menu.js");
 const { statusText } = require("../addon/content/core.js");
 
 const SERVICE = "http://127.0.0.1:8920";
@@ -350,6 +351,97 @@ test("a running task's profile is saved with it", async () => {
   const env = await submitted({ [QUERY("t1")]: status("running", { progress: 40, profile: PROFILE }) });
   await env.clock.advance(2000);
   assert.equal(JSON.parse(env.saved)[0].profile.id, PROFILE.id);
+});
+
+test("a task cancelled before its first query keeps the profile its submission answer named", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2", profile: PROFILE });
+      },
+      [CANCEL("t1")]: status("cancelled", { profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  // The submission's answer, not a query's: the task is cancelled at once.
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  assert.equal(env.lifecycle.rows()[0].profile, "DeepSeek");
+
+  await env.lifecycle.cancel(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(env.times(QUERY("t1")).length, 0);
+
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[1].get("profile"), PROFILE.id); // whatever profile is current by now
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+});
+
+test("a cancel answer records the profile when the submission answer had none", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: "t1" }); // a service whose submission answer names no profile
+      },
+      [CANCEL("t1")]: status("cancelled", { profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  assert.equal(env.lifecycle.tasks[0].profile, undefined);
+  await env.lifecycle.cancel(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+});
+
+test("a retry the service refuses shows its reason and keeps the task's profile", async () => {
+  const env = await submitted({
+    [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+    [UPLOAD]: async (options) =>
+      (await uploadFields(options)).get("profile")
+        ? json(409, { error: "这份配置还没有通过测试连接，不能用来提交" })
+        : json(201, { task_id: "t1", profile: PROFILE }),
+  });
+  await env.clock.advance(2000);
+  const [row] = env.lifecycle.rows();
+  await env.lifecycle.retry(row.key);
+  assert.deepEqual(env.status(), ["失败：翻译服务拒绝了提交：这份配置还没有通过测试连接，不能用来提交"]);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE); // no fallback to the current profile
+});
+
+const GEMINI = { id: "gemini", name: "Gemini", builtin: true, tested: true };
+const PROFILES = [GEMINI, { ...PROFILE, tested: true }];
+
+test("a switch made in the model menu is the profile the next submission records", async () => {
+  let current = { id: GEMINI.id, name: GEMINI.name };
+  const client = {
+    status: async () => ({ listing: { current: current.id, profiles: PROFILES } }),
+    apply: async (id) => {
+      current = { id, name: PROFILES.find((profile) => profile.id === id).name };
+      return { ok: true };
+    },
+  };
+  const menu = createModelMenu({ client });
+  let uploads = 0;
+  const env = environment({
+    routes: { [UPLOAD]: async () => json(201, { task_id: `t${++uploads}`, profile: current }) },
+  });
+  env.lifecycle.start();
+  await menu.refresh(); // the item menu's first opening
+  await env.lifecycle.submit(SOURCE);
+  await menu.switchTo(PROFILE.id); // one click in "切换模型"
+  await env.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "Second" });
+
+  assert.deepEqual(env.lifecycle.tasks.map((task) => task.profile), [
+    { id: GEMINI.id, name: GEMINI.name },
+    { id: PROFILE.id, name: PROFILE.name },
+  ]);
+  assert.deepEqual(env.lifecycle.rows().map((row) => row.profile), ["Gemini", "DeepSeek"]);
 });
 
 test("after Zotero restarts, saved tasks are queried again and still attached", async () => {

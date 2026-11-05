@@ -447,7 +447,10 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** Send the task's source PDF to the service address currently set. A
      *  retry names the profile its task recorded (`profile`), so it keeps
-     *  that profile whatever is current by then; a new task names none. */
+     *  that profile whatever is current by then; a new task names none. The
+     *  service's answer names the profile the task recorded, which is kept
+     *  from then on (also if the task is cancelled before its first query);
+     *  a refusal's reason is what the row shows. */
     async function upload(task) {
       Object.assign(task, {
         serviceUrl: serviceUrl(),
@@ -475,16 +478,24 @@ var ZoteroTranslateLifecycle = (() => {
         const body = Core.uploadRequest(await readSource(task), task.sourceFileName, task.profile?.id);
         const answer = await exchange(
           Core.serviceUrl(task.serviceUrl, "tasks"),
-          { method: "POST", headers: { "Content-Type": body.contentType }, body: body.body },
+          { method: "POST", headers: { "Content-Type": body.contentType }, body: body.body, bodyStatuses: [409, 422] },
           UPLOAD_LIMIT_MS,
-          readTaskId,
+          readSubmission,
         ).catch((e) => {
           throw e instanceof Unreachable ? new Error(`${e.message}（服务地址：${task.serviceUrl}）`) : e;
         });
         if (answer.status !== 201) {
-          throw new Error(`翻译服务拒绝了提交（HTTP ${answer.status}，服务地址：${task.serviceUrl}）`);
+          const reason = answer.body?.error;
+          throw new Error(
+            reason
+              ? `翻译服务拒绝了提交：${reason}`
+              : `翻译服务拒绝了提交（HTTP ${answer.status}，服务地址：${task.serviceUrl}）`,
+          );
         }
-        task.taskId = answer.body;
+        task.taskId = answer.body.taskId;
+        if (answer.body.profile) {
+          task.profile = answer.body.profile; // recorded even if the task is cancelled before any query
+        }
         setState(task, "queued");
       } catch (e) {
         setState(task, "failed");
@@ -566,7 +577,12 @@ var ZoteroTranslateLifecycle = (() => {
       }
       if ([200, 409, 404].includes(answer.status)) {
         setState(task, "cancelled");
-        Object.assign(task, { disconnectedSince: null, cleanupError: null });
+        Object.assign(task, {
+          disconnectedSince: null,
+          cleanupError: null,
+          // The cancel answer is the task's own too: it names the profile a retry keeps.
+          ...(answer.body?.profile ? { profile: answer.body.profile } : {}),
+        });
       } else if (answer.status === 503) {
         Object.assign(task, { disconnectedSince: null, cleanupError: answer.body.cleanup_error });
       } else {
@@ -716,12 +732,19 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    async function readTaskId(response) {
-      const { task_id: taskId } = await response.json();
-      if (typeof taskId !== "string") {
+    /** The answer to a submission: {taskId, profile} for 201 (`profile` is
+     *  null from a service that does not name it), {error} for a refusal
+     *  (409, 422), whose reason then shows on the row. */
+    async function readSubmission(response) {
+      const body = await response.json();
+      if (response.status !== 201) {
+        return { error: typeof body?.error === "string" ? body.error : null };
+      }
+      if (typeof body?.task_id !== "string") {
         throw new Error("没有任务号");
       }
-      return taskId;
+      const profile = body.profile && typeof body.profile.id === "string" ? body.profile : null;
+      return { taskId: body.task_id, profile };
     }
 
     /** The service's answer about a task; one without a state the plugin

@@ -37,15 +37,11 @@ var ZoteroTranslate = {
 
   // The task lifecycle; the task window reads its rows, notices and listeners.
   lifecycle: null,
-  // The service's model profiles as of the last item-menu opening (GET
-  // /profiles, via profileClient), or null while it cannot be reached (or
-  // has no profiles). The menu draws from it at once and asks again for
-  // every opening, so a change made in the settings page shows up.
-  profiles: null,
-  // Why there is no `profiles`, for the "切换模型" submenu's single grey
-  // item: "正在连接翻译服务…" until the first answer, then "翻译服务连不上"
-  // or "翻译服务版本太旧" ("" while there is a listing).
-  profilesProblem: "正在连接翻译服务…",
+  // The item menu's model profiles (model-menu.js): what the service last
+  // said, and the "切换模型" switch. The menu draws from it at once at every
+  // opening, then asks the service again, so a change made in the settings
+  // page shows up. Answers to asks older than the newest are dropped.
+  modelMenu: null,
   profileClient: null,
   // Appended to the item menu's label after the profile's name ("" normally;
   // for the states of the selected items, e.g. "（没有 PDF）"). Set it, then
@@ -73,6 +69,17 @@ var ZoteroTranslate = {
         return controller.signal;
       },
     });
+    this.modelMenu = ZoteroTranslateModelMenu.createModelMenu({
+      client: this.profileClient,
+      onChange: () => {
+        for (const window of Zotero.getMainWindows()) {
+          this._drawModelMenu(window);
+        }
+      },
+    });
+    // Read the profiles now, so the first opening of the item menu already
+    // names the current profile (the first opening also asks again).
+    this.modelMenu.refresh().catch((e) => Zotero.logError(e));
     this.notices = ZoteroTranslateNotices.createNotices({
       // With no main window open (macOS: Zotero runs on), notices wait for the next one.
       isActive: () => Zotero.getMainWindow() != null && Services.focus.activeWindow != null,
@@ -193,23 +200,13 @@ var ZoteroTranslate = {
     const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
     menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
     ZoteroTranslate._drawModelMenu(window);
-    ZoteroTranslate._readProfiles(window).catch((e) => Zotero.logError(e));
+    ZoteroTranslate._readProfiles().catch((e) => Zotero.logError(e));
   },
 
-  /** Ask the service for its model profiles and draw the menu with the answer. */
-  async _readProfiles(window) {
-    const found = await this.profileClient.status();
-    if (!window.document.getElementById(this.ITEM_MENU_ID)) {
-      return; // the window closed, or the plugin shut down, meanwhile
-    }
-    if (found.listing) {
-      this.profiles = found.listing;
-      this.profilesProblem = "";
-    } else {
-      this.profiles = null;
-      this.profilesProblem = found.noProfiles ? "翻译服务版本太旧" : "翻译服务连不上";
-    }
-    this._drawModelMenu(window);
+  /** Ask the service for its model profiles; its answer redraws the menu
+   *  (modelMenu's onChange), unless a newer ask or a switch has replaced it. */
+  async _readProfiles() {
+    await this.modelMenu.refresh();
   },
 
   /** The item menu's label with the current profile's name (core.itemMenuLabel)
@@ -224,9 +221,10 @@ var ZoteroTranslate = {
       return;
     }
     const Core = ZoteroTranslateCore;
-    const current = this.profiles && this.profiles.profiles.find((profile) => profile.id === this.profiles.current);
+    const { listing, problem } = this.modelMenu.state();
+    const current = listing && listing.profiles.find((profile) => profile.id === listing.current);
     itemMenu.setAttribute("label", Core.itemMenuLabel(current ? current.name : "", this.itemMenuSuffix));
-    const items = Core.modelMenuItems(this.profiles, this.profilesProblem || undefined);
+    const items = Core.modelMenuItems(listing, problem || undefined);
     const signature = JSON.stringify(items);
     if (popup.dataset.items === signature) {
       return;
@@ -249,18 +247,12 @@ var ZoteroTranslate = {
 
   /** A "切换模型" click: make the profile current. One request; only the
    *  papers submitted afterwards use it. The service refuses a profile whose
-   *  connection test has not passed. */
+   *  connection test has not passed. Answers already on their way cannot
+   *  undo the switch (model-menu.js), so the menu shows the new profile. */
   async switchToProfile(id) {
-    const outcome = await this.profileClient.apply(id);
+    const outcome = await this.modelMenu.switchTo(id);
     if (!outcome.ok) {
       this._tell(`没有切换模型：${outcome.error}`);
-      return;
-    }
-    if (this.profiles) {
-      this.profiles = { ...this.profiles, current: id };
-    }
-    for (const window of Zotero.getMainWindows()) {
-      this._drawModelMenu(window);
     }
   },
 
