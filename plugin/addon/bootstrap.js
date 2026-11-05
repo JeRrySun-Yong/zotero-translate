@@ -12,6 +12,7 @@ async function startup({ id, rootURI }) {
   ]);
   Services.scriptloader.loadSubScript(rootURI + "content/core.js");
   Services.scriptloader.loadSubScript(rootURI + "content/lifecycle.js");
+  Services.scriptloader.loadSubScript(rootURI + "content/notices.js");
   Services.scriptloader.loadSubScript(rootURI + "content/zotero-translate.js");
   ZoteroTranslate.startup({ id, rootURI });
 }

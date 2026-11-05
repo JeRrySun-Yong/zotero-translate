@@ -67,6 +67,14 @@
  *   null; write the identity on an attachment; the attachment at the target
  *   with no identity, that title, added at or after the clock time `since`, or null;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
+ * - announce({outcome, row}): tell the user, outside the task window, that a
+ *   task has just ended: outcome "done" (both PDFs attached; the row's
+ *   `results` name them) or "failed" (failed or attach_failed; the row's
+ *   status has the reason). Once per change into that state, after the
+ *   change is saved: a state restored after a restart is no change, so no
+ *   notice comes again (done and failed tasks are not even saved). A state
+ *   that restoring itself changes (an upload under way at quit fails) is
+ *   one, measured from the saved state. Never after stop();
  * - debug(message), logError(error): logging.
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript after
@@ -108,6 +116,8 @@ var ZoteroTranslateLifecycle = (() => {
   const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
   // States whose rows offer "重试".
   const RETRYABLE_STATES = ["failed", "cancelled"];
+  // States announced when a task changes into them -> the notice's outcome.
+  const ANNOUNCED_OUTCOMES = { done: "done", failed: "failed", attach_failed: "failed" };
   // Task fields saved for restarts.
   const SAVED_FIELDS = [
     "sourceItemID",
@@ -139,12 +149,15 @@ var ZoteroTranslateLifecycle = (() => {
     importAttachment,
     attachments,
     store,
+    announce,
     debug,
     logError,
   }) {
     let nextKey = 1;
     let savedValue = null;
     let started = false;
+    // Task key -> the task's state when it was last looked at for a notice.
+    const announcedStates = new Map();
     // Task key -> the timer of the task's next operation. A task's next
     // operation is set only when its current one has finished, so a task
     // never has two operations at once; a cancel ends the current one first.
@@ -269,15 +282,22 @@ var ZoteroTranslateLifecycle = (() => {
       /** Rows for the task window; `key` identifies the task for "重试", "取消" and "继续挂回". */
       rows() {
         const now = clock.now();
-        return lifecycle.tasks.map((task) => ({
-          ...Core.taskRow(task, now),
-          key: task.key,
-          canRetry: RETRYABLE_STATES.includes(task.state),
-          canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
-          canContinue: task.state === "attach_failed",
-        }));
+        return lifecycle.tasks.map((task) => rowOf(task, now));
       },
     };
+
+    /** A task's row; `results` ({mono, dual}: the two attachments) only once
+     *  both PDFs are attached, for "打开译文", "打开双语" and "在库中显示". */
+    function rowOf(task, now) {
+      return {
+        ...Core.taskRow(task, now),
+        key: task.key,
+        canRetry: RETRYABLE_STATES.includes(task.state),
+        canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
+        canContinue: task.state === "attach_failed",
+        results: task.state === "done" ? { mono: task.attached.mono, dual: task.attached.dual } : null,
+      };
+    }
 
     /** A source PDF with an unfinished task is not submitted again; the notice says so. */
     function skippedAsActive(sourceItemID, title) {
@@ -693,6 +713,7 @@ var ZoteroTranslateLifecycle = (() => {
         key: nextKey++,
       }));
       lifecycle.tasks.forEach((task, i) => {
+        announcedStates.set(task.key, task.state); // as saved: no notice for it
         if (task.state === "submitting") {
           fail(task, "提交未完成，请重试");
         } else if (task.state === "attaching" && !saved[i].attached) {
@@ -700,6 +721,7 @@ var ZoteroTranslateLifecycle = (() => {
         }
       });
       saveTasks();
+      announceEnded();
     }
 
     /** Save the unfinished tasks, when they change. */
@@ -714,8 +736,32 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** Announce each task whose state has changed into done, failed or
+     *  attach_failed since it was last looked at; called after saving.
+     *  Nothing after stop(): a request that comes back once the plugin is
+     *  shut down brings no notice. */
+    function announceEnded() {
+      if (!started) {
+        return;
+      }
+      const now = clock.now();
+      for (const task of lifecycle.tasks) {
+        const before = announcedStates.get(task.key);
+        announcedStates.set(task.key, task.state);
+        const outcome = ANNOUNCED_OUTCOMES[task.state];
+        if (outcome && before !== task.state) {
+          try {
+            announce({ outcome, row: rowOf(task, now) });
+          } catch (e) {
+            logError(e);
+          }
+        }
+      }
+    }
+
     function changed() {
       saveTasks();
+      announceEnded();
       for (const listener of lifecycle.listeners) {
         try {
           listener();
