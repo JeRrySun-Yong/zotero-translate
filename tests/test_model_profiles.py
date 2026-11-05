@@ -17,6 +17,7 @@ import stat
 import httpx
 import pytest
 
+from tests.conftest import EXCERPT
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FakeModel
@@ -347,3 +348,69 @@ def test_deleting_profiles(start_service, tmp_path):
         assert _write(service, "DELETE", f"/profiles/{current['id']}").status_code == 200
         assert _profiles(service)["current"] == "gemini"
         assert [p["id"] for p in _profiles(service)["profiles"]] == ["gemini"]
+
+
+@pytest.mark.parametrize("fault", ["200_echo", "400_echo"])
+def test_a_key_the_endpoint_echoes_is_redacted(start_service, fault):
+    """An endpoint that echoes the request's Authorization header, in an
+    answer or an error, gets no key into the answer, the saved test result
+    or the event log."""
+    with FakeModel() as gemini, FakeModel() as deepseek:
+        deepseek.inject_error(fault, kind="connection_test")
+        service = start_service(gemini)
+        profile = _create(service, deepseek)
+        response = _write(service, "POST", f"/profiles/{profile['id']}/test")
+        listing = service.http.get("/profiles").text
+        [echoed] = deepseek.requests
+        assert echoed.fault == fault
+
+    assert response.status_code == 200, response.text
+    assert not response.json()["ok"]
+    assert "redacted" in response.json()["message"]  # the echo is there, without the key
+    state = (service.data_dir / "model-profiles.json").read_text("utf-8")
+    for text in (response.text, listing, state, "\n".join(service.output)):
+        assert KEY not in text
+
+
+def _submit(service, profile: str | None = None) -> httpx.Response:
+    data = {"filename": "paper.pdf", **({"profile": profile} if profile is not None else {})}
+    return service.http.post(
+        "/tasks", files={"file": ("paper.pdf", EXCERPT.read_bytes(), "application/pdf")}, data=data
+    )
+
+
+def test_a_submission_may_name_its_profile(start_service, tmp_path):
+    """A retry resubmits the paper with the profile of the failed task, whatever is current."""
+    pause = tmp_path / "pause"
+    pause.mkdir()
+    with FakeModel() as gemini, FakeModel() as deepseek:
+        # No task gets past its process marker: no paper runs.
+        service = start_service(gemini, env={"ZT_TEST_PAUSE_AFTER_MARKER": str(pause)})
+        tested = _create(service, deepseek)
+        assert _write(service, "POST", f"/profiles/{tested['id']}/test").json()["ok"]
+        untested = _create(service, deepseek, name="DeepSeek Fast")
+
+        named = _submit(service, tested["id"])  # Gemini is current
+        assert named.status_code == 201, named.text
+        assert service.status(named.json()["task_id"])["profile"] == {"id": tested["id"], "name": "DeepSeek"}
+
+        assert _write(service, "POST", f"/profiles/{tested['id']}/apply").status_code == 200
+        gemini_named = _submit(service, "gemini")
+        assert service.status(gemini_named.json()["task_id"])["profile"] == {"id": "gemini", "name": "Gemini"}
+        current = _submit(service)
+        assert service.status(current.json()["task_id"])["profile"]["id"] == tested["id"]
+
+        refused = {
+            "untested": _submit(service, untested["id"]),
+            "unknown": _submit(service, "0123456789ab"),
+            "malformed": _submit(service, "../model"),
+        }
+        tasks = list((service.data_dir / "tasks").iterdir())
+
+    assert {name: r.status_code for name, r in refused.items()} == {
+        "untested": 409,
+        "unknown": 422,
+        "malformed": 422,
+    }
+    assert all(r.json()["error"] for r in refused.values())
+    assert len(tasks) == 3  # a refused submission leaves no task behind

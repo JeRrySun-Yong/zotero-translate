@@ -13,7 +13,8 @@ Test fixture only. It can:
   normal answer a few bytes at a time over ``slow_body_seconds``; "400"
   answers with ``REJECTION_BODY``, a JSON error spread over several lines
   and longer than 200 characters; "400_echo" answers with an error that
-  echoes the request's Authorization header, key included;
+  echoes the request's Authorization header, key included; "200_echo"
+  answers 200 with content (not JSON) that echoes it too;
 - inject a delay and count the maximum number of requests in flight;
 - keep connections open between requests (``keep_alive``, HTTP/1.1), so
   that a client reuses them; each request records its client's port;
@@ -137,6 +138,7 @@ _ERRORS = {
     "slow",
     "empty",
     "invalid_json",
+    "200_echo",
 }
 HANG_SECONDS = 3600.0  # how long "timeout" and "hang_after_headers" hold a connection open
 
@@ -226,7 +228,7 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "404", "timeout",
+        ``error`` is one of: "500", "429", "400", "400_echo", "200_echo", "401", "403", "404", "timeout",
         "hang_after_headers", "slow", "empty", "invalid_json".
         """
         assert error in _ERRORS, error
@@ -329,6 +331,8 @@ class FakeModel:
                 content = ""
             elif fault == "invalid_json":
                 content = "this is not json {"
+            elif fault == "200_echo":
+                content = f"not json; you sent {handler.headers.get('Authorization')}"
             else:
                 content = self._responders[kind](body)
             payload = _completion(body.get("model", ""), content)
