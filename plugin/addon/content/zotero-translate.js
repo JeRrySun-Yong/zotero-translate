@@ -273,8 +273,20 @@ var ZoteroTranslate = {
    *  progress window) for a task that has just ended (lifecycle.js,
    *  `announce`): "翻译完成" with "打开译文", "打开双语" and "在库中显示",
    *  or "翻译失败" with the reason. It stays until it is clicked: a click on
-   *  an action runs it, and any click closes the notice. */
-  announce({ outcome, row }) {
+   *  an action runs it, and any click closes the notice. While Zotero is
+   *  not the active application, the notice waits for the main window to be
+   *  activated: on macOS a notice opened in the background goes behind the
+   *  main window and is never seen. */
+  announce(notice) {
+    const window = Zotero.getMainWindow();
+    if (window && !Services.focus.activeWindow) {
+      window.addEventListener("activate", () => this._showNotice(notice), { once: true });
+    } else {
+      this._showNotice(notice);
+    }
+  },
+
+  _showNotice({ outcome, row }) {
     const done = outcome === "done";
     const notice = new Zotero.ProgressWindow({ closeOnClick: false });
     notice.changeHeadline(done ? "翻译完成" : "翻译失败");
