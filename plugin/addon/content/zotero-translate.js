@@ -36,6 +36,11 @@ var ZoteroTranslate = {
       src: "content/preferences.xhtml",
       label: "中文翻译",
     });
+    this.notices = ZoteroTranslateNotices.createNotices({
+      // No main window: the notice opens without one (Zotero shows it on top).
+      isActive: () => !Zotero.getMainWindow() || Services.focus.activeWindow != null,
+      open: (payload, dismissed) => this._openNotice(payload, dismissed),
+    });
     this.lifecycle = ZoteroTranslateLifecycle.createTaskLifecycle({
       fetch: (url, options) => fetch(url, options),
       clock: {
@@ -84,7 +89,7 @@ var ZoteroTranslate = {
 
   shutdown() {
     this.lifecycle.stop();
-    this._closeNotices();
+    this.notices.clear();
     Services.wm.getMostRecentWindow(this.TASK_WINDOW_TYPE)?.close();
     for (const window of Zotero.getMainWindows()) {
       this.removeFromWindow(window);
@@ -107,11 +112,14 @@ var ZoteroTranslate = {
     toolsMenu.setAttribute("label", "翻译任务");
     toolsMenu.addEventListener("command", () => this.openTaskWindow(window));
     doc.getElementById("menu_ToolsPopup").append(toolsMenu);
-    window.addEventListener("activate", this._raiseNotices);
+    window.addEventListener("activate", this._onMainWindowActivate);
   },
 
+  /** The main window closes (or the plugin shuts down): its listeners go,
+   *  and so do all notices (their windows close with the main window). */
   removeFromWindow(window) {
-    window.removeEventListener("activate", this._raiseNotices);
+    window.removeEventListener("activate", this._onMainWindowActivate);
+    this.notices.clear();
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
@@ -281,41 +289,29 @@ var ZoteroTranslate = {
    *  On macOS a progress window goes behind the main window when it opens
    *  while Zotero is in the background, and again whenever Zotero comes back
    *  to the front; Zotero's own ones close within seconds, these do not. So
-   *  a notice that comes while Zotero is in the background waits, and each
-   *  time the main window is activated, every notice still to be seen is
-   *  opened again, in front (`_raiseNotices`). */
+   *  `notices` (notices.js) keeps the notices still to be seen: one that
+   *  comes while Zotero is in the background waits for the main window to be
+   *  activated, and each activation raises the open ones (focus() on the
+   *  notice's window brings it to the front and leaves the main window
+   *  active). Each notice's window is opened once. */
   announce(payload) {
-    const entry = { payload, notice: null };
-    this._notices.add(entry);
-    if (!Zotero.getMainWindow() || Services.focus.activeWindow) {
-      this._showNotice(entry);
-    }
+    this.notices.announce(payload);
   },
 
-  // The notices still to be seen: {payload, notice (the ProgressWindow
-  // showing it, or null while it waits for Zotero to come to the front)}.
-  _notices: new Set(),
+  // The notices still to be seen (notices.js); made in startup().
+  notices: null,
 
-  /** The main window was activated: open the notices again, in front. */
-  _raiseNotices() {
-    for (const entry of ZoteroTranslate._notices) {
-      entry.notice?.close();
-      ZoteroTranslate._showNotice(entry);
-    }
+  /** The main window's "activate" listener. */
+  _onMainWindowActivate() {
+    ZoteroTranslate.notices.activated();
   },
 
-  _closeNotices() {
-    for (const entry of this._notices) {
-      entry.notice?.close();
-    }
-    this._notices.clear();
-  },
-
-  _showNotice(entry) {
-    const { outcome, row } = entry.payload;
+  /** Open a notice's window (for notices.js): {raise(), close()}. A click
+   *  on it calls `dismissed` and closes it. */
+  _openNotice({ outcome, row }, dismissed) {
     const done = outcome === "done";
     const notice = new Zotero.ProgressWindow({ closeOnClick: false });
-    entry.notice = notice;
+    let window = null; // once loaded
     notice.changeHeadline(done ? "翻译完成" : "翻译失败");
     const line = new notice.ItemProgress("attachmentPDF", row.title);
     if (done) {
@@ -326,10 +322,12 @@ var ZoteroTranslate = {
     notice.addDescription(row.status);
     notice.show();
     const actions = done ? this._resultActions(row.results) : [];
+    let closed = false;
     this._noticeDocument(line).then((doc) => {
-      if (!doc || entry.notice !== notice) {
-        return; // not loaded, or already closed and opened again
+      if (!doc || closed) {
+        return;
       }
+      window = doc.defaultView;
       if (actions.length) {
         const box = doc.createXULElement("hbox");
         box.setAttribute("class", "zotero-progress-item-hbox");
@@ -353,10 +351,17 @@ var ZoteroTranslate = {
         Zotero.ProgressWindowSet.tile(doc.defaultView);
       }
       doc.addEventListener("click", () => {
-        this._notices.delete(entry);
+        dismissed();
         notice.close();
       });
     });
+    return {
+      raise: () => window?.focus(),
+      close: () => {
+        closed = true;
+        notice.close();
+      },
+    };
   },
 
   /** "打开译文", "打开双语" and "在库中显示" for a done task's two attachments, {mono, dual}. */
