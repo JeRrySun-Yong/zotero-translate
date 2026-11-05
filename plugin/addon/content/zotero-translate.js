@@ -84,6 +84,7 @@ var ZoteroTranslate = {
 
   shutdown() {
     this.lifecycle.stop();
+    this._closeNotices();
     Services.wm.getMostRecentWindow(this.TASK_WINDOW_TYPE)?.close();
     for (const window of Zotero.getMainWindows()) {
       this.removeFromWindow(window);
@@ -106,9 +107,11 @@ var ZoteroTranslate = {
     toolsMenu.setAttribute("label", "翻译任务");
     toolsMenu.addEventListener("command", () => this.openTaskWindow(window));
     doc.getElementById("menu_ToolsPopup").append(toolsMenu);
+    window.addEventListener("activate", this._raiseNotices);
   },
 
   removeFromWindow(window) {
+    window.removeEventListener("activate", this._raiseNotices);
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
@@ -273,22 +276,46 @@ var ZoteroTranslate = {
    *  progress window) for a task that has just ended (lifecycle.js,
    *  `announce`): "翻译完成" with "打开译文", "打开双语" and "在库中显示",
    *  or "翻译失败" with the reason. It stays until it is clicked: a click on
-   *  an action runs it, and any click closes the notice. While Zotero is
-   *  not the active application, the notice waits for the main window to be
-   *  activated: on macOS a notice opened in the background goes behind the
-   *  main window and is never seen. */
-  announce(notice) {
-    const window = Zotero.getMainWindow();
-    if (window && !Services.focus.activeWindow) {
-      window.addEventListener("activate", () => this._showNotice(notice), { once: true });
-    } else {
-      this._showNotice(notice);
+   *  an action runs it, and any click closes the notice.
+   *
+   *  On macOS a progress window goes behind the main window when it opens
+   *  while Zotero is in the background, and again whenever Zotero comes back
+   *  to the front; Zotero's own ones close within seconds, these do not. So
+   *  a notice that comes while Zotero is in the background waits, and each
+   *  time the main window is activated, every notice still to be seen is
+   *  opened again, in front (`_raiseNotices`). */
+  announce(payload) {
+    const entry = { payload, notice: null };
+    this._notices.add(entry);
+    if (!Zotero.getMainWindow() || Services.focus.activeWindow) {
+      this._showNotice(entry);
     }
   },
 
-  _showNotice({ outcome, row }) {
+  // The notices still to be seen: {payload, notice (the ProgressWindow
+  // showing it, or null while it waits for Zotero to come to the front)}.
+  _notices: new Set(),
+
+  /** The main window was activated: open the notices again, in front. */
+  _raiseNotices() {
+    for (const entry of ZoteroTranslate._notices) {
+      entry.notice?.close();
+      ZoteroTranslate._showNotice(entry);
+    }
+  },
+
+  _closeNotices() {
+    for (const entry of this._notices) {
+      entry.notice?.close();
+    }
+    this._notices.clear();
+  },
+
+  _showNotice(entry) {
+    const { outcome, row } = entry.payload;
     const done = outcome === "done";
     const notice = new Zotero.ProgressWindow({ closeOnClick: false });
+    entry.notice = notice;
     notice.changeHeadline(done ? "翻译完成" : "翻译失败");
     const line = new notice.ItemProgress("attachmentPDF", row.title);
     if (done) {
@@ -300,8 +327,8 @@ var ZoteroTranslate = {
     notice.show();
     const actions = done ? this._resultActions(row.results) : [];
     this._noticeDocument(line).then((doc) => {
-      if (!doc) {
-        return;
+      if (!doc || entry.notice !== notice) {
+        return; // not loaded, or already closed and opened again
       }
       if (actions.length) {
         const box = doc.createXULElement("hbox");
@@ -312,7 +339,12 @@ var ZoteroTranslate = {
           link.setAttribute("class", "zotero-text-link");
           link.setAttribute("role", "link");
           link.dataset.action = label;
-          link.style.marginInlineEnd = "12px";
+          Object.assign(link.style, {
+            marginInlineEnd: "12px",
+            color: "LinkText",
+            textDecoration: "underline",
+            cursor: "pointer",
+          });
           link.addEventListener("click", () => action().catch((e) => Zotero.logError(e)));
           box.append(link);
         }
@@ -320,7 +352,10 @@ var ZoteroTranslate = {
         doc.defaultView.sizeToContent();
         Zotero.ProgressWindowSet.tile(doc.defaultView);
       }
-      doc.addEventListener("click", () => notice.close());
+      doc.addEventListener("click", () => {
+        this._notices.delete(entry);
+        notice.close();
+      });
     });
   },
 
