@@ -1,11 +1,14 @@
 /* The translation plugin inside Zotero: the item menu entries ("翻译为中文
- * （<current model profile>）", the "切换模型" submenu that makes a tested
- * profile current in one click, and "翻译任务"), the "翻译任务" window (from
+ * （<current model profile>）", greyed with "（没有 PDF）" for a selection
+ * without a source PDF, the "切换模型" submenu that makes a tested profile
+ * current in one click, and "翻译任务"), the "翻译任务" window (from
  * the item menu and the Tools menu), the notice
  * "已提交 N 篇" after a submission (a click opens the task window), the
  * notice when a task is done or fails (with
  * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
- * window), and the Zotero side of the task lifecycle
+ * window), the notice asking whether to translate a paper that already has
+ * a translation again ("已有译文" with "再翻译一次"), and the Zotero side of
+ * the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
  * PDFs, importing an output PDF as an attachment, the attachments'
  * identities, saving the tasks in a preference.
@@ -43,10 +46,6 @@ var ZoteroTranslate = {
   // page shows up. Answers to asks older than the newest are dropped.
   modelMenu: null,
   profileClient: null,
-  // Appended to the item menu's label after the profile's name ("" normally;
-  // for the states of the selected items, e.g. "（没有 PDF）"). Set it, then
-  // _drawModelMenu(window) redraws the label.
-  itemMenuSuffix: "",
 
   startup({ id }) {
     Zotero.ZoteroTranslate = this;
@@ -125,6 +124,10 @@ var ZoteroTranslate = {
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),
     });
+    this.menu = ZoteroTranslateItemMenu.createItemMenu({
+      sourcePdf: (item) => this.sourcePdf(item),
+      logError: (e) => Zotero.logError(e),
+    });
     this.lifecycle.start();
     for (const window of Zotero.getMainWindows()) {
       this.addToWindow(window);
@@ -162,7 +165,18 @@ var ZoteroTranslate = {
     itemTasksMenu.setAttribute("label", "翻译任务");
     itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
     itemPopup.append(itemMenu, modelMenu, itemTasksMenu);
+    // Only the popup's own popupshowing/popuphidden events: a submenu's
+    // bubble up and must not close or replace this menu's source check.
+    const detachItemMenu = this.menu.addToPopup(itemPopup, {
+      menu: () => doc.getElementById(this.ITEM_MENU_ID),
+      selection: () => window.ZoteroPane.getSelectedItems(),
+      label: () => this._itemMenuLabel(),
+    });
     itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
+    this._menuDetach.set(window, () => {
+      detachItemMenu();
+      itemPopup.removeEventListener("popupshowing", this._onItemMenuShowing);
+    });
 
     const toolsMenu = doc.createXULElement("menuitem");
     toolsMenu.id = this.TOOLS_MENU_ID;
@@ -181,25 +195,33 @@ var ZoteroTranslate = {
   removeFromWindow(window) {
     window.removeEventListener("activate", this._onMainWindowActivate);
     this.notices.windowClosed(window);
+    this._menuDetach.get(window)?.();
+    this._menuDetach.delete(window);
     const doc = window.document;
-    doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_MODEL_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
   },
 
-  // The entry shows for regular items (with or without a PDF) and for PDF
-  // attachments, with or without a parent item. Its label names the current
-  // model profile, and "切换模型" lists the tested ones: both from the last
-  // answer at once, then from the service again (it may have changed in the
-  // settings page since).
+  // The entry shows for regular items and for attachments (with or without
+  // a parent item), and is greyed when no selected item has a source PDF
+  // (itemmenu.js). Its label names the current model profile, and "切换模型"
+  // lists the tested ones: both from the last answer at once, then from the
+  // service again (it may have changed in the settings page since).
+  menu: null,
+
+  // Main window -> the function that removes the item menu popup's listeners.
+  _menuDetach: new WeakMap(),
+
+  /** A main window's item menu opens: draw the item menu's label and the
+   *  "切换模型" submenu from the last answer, then ask the service again. A
+   *  submenu's popupshowing bubbles up too; only the item menu's own counts. */
   _onItemMenuShowing(event) {
-    const window = event.target.ownerGlobal;
-    const items = window.ZoteroPane.getSelectedItems();
-    const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
-    menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
-    ZoteroTranslate._drawModelMenu(window);
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    ZoteroTranslate._drawModelMenu(event.target.ownerGlobal);
     ZoteroTranslate._readProfiles().catch((e) => Zotero.logError(e));
   },
 
@@ -209,11 +231,21 @@ var ZoteroTranslate = {
     await this.modelMenu.refresh();
   },
 
-  /** The item menu's label with the current profile's name (core.itemMenuLabel)
-   *  and the "切换模型" submenu (core.modelMenuItems): rebuilt only when its
-   *  items change, so an answer that arrives while the menu is open does not
-   *  close an open submenu. */
-  _drawModelMenu(window) {
+  /** The item menu's label with the current profile's name, without the
+   *  item state's suffix: itemmenu.js adds "（没有 PDF）" when the selection
+   *  has none. */
+  _itemMenuLabel() {
+    const { listing } = this.modelMenu.state();
+    const current = listing && listing.profiles.find((profile) => profile.id === listing.current);
+    return ZoteroTranslateCore.itemMenuLabel(current ? current.name : "");
+  },
+
+  /** Draw the item menu's label and the "切换模型" submenu (core.modelMenuItems)
+   *  from the last answer. The submenu is rebuilt only when its items change,
+   *  so an answer that arrives while the menu is open does not close an open
+   *  submenu; `force` rebuilds it anyway, which also undoes the radio check
+   *  XUL put on a refused switch's item. */
+  _drawModelMenu(window, { force = false } = {}) {
     const doc = window.document;
     const itemMenu = doc.getElementById(this.ITEM_MENU_ID);
     const popup = doc.getElementById(this.ITEM_MODEL_POPUP_ID);
@@ -221,12 +253,12 @@ var ZoteroTranslate = {
       return;
     }
     const Core = ZoteroTranslateCore;
+    const suffix = itemMenu.disabled && !itemMenu.hidden ? Core.NO_PDF_SUFFIX : "";
+    itemMenu.setAttribute("label", `${this._itemMenuLabel()}${suffix}`);
     const { listing, problem } = this.modelMenu.state();
-    const current = listing && listing.profiles.find((profile) => profile.id === listing.current);
-    itemMenu.setAttribute("label", Core.itemMenuLabel(current ? current.name : "", this.itemMenuSuffix));
     const items = Core.modelMenuItems(listing, problem || undefined);
     const signature = JSON.stringify(items);
-    if (popup.dataset.items === signature) {
+    if (!force && popup.dataset.items === signature) {
       return;
     }
     popup.dataset.items = signature;
@@ -247,11 +279,18 @@ var ZoteroTranslate = {
 
   /** A "切换模型" click: make the profile current. One request; only the
    *  papers submitted afterwards use it. The service refuses a profile whose
-   *  connection test has not passed. Answers already on their way cannot
-   *  undo the switch (model-menu.js), so the menu shows the new profile. */
+   *  connection test has not passed; the menu is then drawn again from the
+   *  known current profile, so the radio XUL checked stays where it was.
+   *  Answers already on their way cannot undo the switch (model-menu.js). */
   async switchToProfile(id) {
     const outcome = await this.modelMenu.switchTo(id);
+    if (outcome.superseded) {
+      return; // a newer switch owns the menu, and draws it when it answers
+    }
     if (!outcome.ok) {
+      for (const window of Zotero.getMainWindows()) {
+        this._drawModelMenu(window, { force: true });
+      }
       this._tell(`没有切换模型：${outcome.error}`);
     }
   },
@@ -276,7 +315,14 @@ var ZoteroTranslate = {
     return this.lifecycle.submit(source);
   },
 
-  /** The item's source for the lifecycle, or why it has none (a string). */
+  /** The item's source for the lifecycle, or why it has none (a string).
+   *  `translated` tells the lifecycle that a translation output is already
+   *  there, so it asks before translating the paper again: one among a
+   *  regular item's attachments, or for a standalone PDF (whose outputs have
+   *  no link back to it) a task of this Zotero session that attached both
+   *  outputs. A task record removed by "清除已结束", and one of an earlier
+   *  session (ended tasks are not saved), are gone: such a standalone PDF is
+   *  translated again without the ask. */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
@@ -288,7 +334,20 @@ var ZoteroTranslate = {
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
+      translated: parent ? await this._hasTranslation(parent) : this.lifecycle.wasTranslated(source.id),
     };
+  },
+
+  /** Whether the item already has one of the plugin's translation outputs
+   *  among its attachments: the plugin's way of telling that the paper was
+   *  translated, also by an earlier Zotero session. A standalone PDF has no
+   *  such parent item: `_sourceOf` asks the lifecycle's task records
+   *  (`wasTranslated`) for it instead. */
+  async _hasTranslation(item) {
+    const attachments = await Zotero.Items.getAsync(item.getAttachments());
+    return attachments.some(
+      (attachment) => !attachment.deleted && ZoteroTranslateCore.isTranslationOutput(attachment.getField("title")),
+    );
   },
 
   /** The PDF to translate: the selected attachment itself, or the item's best
@@ -442,6 +501,9 @@ var ZoteroTranslate = {
     if (payload.outcome === "submitted") {
       return this._openSubmissionNotice(payload, dismissed);
     }
+    if (payload.outcome === "resubmit") {
+      return this._openResubmitNotice(payload, dismissed);
+    }
     const { outcome, row } = payload;
     const done = outcome === "done";
     const parent = Zotero.getMainWindow();
@@ -485,6 +547,57 @@ var ZoteroTranslate = {
         doc.defaultView.sizeToContent();
         Zotero.ProgressWindowSet.tile(doc.defaultView);
       }
+      doc.addEventListener("click", () => {
+        dismissed();
+        notice.close();
+      });
+    });
+    return {
+      parent,
+      raise: () => window?.focus(),
+      close: () => {
+        closed = true;
+        notice.close();
+      },
+    };
+  },
+
+  /** The 已有译文 notice (lifecycle.js submitBatch): "已有译文" with the
+   *  papers that already have a translation, "再翻译一次？" and a
+   *  "再翻译一次" link that submits them (lifecycle.resubmit); a click
+   *  anywhere else only closes it, so nothing is translated again without
+   *  that click. It stays until it is clicked, like the notices of ended
+   *  tasks. */
+  _openResubmitNotice({ titles, keys }, dismissed) {
+    const parent = Zotero.getMainWindow();
+    const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
+    let window = null; // once loaded
+    let closed = false;
+    notice.changeHeadline("已有译文");
+    const lines = titles.map((title) => new notice.ItemProgress("attachmentPDF", title));
+    for (const line of lines) {
+      line.setProgress(100);
+    }
+    notice.addDescription("再翻译一次？");
+    notice.show();
+    this._noticeDocument(lines[0]).then((doc) => {
+      if (!doc || closed) {
+        return;
+      }
+      window = doc.defaultView;
+      const link = doc.createXULElement("label");
+      link.setAttribute("value", "再翻译一次");
+      link.setAttribute("class", "zotero-text-link");
+      link.setAttribute("role", "link");
+      link.dataset.action = "resubmit";
+      Object.assign(link.style, { color: "LinkText", textDecoration: "underline", cursor: "pointer" });
+      link.addEventListener("click", () => ZoteroTranslate.lifecycle.resubmit(keys).catch((e) => Zotero.logError(e)));
+      const box = doc.createXULElement("hbox");
+      box.setAttribute("class", "zotero-progress-item-hbox");
+      box.append(link);
+      doc.getElementById("zotero-progress-text-box").append(box);
+      window.sizeToContent();
+      Zotero.ProgressWindowSet.tile(window);
       doc.addEventListener("click", () => {
         dismissed();
         notice.close();

@@ -25,11 +25,38 @@ var ZoteroTranslateCore = (() => {
     { file: "dual", title: "双语对照" },
   ];
   const OUTPUT_TITLES = new Set(OUTPUTS.map((output) => output.title));
+  const TRANSLATE_MENU_LABEL = "翻译为中文";
+  const NO_PDF_SUFFIX = "（没有 PDF）";
 
   /** The source PDF among an item's attachments, given in Zotero's best-first
    *  order as {isPDF, title}: the first PDF that is not a translation output. */
   function pickSourcePdf(candidates) {
     return candidates.find((c) => c.isPDF && !OUTPUT_TITLES.has(c.title)) || null;
+  }
+
+  /** Whether an attachment title is one of the two translation outputs: the
+   *  plugin's way of telling that a paper already has a translation. */
+  function isTranslationOutput(title) {
+    return OUTPUT_TITLES.has(title);
+  }
+
+  /** The item menu's "翻译为中文" for the selection, {hidden, disabled, label}:
+   *  hidden when no selected item could be a source (a regular item or an
+   *  attachment); greyed, saying why, when none of them has a source PDF;
+   *  else shown as usual (items without a PDF are skipped on submission).
+   *  `selected` are {candidate, hasPdf}: a regular item or an attachment, and
+   *  whether it has a source PDF. `baseLabel` is the label before the
+   *  no-PDF suffix (the menu passes the entry's label with the current model
+   *  profile's name). */
+  function translateMenuItem(selected, baseLabel = TRANSLATE_MENU_LABEL) {
+    const candidates = selected.filter((item) => item.candidate);
+    if (!candidates.length) {
+      return { hidden: true, disabled: true, label: baseLabel };
+    }
+    if (candidates.some((item) => item.hasPdf)) {
+      return { hidden: false, disabled: false, label: baseLabel };
+    }
+    return { hidden: false, disabled: true, label: `${baseLabel}${NO_PDF_SUFFIX}` };
   }
 
   /** "paper.pdf" + "中文译文" -> "paper-中文译文.pdf". */
@@ -222,6 +249,9 @@ var ZoteroTranslateCore = (() => {
     OUTPUTS,
     UNFINISHED_STATES,
     pickSourcePdf,
+    isTranslationOutput,
+    translateMenuItem,
+    NO_PDF_SUFFIX,
     outputFileName,
     serviceUrl,
     uploadRequest,

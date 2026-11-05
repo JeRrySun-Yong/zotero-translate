@@ -13,6 +13,7 @@ async function startup({ id, rootURI }) {
   Services.scriptloader.loadSubScript(rootURI + "content/core.js");
   Services.scriptloader.loadSubScript(rootURI + "content/profiles.js");
   Services.scriptloader.loadSubScript(rootURI + "content/model-menu.js");
+  Services.scriptloader.loadSubScript(rootURI + "content/itemmenu.js");
   Services.scriptloader.loadSubScript(rootURI + "content/lifecycle.js");
   Services.scriptloader.loadSubScript(rootURI + "content/notices.js");
   Services.scriptloader.loadSubScript(rootURI + "content/zotero-translate.js");
