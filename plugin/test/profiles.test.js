@@ -162,3 +162,125 @@ test("the built-in profile can only be applied", () => {
   assert.deepEqual(profiles.buttons(form, { ...BUILTIN, current: false }), { test: false, apply: true, remove: false, applyHint: "" });
   assert.deepEqual(profiles.buttons(form, BUILTIN), { test: false, apply: false, remove: false, applyHint: "正在使用这份配置" });
 });
+
+const LISTING = { current: BUILTIN.id, profiles: [BUILTIN, SAVED] };
+
+test("the list marks the current profile and says which ones are tested; a key shows only as set", () => {
+  const untested = { ...SAVED, id: "ba9876543210", name: "Other", tested: false, last_test: null, api_key: { set: true, last4: "" } };
+  const failed = { ...SAVED, id: "cccccccccccc", name: "Failed", tested: false, last_test: { ...SAVED.last_test, result: "timeout" } };
+  const rows = profiles.profileRows({ current: BUILTIN.id, profiles: [BUILTIN, SAVED, untested, failed] });
+  assert.deepEqual(rows, [
+    { id: BUILTIN.id, name: "内置", model: "model-main", current: true, state: "内置，只读", key: "" },
+    { id: SAVED.id, name: "DeepSeek", model: "vendor/model-a", current: false, state: "测试通过", key: "已设置 ••••wxyz" },
+    { id: untested.id, name: "Other", model: "vendor/model-a", current: false, state: "未测试", key: "已设置" },
+    { id: failed.id, name: "Failed", model: "vendor/model-a", current: false, state: "测试未通过", key: "已设置 ••••wxyz" },
+  ]);
+  assert.equal(profiles.keyText(SAVED), "已设置 ••••wxyz");
+});
+
+test("the built-in profile shows its two roles", () => {
+  assert.equal(
+    profiles.builtinDetail(BUILTIN),
+    "主模型 model-main（https://a.example/v1，并发 40）；副模型 model-second（https://b.example/v1，并发 16）。由翻译服务的启动参数决定，这里不能修改。",
+  );
+});
+
+test("the service status says it runs and which profile is current", () => {
+  assert.deepEqual(profiles.statusView({ listing: { ...LISTING, current: SAVED.id, profiles: [{ ...BUILTIN, current: false }, { ...SAVED, current: true }] } }), {
+    running: true,
+    text: "翻译服务在运行，当前配置：DeepSeek（vendor/model-a）",
+    help: "",
+  });
+});
+
+test("an unreachable service says how to start it and where its address is set", () => {
+  const view = profiles.statusView({ unreachable: true, serviceUrl: SERVICE });
+  assert.equal(view.running, false);
+  assert.equal(view.text, `连不上翻译服务（${SERVICE}）`);
+  assert.match(view.help, /launchctl kickstart -k gui\/\$\(id -u\)\/local\.zotero-translate\.service/);
+  assert.match(view.help, /~\/Library\/Logs\/zotero-translate\/service\.log/);
+  assert.match(view.help, /“高级”/);
+  const old = profiles.statusView({ noProfiles: true, serviceUrl: SERVICE });
+  assert.deepEqual([old.running, old.text], [false, "翻译服务在运行，但版本太旧，没有模型配置：请更新翻译服务"]);
+});
+
+test("every write to the service carries the plugin's header and a JSON body", async () => {
+  const { fetch, calls } = fakeFetch(
+    () => json(201, { ...SAVED, tested: false, last_test: null }),
+    () => json(200, answer("succeeded", "连接成功", 0.8)),
+    () => json(200, { current: SAVED.id, name: "DeepSeek" }),
+    () => json(200, { deleted: SAVED.id, current: BUILTIN.id }),
+  );
+  const client = profiles.createClient({ fetch, serviceUrl: () => `${SERVICE}/` });
+  const tested = await client.saveAndTest(NEW_FORM, null);
+  assert.equal(tested.profile.id, SAVED.id);
+  assert.deepEqual(tested.view, { ok: true, text: "连接成功（0.8 秒），可以应用", detail: "" });
+  assert.deepEqual(await client.apply(SAVED.id), { ok: true });
+  assert.deepEqual(await client.remove(SAVED.id), { ok: true });
+  assert.deepEqual(
+    calls.map(({ url, method, body }) => [method, url, body]),
+    [
+      ["POST", `${SERVICE}/profiles`, profiles.profileRequest(NEW_FORM, null).body],
+      ["POST", `${SERVICE}/profiles/${SAVED.id}/test`, {}],
+      ["POST", `${SERVICE}/profiles/${SAVED.id}/apply`, {}],
+      ["DELETE", `${SERVICE}/profiles/${SAVED.id}`, {}],
+    ],
+  );
+  for (const call of calls) {
+    assert.equal(call.headers["X-Zotero-Translate"], "1");
+    assert.equal(call.headers["Content-Type"], "application/json");
+  }
+});
+
+test("testing an unchanged saved profile sends only the test; an edited one is saved first", async () => {
+  const unchanged = fakeFetch(() => json(200, answer("unauthorized", "密钥无效：HTTP 401")));
+  const result = await profiles.createClient({ fetch: unchanged.fetch, serviceUrl: () => SERVICE }).saveAndTest(profiles.formFromProfile(SAVED), SAVED);
+  assert.deepEqual(unchanged.calls.map((c) => c.url), [`${SERVICE}/profiles/${SAVED.id}/test`]);
+  assert.deepEqual(result.view, { ok: false, text: "密钥无效，请检查密钥", detail: "HTTP 401" });
+  assert.equal(result.profile, SAVED);
+
+  const edited = fakeFetch(() => json(200, { ...SAVED, model: "vendor/model-b", tested: false }), () => json(200, answer("succeeded", "连接成功", 1)));
+  const form = { ...profiles.formFromProfile(SAVED), model: "vendor/model-b" };
+  const after = await profiles.createClient({ fetch: edited.fetch, serviceUrl: () => SERVICE }).saveAndTest(form, SAVED);
+  assert.deepEqual(edited.calls.map((c) => [c.method, c.url, c.body]), [
+    ["PUT", `${SERVICE}/profiles/${SAVED.id}`, { model: "vendor/model-b" }],
+    ["POST", `${SERVICE}/profiles/${SAVED.id}/test`, {}],
+  ]);
+  assert.equal(after.profile.model, "vendor/model-b");
+});
+
+test("a form the service refuses, or an unreachable service, tests nothing and says why", async () => {
+  const invalid = await profiles.createClient({ fetch: fakeFetch().fetch, serviceUrl: () => SERVICE }).saveAndTest({ ...NEW_FORM, apiKey: "" }, null);
+  assert.deepEqual(invalid, { error: "请填写密钥" });
+
+  const refusing = fakeFetch(() => json(400, { error: "base_url 无效：没有主机名" }));
+  assert.deepEqual(await profiles.createClient({ fetch: refusing.fetch, serviceUrl: () => SERVICE }).saveAndTest(NEW_FORM, null), {
+    error: "没有保存：base_url 无效：没有主机名",
+  });
+  assert.equal(refusing.calls.length, 1);
+
+  const down = profiles.createClient({
+    fetch: async () => {
+      throw new TypeError("NetworkError when attempting to fetch resource.");
+    },
+    serviceUrl: () => SERVICE,
+  });
+  assert.deepEqual(await down.saveAndTest(NEW_FORM, null), { error: `连不上翻译服务（${SERVICE}）` });
+  assert.deepEqual(await down.apply(SAVED.id), { error: `连不上翻译服务（${SERVICE}）` });
+  assert.deepEqual(await down.status(), { unreachable: true, serviceUrl: SERVICE });
+});
+
+test("the status asks the service for its profiles", async () => {
+  const { fetch, calls } = fakeFetch(() => json(200, LISTING), () => json(404, { error: "not found" }));
+  const client = profiles.createClient({ fetch, serviceUrl: () => SERVICE });
+  assert.deepEqual(await client.status(), { listing: LISTING });
+  assert.deepEqual(await client.status(), { noProfiles: true, serviceUrl: SERVICE });
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [["GET", `${SERVICE}/profiles`], ["GET", `${SERVICE}/profiles`]]);
+});
+
+test("apply refused by the service says why", async () => {
+  const { fetch } = fakeFetch(() => json(409, { error: "这份配置还没有通过测试连接" }));
+  assert.deepEqual(await profiles.createClient({ fetch, serviceUrl: () => SERVICE }).apply(SAVED.id), {
+    error: "没有应用：这份配置还没有通过测试连接",
+  });
+});

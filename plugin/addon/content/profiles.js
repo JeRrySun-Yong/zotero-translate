@@ -146,7 +146,155 @@ var ZoteroTranslateProfiles = (() => {
   }
   const CURRENT_HINT = "正在使用这份配置";
 
-  return { formFromProfile, profileRequest, testResultView, buttons };
+  /** "已设置 ••••wxyz" (or "已设置" for a key too short to show any of it). */
+  function keyText(profile) {
+    const key = profile.api_key;
+    if (!key || !key.set) {
+      return profile.builtin ? "" : "未设置";
+    }
+    return key.last4 ? `已设置 ••••${key.last4}` : "已设置";
+  }
+
+  /** The list's rows, in the service's order (the built-in profile first). */
+  function profileRows(listing) {
+    return listing.profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      model: profile.model,
+      current: profile.id === listing.current,
+      state: profile.builtin
+        ? "内置，只读"
+        : profile.tested
+          ? "测试通过"
+          : profile.last_test
+            ? "测试未通过"
+            : "未测试",
+      key: keyText(profile),
+    }));
+  }
+
+  /** The built-in profile's two roles, as the form shows them instead of fields. */
+  function builtinDetail(profile) {
+    const role = (label, { model, base_url, concurrency }) => `${label} ${model}（${base_url}，并发 ${concurrency}）`;
+    const { flash, argon } = profile.roles;
+    return `${role("主模型", flash)}；${role("副模型", argon)}。由翻译服务的启动参数决定，这里不能修改。`;
+  }
+
+  // The service runs under a LaunchAgent (docs/deployment.md, section 4);
+  // the plugin neither starts nor restarts it (spec, out of scope).
+  const UNREACHABLE_HELP =
+    "翻译服务由 LaunchAgent 在登录时启动。没在运行时，可以在终端运行 " +
+    "launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service 重启它，" +
+    "启动出错的原因在 ~/Library/Logs/zotero-translate/service.log。" +
+    "服务地址不对时，在下面的“高级”里改。";
+
+  /** The status line: {running, text, help}, from what status() found. */
+  function statusView(found) {
+    if (found.listing) {
+      const current = found.listing.profiles.find((profile) => profile.id === found.listing.current);
+      const name = current ? `${current.name}（${current.model}）` : found.listing.current;
+      return { running: true, text: `翻译服务在运行，当前配置：${name}`, help: "" };
+    }
+    if (found.noProfiles) {
+      return { running: false, text: "翻译服务在运行，但版本太旧，没有模型配置：请更新翻译服务", help: "" };
+    }
+    return { running: false, text: `连不上翻译服务（${found.serviceUrl}）`, help: UNREACHABLE_HELP };
+  }
+
+  // Time limits of one request: a connection test takes up to 60 seconds in the service.
+  const REQUEST_LIMIT_MS = 10000;
+  const TEST_LIMIT_MS = 90000;
+
+  /** The service's profile interface, through `fetch` at `serviceUrl()`.
+   *  Every method resolves (never rejects); a failure is {error: text}. */
+  function createClient({ fetch, serviceUrl }) {
+    const Core = typeof ZoteroTranslateCore !== "undefined" ? ZoteroTranslateCore : require("./core.js");
+    const unreachable = () => `连不上翻译服务（${serviceUrl().trim()}）`;
+
+    /** {status, body} of one request, or null when the service cannot be reached. */
+    async function send(method, path, body, limitMs = REQUEST_LIMIT_MS) {
+      const options = { method, signal: AbortSignal.timeout(limitMs) };
+      if (method !== "GET") {
+        options.headers = { "X-Zotero-Translate": "1", "Content-Type": "application/json" };
+        options.body = JSON.stringify(body ?? {});
+      }
+      try {
+        const response = await fetch(Core.serviceUrl(serviceUrl(), ...path), options);
+        let answer = null;
+        try {
+          answer = await response.json();
+        } catch {
+          // not JSON: only the status counts
+        }
+        return { status: response.status, body: answer };
+      } catch {
+        return null;
+      }
+    }
+
+    const refusal = (verb, answer) => `${verb}：${(answer.body && answer.body.error) || `HTTP ${answer.status}`}`;
+
+    return {
+      /** {listing} (GET /profiles), {noProfiles, serviceUrl} for a service
+       *  without profiles, or {unreachable, serviceUrl}. */
+      async status() {
+        const answer = await send("GET", ["profiles"]);
+        if (answer && answer.status === 200 && answer.body && Array.isArray(answer.body.profiles)) {
+          return { listing: answer.body };
+        }
+        const where = serviceUrl().trim();
+        return answer && answer.status === 404 ? { noProfiles: true, serviceUrl: where } : { unreachable: true, serviceUrl: where };
+      },
+
+      /** Save the form when it differs from `saved` (or is new), then test the
+       *  saved profile: {profile, view} with the profile as saved, or {error}. */
+      async saveAndTest(form, saved) {
+        const request = profileRequest(form, saved);
+        if (request && request.error) {
+          return { error: request.error };
+        }
+        let profile = saved;
+        if (request) {
+          const answer = await send(request.method, request.path, request.body);
+          if (!answer) {
+            return { error: unreachable() };
+          }
+          if (answer.status !== 200 && answer.status !== 201) {
+            return { error: refusal("没有保存", answer) };
+          }
+          profile = answer.body;
+        }
+        const answer = await send("POST", ["profiles", profile.id, "test"], {}, TEST_LIMIT_MS);
+        if (!answer) {
+          return { profile, error: unreachable() };
+        }
+        if (answer.status !== 200) {
+          return { profile, error: refusal("没有测试", answer) };
+        }
+        return { profile, view: testResultView(answer.body) };
+      },
+
+      /** Make the profile current: {ok} or {error}. */
+      async apply(id) {
+        const answer = await send("POST", ["profiles", id, "apply"], {});
+        if (!answer) {
+          return { error: unreachable() };
+        }
+        return answer.status === 200 ? { ok: true } : { error: refusal("没有应用", answer) };
+      },
+
+      /** Delete the profile: {ok} or {error}. */
+      async remove(id) {
+        const answer = await send("DELETE", ["profiles", id], {});
+        if (!answer) {
+          return { error: unreachable() };
+        }
+        return answer.status === 200 ? { ok: true } : { error: refusal("没有删除", answer) };
+      },
+    };
+  }
+
+  return { formFromProfile, profileRequest, testResultView, buttons, keyText, profileRows, builtinDetail, statusView, createClient };
 })();
 
 if (typeof module !== "undefined") {
