@@ -1,13 +1,22 @@
 /* The "翻译任务" window: one row per task, updated after every poll, with a
  * "取消" button on rows that can be cancelled (no confirmation), a "重试"
  * button on failed and cancelled rows, a "继续挂回" button on rows whose
- * attaching failed, and the notices of the latest
+ * attaching failed, "打开译文", "打开双语" and "在库中显示" on rows whose
+ * PDFs are attached, and the notices of the latest
  * submission. Zotero's include.js, loaded before this script, defines `Zotero`. */
 var { lifecycle } = Zotero.ZoteroTranslate;
 const XHTML = "http://www.w3.org/1999/xhtml";
 // Task key -> <tr>. Tasks are only ever appended, so rows are updated in
 // place; a redraw never replaces a button while it is being clicked.
 const shownRows = new Map();
+// Task key -> the row's results ({mono, dual} attachment IDs) at the last redraw.
+const shownResults = new Map();
+// The buttons that open a done task's results: action, label, what they do with the results.
+const RESULT_BUTTONS = [
+  ["openMono", "打开译文", (results) => Zotero.ZoteroTranslate.openAttachment(results.mono)],
+  ["openDual", "打开双语", (results) => Zotero.ZoteroTranslate.openAttachment(results.dual)],
+  ["showInLibrary", "在库中显示", (results) => Zotero.ZoteroTranslate.showInLibrary([results.mono, results.dual])],
+];
 
 function rowElement(key) {
   let tr = shownRows.get(key);
@@ -21,6 +30,18 @@ function rowElement(key) {
       button.textContent = label;
       button.dataset.action = action;
       button.addEventListener("click", () => lifecycle[action](key));
+      tr.lastChild.append(button);
+    }
+    for (const [action, label, open] of RESULT_BUTTONS) {
+      const button = document.createElementNS(XHTML, "button");
+      button.textContent = label;
+      button.dataset.action = action;
+      button.addEventListener("click", () => {
+        const results = shownResults.get(key);
+        if (results) {
+          open(results).catch((e) => Zotero.logError(e));
+        }
+      });
       tr.lastChild.append(button);
     }
     document.getElementById("zotero-translate-rows").append(tr);
@@ -41,6 +62,10 @@ function render() {
     tr.querySelector('button[data-action="cancel"]').hidden = !row.canCancel;
     tr.querySelector('button[data-action="retry"]').hidden = !row.canRetry;
     tr.querySelector('button[data-action="continueAttach"]').hidden = !row.canContinue;
+    shownResults.set(row.key, row.results);
+    for (const [action] of RESULT_BUTTONS) {
+      tr.querySelector(`button[data-action="${action}"]`).hidden = !row.results;
+    }
   }
   document.getElementById("zotero-translate-empty").hidden = rows.length > 0;
   const notices = document.getElementById("zotero-translate-notices");

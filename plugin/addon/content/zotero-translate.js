@@ -1,5 +1,7 @@
 /* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
- * the "翻译任务" window, and the Zotero side of the task lifecycle
+ * the "翻译任务" window, the notice when a task is done or fails (with
+ * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
+ * window), and the Zotero side of the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
  * PDFs, importing an output PDF as an attachment, the attachments'
  * identities, saving the tasks in a preference.
@@ -70,6 +72,7 @@ var ZoteroTranslate = {
           Services.prefs.savePrefFile(null);
         },
       },
+      announce: (notice) => this.announce(notice),
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),
     });
@@ -264,6 +267,106 @@ var ZoteroTranslate = {
       );
       return found ? found.id : null;
     },
+  },
+
+  /** The notice at the bottom right of the main window (Zotero's own
+   *  progress window) for a task that has just ended (lifecycle.js,
+   *  `announce`): "翻译完成" with "打开译文", "打开双语" and "在库中显示",
+   *  or "翻译失败" with the reason. It stays until it is clicked: a click on
+   *  an action runs it, and any click closes the notice. */
+  announce({ outcome, row }) {
+    const done = outcome === "done";
+    const notice = new Zotero.ProgressWindow({ closeOnClick: false });
+    notice.changeHeadline(done ? "翻译完成" : "翻译失败");
+    const line = new notice.ItemProgress("attachmentPDF", row.title);
+    if (done) {
+      line.setProgress(100);
+    } else {
+      line.setError();
+    }
+    notice.addDescription(row.status);
+    notice.show();
+    const actions = done ? this._resultActions(row.results) : [];
+    this._noticeDocument(line).then((doc) => {
+      if (!doc) {
+        return;
+      }
+      if (actions.length) {
+        const box = doc.createXULElement("hbox");
+        box.setAttribute("class", "zotero-progress-item-hbox");
+        for (const [label, action] of actions) {
+          const link = doc.createXULElement("label");
+          link.setAttribute("value", label);
+          link.setAttribute("class", "zotero-text-link");
+          link.setAttribute("role", "link");
+          link.dataset.action = label;
+          link.style.marginInlineEnd = "12px";
+          link.addEventListener("click", () => action().catch((e) => Zotero.logError(e)));
+          box.append(link);
+        }
+        doc.getElementById("zotero-progress-text-box").append(box);
+        doc.defaultView.sizeToContent();
+        Zotero.ProgressWindowSet.tile(doc.defaultView);
+      }
+      doc.addEventListener("click", () => notice.close());
+    });
+  },
+
+  /** "打开译文", "打开双语" and "在库中显示" for a done task's two attachments, {mono, dual}. */
+  _resultActions(results) {
+    return [
+      ["打开译文", () => this.openAttachment(results.mono)],
+      ["打开双语", () => this.openAttachment(results.dual)],
+      ["在库中显示", () => this.showInLibrary([results.mono, results.dual])],
+    ];
+  },
+
+  /** The notice's document once Zotero has loaded it and added the line
+   *  (ProgressWindow gives no load callback); null after 5 seconds. */
+  async _noticeDocument(line) {
+    for (let i = 0; i < 100 && !line._hbox; i++) {
+      await Zotero.Promise.delay(50);
+    }
+    return line._hbox ? line._hbox.ownerDocument : null;
+  },
+
+  /** Open the attachment the way Zotero opens it on a double click (a reader tab, by default). */
+  async openAttachment(id) {
+    const window = Zotero.getMainWindow();
+    const item = await this._liveItem(id);
+    if (!window || !item) {
+      this._tell("找不到这份译文附件，可能已被删除");
+      return;
+    }
+    window.focus();
+    await window.ZoteroPane.viewAttachment(item.id);
+  },
+
+  /** Select the attachments in the library (switching to the library tab, expanding their item). */
+  async showInLibrary(ids) {
+    const window = Zotero.getMainWindow();
+    const items = (await Promise.all(ids.map((id) => this._liveItem(id)))).filter(Boolean);
+    if (!window || !items.length) {
+      this._tell("找不到这两份译文附件，可能已被删除");
+      return;
+    }
+    window.focus();
+    await window.ZoteroPane.selectItems(items.map((item) => item.id));
+  },
+
+  /** The item with this ID, unless it is gone or in the trash; else null. */
+  async _liveItem(id) {
+    const item = id == null ? null : await Zotero.Items.getAsync(id);
+    return item && !item.deleted ? item : null;
+  },
+
+  /** A short notice that closes by itself. */
+  _tell(text) {
+    const notice = new Zotero.ProgressWindow();
+    notice.changeHeadline("中文翻译");
+    notice.addDescription(text);
+    notice.show();
+    notice.startCloseTimer(5000);
   },
 
   openTaskWindow(window) {
