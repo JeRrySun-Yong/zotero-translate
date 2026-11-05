@@ -88,6 +88,14 @@ class _Verdict:
     reason: str | None = None
 
 
+class _RejectedReview(ValueError):
+    """A review answer that parsed and failed the checks; ``verdicts`` are its judgement."""
+
+    def __init__(self, reason: str, verdicts: dict[int, _Verdict]):
+        super().__init__(reason)
+        self.verdicts = verdicts
+
+
 class BatchReviewer:
     """``reviewer(items, glossary_entries)`` -> {id: final text, or None to keep the source}.
 
@@ -112,25 +120,29 @@ class BatchReviewer:
             source.lower() for source, target in glossary_entries if source != target
         )
         messages = [{"role": "user", "content": self._prompt(items, glossary_entries)}]
-        rejected: dict[int, _Verdict] = {}  # verdicts on the last rejected answer
 
         def judge(content: str) -> None:
+            # No state shared between calls: a hedged request judges its
+            # sends at the same time (spec section 8).
             verdicts = _verdicts(items, content, translated)
             failing = [v.reason for v in verdicts.values() if v.text is None]
             if failing:
-                rejected.clear()
-                rejected.update(verdicts)
-                raise ValueError(failing[0])
+                raise _RejectedReview(failing[0], verdicts)
 
         try:
             # A cached answer skips ``judge``: it is judged below like a fresh one.
-            content = self.client.complete(messages, validate=judge, page=items[0]["page"])
+            content = self.client.complete(
+                messages, validate=judge, page=items[0]["page"], kind="review"
+            )
         except ModelCallError as e:
             if not e.answered:  # the request failed for good: the task fails
-                raise TranslationRequestError(str(e)) from e
-            verdicts = rejected or {
+                raise TranslationRequestError(str(e), category=e.category) from e
+            # The verdicts on the last rejected answer that parsed, by send
+            # number; with none, the drafts are judged alone.
+            rejected = [r.verdicts for r in e.rejections if isinstance(r, _RejectedReview)]
+            verdicts = rejected[-1] if rejected else {
                 item["id"]: _decide(item, None, translated) for item in items
-            }  # no answer parsed: judge the drafts alone
+            }
         else:
             verdicts = _verdicts(items, content, translated)
         return self._apply(items, verdicts)

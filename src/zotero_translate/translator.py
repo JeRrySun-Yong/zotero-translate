@@ -9,8 +9,9 @@ otherwise pollute real runs; the pipeline model client keeps its own
 response cache.
 
 Requests are retried by the pipeline model client. A request that fails for
-good is raised as the engine's ``TranslationRequestError``, which makes the
-engine fail the translation stage instead of keeping the source text. The
+good is raised as the engine's ``TranslationRequestError``, with the
+failure category of the ``ModelCallError``, which makes the engine fail the
+translation stage instead of keeping the source text. The
 inherited OpenAI SDK retry on HTTP 429 does not apply: our overrides replace
 the decorated methods.
 """
@@ -45,18 +46,24 @@ class PipelineTranslator(OpenAITranslator):
         if text is None:  # the engine probes LLM support with None
             return None
         params = rate_limit_params or {}
+        # A batch asks for JSON; the engine's one-paragraph prompts, which
+        # redo a paragraph after a failed or rejected batch, do not.
+        kind = "translation_batch" if params.get("request_json_mode") else "single_paragraph"
         return self._complete(
             [{"role": "user", "content": text}],
             params.get("validate_output"),
             params.get("page_number"),
+            kind,
         )
 
     def do_translate(self, text, rate_limit_params: dict | None = None) -> str:
         page = (rate_limit_params or {}).get("page_number")
-        return self._complete(self.prompt(text), page=page)
+        return self._complete(self.prompt(text), page=page, kind="single_paragraph")
 
-    def _complete(self, messages: list[dict], validate=None, page: int | None = None) -> str:
+    def _complete(
+        self, messages: list[dict], validate=None, page: int | None = None, kind: str | None = None
+    ) -> str:
         try:
-            return self.model_client.complete(messages, validate=validate, page=page)
+            return self.model_client.complete(messages, validate=validate, page=page, kind=kind)
         except ModelCallError as e:
-            raise TranslationRequestError(str(e)) from e
+            raise TranslationRequestError(str(e), category=e.category) from e

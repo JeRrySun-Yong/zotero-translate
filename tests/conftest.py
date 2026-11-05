@@ -8,23 +8,40 @@ dossier and term list endpoint, ADR 0004) at a second fake model or, when
 the test gives none, at the same one.
 
 No process outlives the tests (closure ticket 09): the service runs in its
-own process group, which its task subprocesses inherit, and ``stop_service``
-ends the whole group. pytest tears the fixtures down when it is interrupted
-with SIGINT, and SIGTERM is made to interrupt it the same way.
+own process group, and ``stop_service`` ends the whole group, then every
+process with a process marker of one of its tasks (task subprocesses run in
+groups of their own, M3 ticket 04). pytest tears the fixtures down when it
+is interrupted with SIGINT, and SIGTERM is made to interrupt it the same way.
+
+The suite also runs in parallel processes (M3 ticket 18): ``pytest -n auto``
+starts ``PARALLEL_PROCESSES`` of them (pytest-xdist), and ``--dist loadfile``
+(pyproject.toml) keeps each test file in one. Nothing the fixtures make is
+shared between tests: ports are picked free, data directories and
+environment files live in the test's own temporary directory, the service
+gives tasks random ids, and ``stop_service`` ends only the processes of
+tasks in its own data directory. A task a test writes into a data directory
+takes a random id too, which ``launch_service`` checks (another test run may
+be going on in another worktree, see ``_assert_random_task_ids``). The
+default data directory (``ZT_DATA_DIR``) is never the user's: each test has
+one of its own, a module fixture shares its test process's.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
 import httpx
+import psutil
 import pytest
 
 from tests.fake_model import FakeModel
@@ -35,17 +52,36 @@ FAKE_MODEL_NAME = "fake-gemini-for-tests"
 FAKE_API_KEY = "sk-fake-test-key-0123456789"
 FAKE_ARGON_API_KEY = "sk-fake-argon-key-9876543210"
 ARGON_MODEL_NAME = "gemini-4-argon-high"  # the default, since the argon file names no model
-TERMINAL_STATES = {"succeeded", "failed"}
+TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
+# The environment variable that carries a task process's process marker
+# "<task_id>:<attempt>" (spec section 2).
+MARK_ENV = "ZT_PROCESS_MARK"
+# The test processes ``pytest -n auto`` starts: each runs at most one paper
+# task at a time, about 2 GB.
+PARALLEL_PROCESSES = 3
 
 
 class ServiceClient:
     """Talks to a running translation service over HTTP, like the plugin does."""
 
-    def __init__(self, base_url: str, process: subprocess.Popen, data_dir: Path):
+    def __init__(
+        self,
+        base_url: str,
+        process: subprocess.Popen,
+        data_dir: Path,
+        output: list[str] | None = None,
+    ):
         self.base_url = base_url
         self.process = process
         self.data_dir = data_dir
+        # Every line the service has written to its standard output so far,
+        # the ``{"url": ...}`` line first; filled by a reader thread.
+        self.output = output if output is not None else []
         self.http = httpx.Client(base_url=base_url, timeout=30)
+
+    def log_lines(self, task_id: str) -> list[str]:
+        """The service log lines (task events) about one task."""
+        return [line for line in self.output if f"task={task_id} " in line]
 
     def submit(self, pdf: Path = EXCERPT, filename: str | None = None) -> str:
         response = self.http.post(
@@ -71,6 +107,10 @@ class ServiceClient:
 
         return self.wait_for(task_id, finished, timeout)
 
+    def wait_first_failure(self, task_id: str, timeout: float = 300) -> dict:
+        """Poll until the task's attempt has failed: it waits for a rerun, or failed for good."""
+        return self.wait_for(task_id, lambda s: s["state"] in ("waiting_rerun", "failed"), timeout)
+
     def wait_for(self, task_id: str, condition, timeout: float = 300) -> dict:
         """Poll until ``condition(status)`` holds; return that status."""
         deadline = time.monotonic() + timeout
@@ -89,6 +129,15 @@ class ServiceClient:
         response = self.http.get(f"/tasks/{task_id}/files/{name}")
         assert response.status_code == 200, response.text
         return response.content
+
+
+def wait_until(condition, timeout: float = 5.0) -> float:
+    """Poll ``condition()`` until it holds; return the seconds it took, fail after ``timeout``."""
+    started = time.monotonic()
+    while not condition():
+        assert time.monotonic() - started < timeout, "condition never held"
+        time.sleep(0.01)
+    return time.monotonic() - started
 
 
 def write_env_file(
@@ -122,6 +171,8 @@ def launch_service(
     argon: FakeModel | str | None = None,
     argon_env_file: Path | None = None,
     argon_concurrency: int | None = None,
+    env: dict[str, str] | None = None,
+    hedging: bool = True,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
@@ -131,8 +182,12 @@ def launch_service(
     and ``FAKE_ARGON_API_KEY``. Pass ``data_dir`` to restart on earlier data,
     ``request_timeout`` (seconds) to replace the 480-second request timeout of
     both endpoints, and ``argon_concurrency`` to replace argon's limit of 16.
+    ``env`` adds environment variables to the service's (the ``ZT_TEST_``
+    settings). ``hedging=False`` starts it with ``--no-hedging``. The
+    client's ``output`` collects the service's whole standard output.
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
+    _assert_random_task_ids(data_dir)
     if env_file is None:
         base_url = model if isinstance(model, str) else model.base_url
         env_file = write_env_file(root, base_url, FAKE_API_KEY, FAKE_MODEL_NAME, request_timeout)
@@ -143,24 +198,11 @@ def launch_service(
             root, base_url, FAKE_ARGON_API_KEY, None, request_timeout, argon_concurrency
         )
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "zotero_translate",
-            "serve",
-            "--port",
-            "0",
-            "--data-dir",
-            str(data_dir),
-            "--env-file",
-            str(env_file),
-            "--argon-env-file",
-            str(argon_env_file),
-            "--concurrency",
-            str(concurrency),
-        ],
+        serve_command(env_file, argon_env_file, data_dir, concurrency=concurrency)
+        + ([] if hedging else ["--no-hedging"]),
         stdout=subprocess.PIPE,
         text=True,
+        env={**os.environ, **(env or {})},
         # Its own process group, inherited by its task subprocesses: one
         # signal ends them all, and a Ctrl-C reaches only pytest, which then
         # tears the fixtures down.
@@ -168,15 +210,65 @@ def launch_service(
     )
     line = process.stdout.readline()
     assert line, "service exited before announcing its address"
-    return ServiceClient(json.loads(line)["url"], process, data_dir)
+    output = [line.rstrip("\n")]
+    # Keep reading, so that the service never blocks on a full pipe.
+    threading.Thread(
+        target=lambda: output.extend(line.rstrip("\n") for line in process.stdout),
+        daemon=True,
+    ).start()
+    return ServiceClient(json.loads(line)["url"], process, data_dir, output)
+
+
+def _assert_random_task_ids(data_dir: Path) -> None:
+    """Fail on a task directory a test seeded with a fixed task id.
+
+    The service reaps the processes of its tasks' ids when it starts, and
+    ``stop_service`` ends them too, so a fixed id would reach the processes
+    of another test run (another worktree) that seeded the same id. Seeded
+    tasks take ``uuid.uuid4().hex``, like the service's own.
+    """
+    tasks = Path(data_dir) / "tasks"
+    for task in tasks.iterdir() if tasks.is_dir() else ():
+        try:
+            parsed = uuid.UUID(task.name)
+        except ValueError:
+            parsed = None
+        assert parsed is not None and parsed.version == 4 and parsed.hex == task.name, (
+            f"fixed task id {task.name!r} in {tasks}: use uuid.uuid4().hex"
+        )
+
+
+def serve_command(
+    env_file: Path, argon_env_file: Path, data_dir: Path, port: int = 0, concurrency: int = 4
+) -> list[str]:
+    """The command line that starts the translation service; port 0 picks a free port."""
+    return [
+        sys.executable,
+        "-m",
+        "zotero_translate",
+        "serve",
+        "--port",
+        str(port),
+        "--data-dir",
+        str(data_dir),
+        "--env-file",
+        str(env_file),
+        "--argon-env-file",
+        str(argon_env_file),
+        "--concurrency",
+        str(concurrency),
+    ]
 
 
 def stop_service(client: ServiceClient) -> None:
-    """End the service and every task subprocess it started; return when all have exited.
+    """End the service and every task process it started; return when all have exited.
 
-    A task subprocess ends itself when its service is gone, but that check
-    has failed to run at least once (a worker left running for 31 minutes
-    after a test), so the subprocesses get the signal too.
+    The service's process group is signalled first. Task subprocesses run
+    in process groups of their own (M3 ticket 04) and end themselves and
+    their children when the service is gone, but that check has failed to
+    run at least once (a worker left running for 31 minutes after a test),
+    so every process with a process marker of a task in the service's data
+    directory is then ended too, whatever its group.
     """
     group = client.process.pid  # the leader of its own session and process group
     for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 10.0)):
@@ -186,8 +278,49 @@ def stop_service(client: ServiceClient) -> None:
         except subprocess.TimeoutExpired:
             continue
         if _group_ended(group, timeout=grace):
+            break
+    else:
+        raise AssertionError(f"processes of the service group {group} survived SIGKILL")
+    data_dir = getattr(client, "data_dir", None)
+    if data_dir is not None:
+        _end_marked_processes(data_dir)
+
+
+def marked_processes(task_ids) -> list[psutil.Process]:
+    """Live processes whose process marker names one of ``task_ids``."""
+    prefixes = tuple(f"{task_id}:" for task_id in task_ids)
+    found = []
+    if not prefixes:
+        return found
+    for process in psutil.process_iter():
+        try:
+            if process.environ().get(MARK_ENV, "").startswith(prefixes) and (
+                process.status() != psutil.STATUS_ZOMBIE
+            ):
+                found.append(process)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return found
+
+
+def _end_marked_processes(data_dir: Path) -> None:
+    """End every process of a task under ``data_dir``: SIGTERM, then SIGKILL."""
+    tasks = Path(data_dir) / "tasks"
+    task_ids = [p.name for p in tasks.iterdir()] if tasks.is_dir() else []
+    for method in (psutil.Process.terminate, psutil.Process.kill):
+        left = marked_processes(task_ids)
+        if not left:
             return
-    raise AssertionError(f"processes of the service group {group} survived SIGKILL")
+        for process in left:
+            try:
+                method(process)
+            except psutil.NoSuchProcess:
+                pass
+        deadline = time.monotonic() + 10
+        while marked_processes(task_ids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    left = marked_processes(task_ids)
+    assert not left, f"task processes survived SIGKILL: {[p.pid for p in left]}"
 
 
 def _signal_group(group: int, sig: signal.Signals) -> None:
@@ -236,6 +369,29 @@ def pytest_configure(config) -> None:
     # fixtures are torn down and stop their services; by default Python
     # would exit at once and leave the services running.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+    # The default data directory of this test process, read when
+    # zotero_translate.settings is first imported, is a fresh one of its own:
+    # never the user's, never another parallel process's (each test then
+    # gets its own, see ``own_default_data_dir``).
+    default_data_dir = tempfile.mkdtemp(prefix="zt-test-data-")
+    os.environ["ZT_DATA_DIR"] = default_data_dir
+    config.add_cleanup(lambda: shutil.rmtree(default_data_dir, ignore_errors=True))
+
+
+@pytest.hookimpl(tryfirst=True)  # before pytest-xdist's own, whichever loaded first
+def pytest_xdist_auto_num_workers(config) -> int:
+    """``-n auto``: ``PARALLEL_PROCESSES``, or ``PYTEST_XDIST_AUTO_NUM_WORKERS`` when set.
+
+    This hook runs before pytest-xdist's, which would otherwise read that
+    variable, so it reads it too.
+    """
+    return int(os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") or PARALLEL_PROCESSES)
+
+
+@pytest.fixture(autouse=True)
+def own_default_data_dir(tmp_path, monkeypatch):
+    """A test's subprocesses default to a data directory, and model cache, of its own."""
+    monkeypatch.setenv("ZT_DATA_DIR", str(tmp_path / "default-data-dir"))
 
 
 @pytest.fixture
@@ -247,7 +403,7 @@ def fake_model():
 @pytest.fixture
 def start_service(tmp_path):
     """Return ``start(fake_model, concurrency=4, data_dir=None, request_timeout=None, argon=None,
-    argon_concurrency=None)``; see ``launch_service``."""
+    argon_concurrency=None, env=None, hedging=True)``; see ``launch_service``."""
     started: list[ServiceClient] = []
 
     def start(
@@ -257,6 +413,8 @@ def start_service(tmp_path):
         request_timeout: float | None = None,
         argon=None,
         argon_concurrency: int | None = None,
+        env: dict[str, str] | None = None,
+        hedging: bool = True,
     ) -> ServiceClient:
         client = launch_service(
             model,
@@ -266,6 +424,8 @@ def start_service(tmp_path):
             request_timeout=request_timeout,
             argon=argon,
             argon_concurrency=argon_concurrency,
+            env=env,
+            hedging=hedging,
         )
         started.append(client)
         return client

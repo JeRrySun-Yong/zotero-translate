@@ -14,6 +14,10 @@ Closure ticket 09 (orchestrator 2026-10-29, after both endpoints were
 unreachable for about a minute in a real run): a request that cannot reach
 the endpoint waits 5, 15 and then 45 seconds before its resends, so a
 network outage of about a minute costs no paper; the attempts stay 4.
+
+M3 ticket 05: an attempt that fails for a retryable reason no longer ends
+the task; it waits for an automatic rerun (``waiting_rerun``), whose reason
+these tests check. A 401 still fails the task at once.
 """
 
 import collections
@@ -71,9 +75,9 @@ def test_batch_failing_four_times_fails_the_task_and_a_resubmit_reuses_the_cache
     fake_model.fail_same_request(["500", "429", "empty", "invalid_json"], kind="translate_batch")
     service = start_service(fake_model)
 
-    first = service.wait(service.submit())
+    first = service.wait_first_failure(service.submit())
 
-    assert first["state"] == "failed"
+    assert first["state"] == "waiting_rerun"  # retryable: the service reruns it later
     assert "管线模型" in first["error"]
     assert "第 1 页" in first["error"], first["error"]  # the excerpt has one page
     assert first["files"] == ["terms"]  # made before translation; no PDF
@@ -129,9 +133,9 @@ def test_a_request_timing_out_four_times_fails_the_task_with_the_timeout_and_pag
     fake_model.fail_same_request(["slow", "timeout", "slow", "slow"], kind="translate_batch")
     service = start_service(fake_model, request_timeout=SMALL_TIMEOUT)
 
-    final = service.wait(service.submit())
+    final = service.wait_first_failure(service.submit())
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"
     assert "管线模型请求超时（2 秒）" in final["error"], final["error"]
     assert "第 1 页" in final["error"], final["error"]
     report = service.report(final["task_id"])
@@ -171,9 +175,9 @@ def test_a_batch_rejected_four_times_with_http_400_fails_the_task_with_its_page_
     fake_model.fail_same_request(["400", "400", "400", "400"], kind="translate_batch")
     service = start_service(fake_model)
 
-    final = service.wait(service.submit())
+    final = service.wait_first_failure(service.submit())
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"
     assert "HTTP 400" in final["error"], final["error"]
     assert "第 1 页" in final["error"], final["error"]
     assert REJECTION_MESSAGE in final["error"], final["error"]
@@ -204,9 +208,9 @@ def test_an_api_key_echoed_in_a_400_response_is_redacted_everywhere(fake_model, 
     service = start_service(fake_model)
 
     task_id = service.submit()
-    final = service.wait(task_id)
+    final = service.wait_first_failure(task_id)
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"
     assert any(FAKE_API_KEY in r.headers.get("Authorization", "") for r in fake_model.requests)
     assert "Bearer [redacted]" in final["error"], final["error"]
     assert FAKE_API_KEY not in final["error"]
@@ -227,9 +231,9 @@ def test_unreachable_endpoint_fails_the_task_with_a_readable_reason(tmp_path, st
     service = start_service(f"http://127.0.0.1:{_unused_port()}/v1")
 
     # The dossier request waits 5 + 15 + 45 seconds before giving up.
-    final = service.wait(service.submit(), timeout=180)
+    final = service.wait_first_failure(service.submit(), timeout=180)
 
-    assert final["state"] == "failed"
+    assert final["state"] == "waiting_rerun"
     assert "无法连接管线模型" in final["error"], final["error"]
 
 
@@ -281,7 +285,8 @@ def test_run_exits_with_a_nonzero_code_when_the_paper_task_fails(tmp_path, fake_
     assert "论文任务失败" in result.stderr
 
 
-def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
+def test_restart_requeues_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
+    # M3 ticket 04: a restart no longer fails unfinished tasks; they run again.
     with FakeModel(delay=1.0) as model:
         service = launch_service(model, tmp_path)
         restarted = None
@@ -289,23 +294,31 @@ def test_restart_fails_unfinished_tasks_and_stops_the_old_subprocess(tmp_path):
             running = service.submit()
             queued = service.submit()
             service.wait_for(running, lambda s: s["state"] == "running" and model.requests)
+            task_dir = service.data_dir / "tasks" / running
+            old = subprocess.run(["pgrep", "-f", str(task_dir)], capture_output=True, text=True)
+            old_workers = [int(pid) for pid in old.stdout.split()]
+            assert old_workers
 
             # Only the service: its task subprocess must end itself.
             service.process.kill()
             service.process.wait(timeout=10)
             restarted = launch_service(model, tmp_path, data_dir=service.data_dir)
-            for task_id in (running, queued):
-                status = restarted.status(task_id)
-                assert status["state"] == "failed"
-                assert status["error"] == RESTART_ERROR
-            time.sleep(1.5)  # longer than the old subprocess's parent check
-            sent = len(model.requests)
-            time.sleep(2.5)
 
-            assert len(model.requests) == sent, "the old subprocess still sends requests"
-            assert restarted.status(running)["error"] == RESTART_ERROR
-            task_dir = service.data_dir / "tasks" / running
-            assert subprocess.run(["pgrep", "-f", str(task_dir)]).returncode == 1
+            assert restarted.status(running)["state"] in {"queued", "running"}
+            assert restarted.status(queued)["state"] == "queued"
+            # The HTTP interface answers only after the restored service has
+            # reaped the old processes; the old worker also ends itself.
+            states = subprocess.run(
+                ["ps", "-o", "stat=", "-p", ",".join(map(str, old_workers))],
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+            assert [s for s in states if not s.startswith("Z")] == [], "the old subprocess still runs"
+            for task_id, attempt in ((running, 2), (queued, 1)):
+                final = restarted.wait(task_id)
+                assert final["state"] == "succeeded", final["error"]
+                assert final["attempt"] == attempt
+            assert restarted.report(running)["attempts"][0]["reason"] == RESTART_ERROR
         finally:
             if restarted is not None:
                 stop_service(restarted)

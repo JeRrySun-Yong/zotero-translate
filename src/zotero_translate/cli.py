@@ -2,20 +2,28 @@
 
 ``serve`` starts the translation service. ``run`` runs one paper task on a
 PDF directly, without Zotero or the service, and writes ``mono.pdf``,
-``dual.pdf``, ``dossier.json``, ``terms.json`` and ``report.json`` into the
-output directory. Both share the
+``dual.pdf``, ``dossier.json``, ``terms.json``, ``report.json`` and
+``requests.jsonl`` (the request records) into the output directory; as it
+exits, ``report.json``'s ``requests`` is brought up to date with
+``requests.jsonl``. Both share the
 model response cache in the data directory.
 
+``serve`` exits with 2 when an environment file is missing or incomplete
+and 1 when another service holds the data directory or the port is taken.
 ``run`` exits with 0 when the paper task succeeds, 1 when it fails (the
 task report's ``state`` is ``failed`` and its ``error`` says why) and 2 when
-an environment file is missing or incomplete. A script that logs the exit
-status must read ``$?`` before anything else runs: in
+an environment file is missing or incomplete. It ends the process itself
+(``zotero_translate.process_exit``) once the paper task is over and
+``report.json`` is up to date, skipping native libraries' exit handlers,
+which sometimes hang (``main`` does not return for ``run``). A script that
+logs the exit status must read ``$?`` before anything else runs: in
 ``echo "$(date) exit=$?"`` the command substitution resets it to 0.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import shutil
 import sys
@@ -23,9 +31,11 @@ import time
 from pathlib import Path
 
 from zotero_translate import settings as s
+from zotero_translate.process_exit import run_then_exit
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command; ``serve`` returns its exit code, ``run`` ends the process itself."""
     parser = argparse.ArgumentParser(prog="zotero-translate")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -47,11 +57,15 @@ def main(argv: list[str] | None = None) -> int:
         except s.SettingsError as e:
             print(e, file=sys.stderr)
             return 2
-        serve_forever(
-            args.data_dir, args.env_file, args.argon_env_file, args.port, args.concurrency
+        return serve_forever(
+            args.data_dir,
+            args.env_file,
+            args.argon_env_file,
+            args.port,
+            args.concurrency,
+            hedging=not args.no_hedging,
         )
-        return 0
-    return _run(args)
+    run_then_exit(lambda: _run(args))  # does not return
 
 
 def _add_model_options(parser: argparse.ArgumentParser) -> None:
@@ -70,6 +84,12 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--concurrency", type=int, default=s.DEFAULT_CONCURRENCY)
     parser.add_argument(
+        "--no-hedging",
+        action="store_true",
+        help="no argon copy of a slow flash translation batch or review; flash requests "
+        "go to argon after 2 timeouts in a row instead (ADR 0004)",
+    )
+    parser.add_argument(
         "--data-dir",
         type=Path,
         default=s.DEFAULT_DATA_DIR,
@@ -80,6 +100,7 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
 def _run(args) -> int:
     from zotero_translate.paper_task import PaperTaskError
     from zotero_translate.paper_task import run_paper_task
+    from zotero_translate.request_log import update_report
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
@@ -88,6 +109,7 @@ def _run(args) -> int:
             args.argon_env_file,
             args.concurrency,
             s.model_cache_dir(args.data_dir),
+            hedging=not args.no_hedging,
         )
     except s.SettingsError as e:
         print(e, file=sys.stderr)
@@ -97,6 +119,11 @@ def _run(args) -> int:
     if source.resolve() != args.pdf.resolve():
         shutil.copyfile(args.pdf, source)
     started = time.monotonic()
+    # A failed paper task does not wait for its algorithm requests, so sends
+    # can end after the report is written. The exit (``run_then_exit``)
+    # joins those threads before it runs the atexit handlers: then the
+    # report's request records are made whole from requests.jsonl.
+    atexit.register(update_report, args.output_dir / "report.json")
     try:
         result = run_paper_task(
             source,

@@ -4,16 +4,22 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, 400, 401, timeout, slow, empty content, invalid
+- inject errors (500, 429, 400, 401, 403, timeout, slow, empty content, invalid
   JSON) on the N-th request of a kind, or on the first request of a kind and then on
   each resend of that same request (``fail_same_request``; a resend may
   name another model, as a request forwarded to argon does). "timeout" sends
+  nothing for an hour; "hang_after_headers" sends a 200 header and then
   nothing for an hour; "slow" sends the response headers at once and then the
   normal answer a few bytes at a time over ``slow_body_seconds``; "400"
   answers with ``REJECTION_BODY``, a JSON error spread over several lines
   and longer than 200 characters; "400_echo" answers with an error that
   echoes the request's Authorization header, key included;
-- inject a delay and count the maximum number of requests in flight.
+- inject a delay and count the maximum number of requests in flight;
+- keep connections open between requests (``keep_alive``, HTTP/1.1), so
+  that a client reuses them; each request records its client's port;
+- see a client disconnect: a request that hangs ("timeout",
+  "hang_after_headers") ends as soon as the client closes its connection,
+  is marked ``disconnected`` and leaves the in-flight count at once.
 
 Request kinds are recognised from the message content:
 
@@ -50,6 +56,8 @@ from __future__ import annotations
 
 import json
 import re
+import select
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -110,7 +118,20 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
-_ERRORS = {"500", "429", "400", "400_echo", "401", "timeout", "slow", "empty", "invalid_json"}
+_ERRORS = {
+    "500",
+    "429",
+    "400",
+    "400_echo",
+    "401",
+    "403",
+    "timeout",
+    "hang_after_headers",
+    "slow",
+    "empty",
+    "invalid_json",
+}
+HANG_SECONDS = 3600.0  # how long "timeout" and "hang_after_headers" hold a connection open
 
 # The body of an injected HTTP 400: several lines, the message first, then
 # padding that a 200-character excerpt cuts off.
@@ -134,6 +155,8 @@ class RecordedRequest:
     body: dict
     fault: str | None = None  # the injected error; None if answered normally
     received_at: float = 0.0  # time.monotonic() when the request arrived
+    disconnected: bool = False  # the client closed the connection before the answer ended
+    client_port: int = 0  # the client's end of the connection; equal ports: a reused connection
 
     @property
     def prompt(self) -> str:
@@ -163,6 +186,7 @@ class FakeModel:
     delay: float = 0.0
     slow_body_seconds: float = 30.0  # how long a "slow" fault takes to send its body
     port: int = 0  # 0 picks a free port; a test can bring up an endpoint that was unreachable
+    keep_alive: bool = False  # HTTP/1.1: a connection stays open for the client's next request
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
 
@@ -194,8 +218,8 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "400_echo", "401", "timeout", "slow",
-        "empty", "invalid_json".
+        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "timeout",
+        "hang_after_headers", "slow", "empty", "invalid_json".
         """
         assert error in _ERRORS, error
         self._faults.append(_Fault(kind=kind, nth=nth, error=error))
@@ -209,6 +233,12 @@ class FakeModel:
         self._same_request_faults.append(_SameRequestFault(kind=kind, errors=list(errors)))
 
     # -- inspection ----------------------------------------------------
+
+    @property
+    def in_flight(self) -> int:
+        """Requests received and not yet answered, nor given up by their client."""
+        with self._lock:
+            return self._in_flight
 
     def requests_of(self, kind: str) -> list[RecordedRequest]:
         with self._lock:
@@ -226,6 +256,8 @@ class FakeModel:
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1" if self.keep_alive else "HTTP/1.0"
+
             def log_message(self, *args):
                 pass
 
@@ -250,16 +282,16 @@ class FakeModel:
         kind = classify(body)
         with self._lock:
             fault = self._take_same_request_fault(kind, body) or self._take_fault(kind)
-            self.requests.append(
-                RecordedRequest(
-                    kind=kind,
-                    path=handler.path,
-                    headers=dict(handler.headers.items()),
-                    body=body,
-                    fault=fault,
-                    received_at=time.monotonic(),
-                )
+            request = RecordedRequest(
+                kind=kind,
+                path=handler.path,
+                headers=dict(handler.headers.items()),
+                body=body,
+                fault=fault,
+                received_at=time.monotonic(),
+                client_port=handler.client_address[1],
             )
+            self.requests.append(request)
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
@@ -274,10 +306,16 @@ class FakeModel:
             if fault == "400_echo":
                 echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
                 return _send_json(handler, 400, {"error": echo})
-            if fault == "401":
-                return _send_json(handler, 401, {"error": {"message": "injected 401"}})
-            if fault == "timeout":
-                time.sleep(3600)
+            if fault in ("401", "403"):
+                return _send_json(handler, int(fault), {"error": {"message": f"injected {fault}"}})
+            if fault in ("timeout", "hang_after_headers"):
+                if fault == "hang_after_headers":
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "application/json")
+                    handler.send_header("Content-Length", "1000")
+                    handler.end_headers()
+                    handler.wfile.flush()
+                request.disconnected = _wait_for_disconnect(handler, HANG_SECONDS)
                 return None
             if fault == "empty":
                 content = ""
@@ -287,7 +325,8 @@ class FakeModel:
                 content = self._responders[kind](body)
             payload = _completion(body.get("model", ""), content)
             if fault == "slow":
-                return _send_json_slowly(handler, payload, self.slow_body_seconds)
+                request.disconnected = not _send_json_slowly(handler, payload, self.slow_body_seconds)
+                return None
             _send_json(handler, 200, payload)
         finally:
             with self._lock:
@@ -477,6 +516,23 @@ def _completion(model: str, content: str) -> dict:
     }
 
 
+def _wait_for_disconnect(handler: BaseHTTPRequestHandler, seconds: float) -> bool:
+    """Wait up to ``seconds`` for the client to close the connection; True if it did."""
+    connection = handler.connection
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([connection], [], [], 0.02)
+        if not readable:
+            continue
+        try:
+            if connection.recv(1, socket.MSG_PEEK) == b"":
+                return True
+        except OSError:  # e.g. reset by the client
+            return True
+        time.sleep(0.02)  # bytes the client sent, not a close: keep waiting
+    return False
+
+
 def _send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -495,8 +551,11 @@ def _send_text(handler: BaseHTTPRequestHandler, status: int, text: str) -> None:
     handler.wfile.write(data)
 
 
-def _send_json_slowly(handler: BaseHTTPRequestHandler, payload: dict, seconds: float) -> None:
-    """Send a 200 header at once, then the body in small pieces spread over ``seconds``."""
+def _send_json_slowly(handler: BaseHTTPRequestHandler, payload: dict, seconds: float) -> bool:
+    """Send a 200 header at once, then the body in small pieces spread over ``seconds``.
+
+    Return False if the client closed the connection before the body ended.
+    """
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
@@ -509,4 +568,5 @@ def _send_json_slowly(handler: BaseHTTPRequestHandler, payload: dict, seconds: f
             time.sleep(seconds / len(pieces))
             handler.wfile.write(piece)
     except (BrokenPipeError, ConnectionResetError):
-        pass  # the client gave up on the response
+        return False  # the client gave up on the response
+    return True

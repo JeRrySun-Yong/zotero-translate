@@ -406,6 +406,7 @@ class ILTranslator:
                 TranslationRequestError(
                     error.message,
                     page_number=None if page_number is None else page_number + 1,
+                    category=error.category,
                 )
             )
 

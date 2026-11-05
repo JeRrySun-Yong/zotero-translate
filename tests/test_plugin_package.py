@@ -70,3 +70,15 @@ def test_package_holds_no_credentials_or_translation_parameters(xpi):
 def test_package_leaves_out_tests_and_dev_tools(xpi):
     assert all(not name.startswith(("test/", "dev/")) for name in xpi.namelist())
     assert "build.py" not in xpi.namelist()
+
+
+def test_package_has_no_test_switch(xpi):
+    # The acceptance's test switch (scenario 7: quit Zotero before an
+    # attachment's identity is written) runs through the dev bridge in the
+    # test profile only (plugin/dev/acceptance/quit_before_identity.js); the
+    # package neither holds it nor reads any test setting.
+    switch = (ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js").read_text("utf-8")
+    forbidden = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
+    assert forbidden.search(switch), "the pattern must match the switch itself"
+    for name in xpi.namelist():
+        assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name

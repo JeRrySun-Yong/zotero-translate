@@ -57,6 +57,43 @@ test("a finished row says how many paragraphs and algorithms kept their source t
   );
 });
 
+test("a running row names the attempt when the service has started more than one", () => {
+  const running = { title: "A", state: "running", stage: "翻译与审校", progress: 10 };
+  assert.equal(core.taskRow({ ...running, attempt: 1 }).status, "翻译中");
+  assert.equal(core.taskRow(running).status, "翻译中");
+  assert.equal(core.taskRow({ ...running, attempt: 2 }).status, "翻译中（第 2 次尝试）");
+  assert.equal(core.taskRow({ title: "A", state: "queued", attempt: 2, queuePosition: 1 }).status, "排队中（第 1 位）");
+});
+
+test("a row waiting for an automatic rerun says so, about when, which rerun and the last reason", () => {
+  const waiting = {
+    title: "A",
+    state: "waiting_rerun",
+    stage: "生成论文档案",
+    progress: 2,
+    rerunsUsed: 0,
+    rerunsMax: 2,
+    nextAttemptInSeconds: 55,
+    error: "生成论文档案失败：管线模型服务端出错（HTTP 500）",
+  };
+  assert.equal(
+    core.taskRow(waiting).status,
+    "等待自动重跑（约 1 分钟后，第 1 次自动重跑，共 2 次），上次失败：生成论文档案失败：管线模型服务端出错（HTTP 500）",
+  );
+  assert.equal(
+    core.taskRow({ ...waiting, rerunsUsed: 1, nextAttemptInSeconds: 241, error: "管线模型请求超时（480 秒）" }).status,
+    "等待自动重跑（约 5 分钟后，第 2 次自动重跑，共 2 次），上次失败：管线模型请求超时（480 秒）",
+  );
+  // Due now (0 seconds left) still reads "about 1 minute", never "0 minutes".
+  assert.match(core.taskRow({ ...waiting, nextAttemptInSeconds: 0 }).status, /约 1 分钟后/);
+  assert.equal(core.taskRow({ ...waiting, rerunsUsed: 1 }).stage, "生成论文档案");
+});
+
+test("after the reruns, a failed row shows the last attempt's reason", () => {
+  const row = core.taskRow({ title: "A", state: "failed", attempt: 3, rerunsUsed: 2, error: "管线模型拒绝了请求（HTTP 400）" });
+  assert.equal(row.status, "失败：管线模型拒绝了请求（HTTP 400）");
+});
+
 test("a failed row shows the reason", () => {
   const row = core.taskRow({ title: "A", state: "failed", stage: "翻译与审校", progress: 30, error: "管线模型请求连续失败（第 2 页附近）" });
   assert.equal(row.status, "失败：管线模型请求连续失败（第 2 页附近）");
@@ -73,4 +110,21 @@ test("the upload carries only the PDF bytes and the original file name", async (
   assert.deepEqual([...form.keys()], ["file", "filename"]);
   assert.deepEqual(new Uint8Array(await form.get("file").arrayBuffer()), pdfBytes);
   assert.equal(form.get("filename"), "Smith 2024 智能体.pdf");
+});
+
+test("a disconnected unfinished row says how many whole minutes it has waited, at least 1", () => {
+  const task = { title: "A", state: "queued", queuePosition: 2, disconnectedSince: 1000 };
+  assert.equal(core.taskRow(task, 1000).status, "翻译服务暂时连不上，恢复后继续（已 1 分钟）");
+  assert.equal(core.taskRow(task, 1000 + 119999).status, "翻译服务暂时连不上，恢复后继续（已 1 分钟）");
+  assert.equal(core.taskRow(task, 1000 + 180000).status, "翻译服务暂时连不上，恢复后继续（已 3 分钟）");
+  assert.equal(core.taskRow({ ...task, state: "failed", error: "x" }, 1000).status, "失败：x");
+});
+
+test("a cancelling row says so, with the service's reason or the disconnection; a cancelled row says 已取消", () => {
+  const cancelling = { title: "A", state: "cancelling", stage: "排队中", progress: 0 };
+  assert.equal(core.taskRow(cancelling).status, "取消中");
+  assert.equal(core.taskRow({ ...cancelling, cleanupError: "进程回收没有完成" }).status, "取消中：进程回收没有完成");
+  assert.equal(core.taskRow({ ...cancelling, disconnectedSince: 0 }, 5 * 60000).status, "取消中（翻译服务暂时连不上）");
+  assert.equal(core.taskRow({ title: "A", state: "cancelled" }).status, "已取消");
+  assert.equal(core.taskRow({ title: "A", state: "cancelled", disconnectedSince: 0 }, 60000).status, "已取消");
 });

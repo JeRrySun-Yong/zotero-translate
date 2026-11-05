@@ -307,7 +307,7 @@ def request_term_list(client: ModelClient, full_text: str, dossier: dict) -> Ter
             + full_text,
         },
     ]
-    entries = parse_term_list(client.complete(messages, validate=parse_term_list))
+    entries = parse_term_list(client.complete(messages, validate=parse_term_list, kind="term_list"))
     term_list = limit_key_concepts(promote_basic_terms(check_against_source(entries, full_text)))
     term_list = request_promoted_glosses(client, term_list, dossier)
     return rewrite_glosses(client, term_list, dossier)
@@ -493,7 +493,7 @@ def request_promoted_glosses(client: ModelClient, term_list: TermList, dossier: 
 
     record: dict = {"promoted": names}
     try:
-        glosses, renderings = parse(client.complete(messages, validate=parse))
+        glosses, renderings = parse(client.complete(messages, validate=parse, kind="promoted_glosses"))
     except ModelCallError as e:
         record.update({"succeeded": False, "error": str(e), "glosses": [], "rewritten": []})
         return dataclasses.replace(term_list, gloss_request=record)
@@ -612,22 +612,24 @@ def rewrite_glosses(client: ModelClient, term_list: TermList, dossier: dict) -> 
             + json.dumps(listed, ensure_ascii=False, indent=2),
         },
     ]
-    last: dict[str, str] = {}  # the glosses of the last answer that parsed
 
     def validate(content: str) -> None:
+        # No state shared between calls (spec section 8): the glosses of a
+        # rejected answer travel with its rejection.
         glosses = _parse_rewritten_glosses(content, names)
-        last.clear()
-        last.update(glosses)
         failing = [n for n in names if gloss_problems(glosses[n])]
         if failing:
-            raise ValueError(f"重写后的释义仍不合格：{', '.join(failing)}")
+            raise _RejectedGlosses(f"重写后的释义仍不合格：{', '.join(failing)}", glosses)
 
     record: dict = {"requested": listed["rewrite"]}
     try:
         # A cached answer skips ``validate``: it passed when it was cached.
-        glosses, error = _parse_rewritten_glosses(client.complete(messages, validate=validate), names), None
+        content = client.complete(messages, validate=validate, kind="gloss_rewrite")
+        glosses, error = _parse_rewritten_glosses(content, names), None
     except ModelCallError as e:
-        glosses, error = dict(last), str(e)
+        # The glosses of the last rejected answer that parsed, by send number.
+        parsed = [r.glosses for r in e.rejections if isinstance(r, _RejectedGlosses)]
+        glosses, error = dict(parsed[-1]) if parsed else {}, str(e)
     terms, rewritten, kept = [], [], []
     for entry in term_list.terms:
         first = entry["english"][0]
@@ -647,6 +649,14 @@ def rewrite_glosses(client: ModelClient, term_list: TermList, dossier: dict) -> 
         terms.append(entry)
     record.update({"succeeded": error is None, "error": error, "rewritten": rewritten, "kept": kept})
     return dataclasses.replace(term_list, terms=terms, gloss_rewrite=record)
+
+
+class _RejectedGlosses(ValueError):
+    """A gloss rewrite answer that parsed and still failed; ``glosses`` are its glosses."""
+
+    def __init__(self, reason: str, glosses: dict[str, str]):
+        super().__init__(reason)
+        self.glosses = glosses
 
 
 def _parse_rewritten_glosses(content: str, names: list[str]) -> dict[str, str]:

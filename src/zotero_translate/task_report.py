@@ -1,12 +1,19 @@
-"""Task report: what one paper task did, written as JSON when the task ends.
+"""Task report: what one attempt of a paper task did, written as JSON when it ends.
+
+In the translation service each attempt has its own report, which starts
+with the attempt number; the service copies the last one to the task's
+``report.json`` with a summary of all attempts (``zotero_translate.service``).
+``run`` has one attempt and no attempt number.
 
 It records the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
-concurrency limit, requests, timeouts and the maximum number of requests in
-flight), the batches whose requests failed for good and the
-term list counts with the spellings dropped because the source lacks them,
+concurrency limit, i.e. the size of its endpoint's budget, requests,
+timeouts and the maximum number of its requests in flight; when flash and
+argon share one endpoint, ``shared_budget`` gives the budget's size, the
+argon setting it ignores and its own maximum in flight), the batches whose
+requests failed for good and the term list counts with the spellings dropped because the source lacks them,
 the promoted basic terms, the promoted glosses request and the gloss checks,
 for each key concept the pages of its first-mention glosses in the
 abstract and in the body and whether the translation contains them (with
@@ -17,7 +24,10 @@ algorithms (pseudocode) found: pages, numbered lines, result ("translated" or
 "kept_source") and the reason for keeping the source, each translated row's
 source and final text, and each line's number, start x and glyphs, and the
 translated text the mono PDF draws but does not show (``lost_text``: page
-and text of each piece; see ``zotero_translate.lost_text``).
+and text of each piece; see ``zotero_translate.lost_text``), and one record
+per model request send and per cache hit (``requests``; see
+``zotero_translate.request_log``, which appends them to ``requests.jsonl``
+next to the report as they happen).
 """
 
 from __future__ import annotations
@@ -38,7 +48,9 @@ class TaskReport:
         models: PipelineModels,
         kept: KeptSource,
         algorithms: AlgorithmDetector | None = None,
+        attempt: int | None = None,
     ):
+        self.attempt = attempt
         self.models = models
         self.kept = kept
         self.algorithms = algorithms or AlgorithmDetector()
@@ -48,6 +60,7 @@ class TaskReport:
         self._stages: list[list] = []
         self.state = "succeeded"
         self.error: str | None = None
+        self.failure_category: str | None = None  # "permanent" or "retryable" once failed
         self.failed_batches: list[dict] = []
         self.terms: dict | None = None
         self.first_mentions: list[dict] | None = None
@@ -58,6 +71,8 @@ class TaskReport:
         self.lost_text: list[dict] | None = None
 
     def enter_stage(self, stage: str) -> None:
+        if self.models.request_log is not None:
+            self.models.request_log.stage = stage
         if self._stages and self._stages[-1][0] == stage:
             return
         now = time.monotonic()
@@ -67,9 +82,12 @@ class TaskReport:
             self._stages[-1][4] = usage
         self._stages.append([stage, now, None, usage, None])
 
-    def fail(self, error: str, failed_batches: list[dict] | None = None) -> None:
+    def fail(
+        self, error: str, failed_batches: list[dict] | None = None, category: str = "retryable"
+    ) -> None:
         self.state = "failed"
         self.error = error
+        self.failure_category = category
         self.failed_batches = failed_batches or []
 
     def write(self, path: Path) -> None:
@@ -79,8 +97,10 @@ class TaskReport:
         clients = endpoints.values()
         forwarded = self.models.flash.forwarded_pages
         report = {
+            **({"attempt": self.attempt} if self.attempt is not None else {}),
             "state": self.state,
             "error": self.error,
+            "failure_category": self.failure_category,
             "total_seconds": round(now - self._started, 1),
             "stages": [
                 {
@@ -99,16 +119,31 @@ class TaskReport:
                     "requests": len(forwarded),
                     "pages": sorted(forwarded, key=lambda p: (p is None, p)),
                 },
+                # Hedging (ADR 0004): its threshold in this task (None: off)
+                # and the argon copies sent; each copy's record says ``hedge``.
+                "hedging": {
+                    "after_seconds": self.models.flash.hedge_after_seconds,
+                    "copies": self.models.flash.hedge_count,
+                },
                 "endpoints": {
                     name: {
                         "model": c.model,
-                        "concurrency": c.settings.concurrency,
+                        "concurrency": c.concurrency,
                         "requests": c.request_count,
                         "timeouts": c.timeout_count,
                         "max_in_flight": c.max_in_flight,
                     }
                     for name, c in endpoints.items()
                 },
+                "shared_budget": (
+                    {
+                        "concurrency": self.models.flash.concurrency,
+                        "ignored_argon_concurrency": self.models.ignored_argon_concurrency,
+                        "max_in_flight": self.models.flash.endpoint.max_in_flight,
+                    }
+                    if self.models.shared_budget
+                    else None
+                ),
             },
             "failed_batches": self.failed_batches,
             "terms": self.terms,
@@ -119,6 +154,9 @@ class TaskReport:
             "kept_source_algorithms": self.algorithms.kept_source,
             "algorithms": self.algorithms.report(),
             "lost_text": self.lost_text,
+            "requests": (
+                list(self.models.request_log.records) if self.models.request_log else []
+            ),
         }
         Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 

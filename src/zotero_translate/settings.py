@@ -6,14 +6,23 @@ environment file outside the repository:
 - flash (``model.env``): translation batches, review, algorithms and
   paragraph redos; ``DEFAULT_MODEL``, 40 requests in flight;
 - argon (``argon.env``): the paper dossier, the term list, the promoted
-  glosses request, and flash requests that timed out twice in a row;
+  glosses request, the copies of slow flash sends (hedging) and flash
+  requests that timed out;
   ``DEFAULT_ARGON_MODEL``, ``DEFAULT_ARGON_CONCURRENCY`` requests in flight.
 
 Both files hold ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY``, and optionally
 ``AI_DEFAULT_MODEL`` and ``ZT_REQUEST_TIMEOUT_SECONDS``. The argon file may
 also set ``ZT_CONCURRENCY``, its limit of requests in flight; flash's limit
-comes from the ``--concurrency`` option. The plugin cannot change any of
-these settings.
+comes from the ``--concurrency`` option. When both files name the same
+address and key, the two are one endpoint with one budget of flash's limit,
+and argon's ``ZT_CONCURRENCY`` is ignored (``PipelineModels``). The plugin
+cannot change any of these settings.
+
+Hedging (M3 ticket 15, ADR 0004) is on unless ``run`` or ``serve`` gets
+``--no-hedging``: a flash send of a translation batch or a review that has
+run ``HEDGE_AFTER_SECONDS`` with no end gets a copy sent to argon. Test only:
+``ZT_TEST_HEDGE_AFTER_SECONDS`` (an environment variable, inherited by the
+service's task subprocesses) replaces the 400 seconds.
 """
 
 from __future__ import annotations
@@ -30,6 +39,8 @@ DEFAULT_ARGON_MODEL = "gemini-4-argon-high"
 # Below the 19 of 40 concurrent requests that argon answered in two probes.
 DEFAULT_ARGON_CONCURRENCY = 16
 DEFAULT_PORT = 8920
+HEDGE_AFTER_SECONDS = 400.0  # a flash send this old with no end gets an argon copy
+HEDGE_AFTER_SETTING = "ZT_TEST_HEDGE_AFTER_SECONDS"  # test only: replaces it
 DEFAULT_DATA_DIR = Path(
     os.environ.get(
         "ZT_DATA_DIR", Path.home() / "Library" / "Application Support" / "zotero-translate"
@@ -91,6 +102,9 @@ class PipelineSettings:
 
     flash: ModelSettings
     argon: ModelSettings
+    # Seconds after which a flash send of a hedged request kind gets an
+    # argon copy (``zotero_translate.model_client``); None: no hedging.
+    hedge_after_seconds: float | None = None
 
 
 def load_pipeline_settings(
@@ -98,11 +112,24 @@ def load_pipeline_settings(
     argon_env_file: Path,
     concurrency: int = DEFAULT_CONCURRENCY,
     cache_dir: Path | None = None,
+    hedging: bool = True,
 ) -> PipelineSettings:
-    """Read both environment files; raise ``SettingsError`` if either is missing or incomplete."""
+    """Read both environment files; raise ``SettingsError`` if either is missing or incomplete.
+
+    With ``hedging``, the threshold is ``HEDGE_AFTER_SECONDS``, or the test
+    setting ``ZT_TEST_HEDGE_AFTER_SECONDS``.
+    """
+    hedge_after = None
+    if hedging:
+        hedge_after = HEDGE_AFTER_SECONDS
+        if os.environ.get(HEDGE_AFTER_SETTING):
+            hedge_after = _positive_seconds(os.environ[HEDGE_AFTER_SETTING])
+            if hedge_after is None:
+                raise SettingsError(f"{HEDGE_AFTER_SETTING} 不是正数")
     return PipelineSettings(
         flash=load_model_settings(env_file, concurrency, cache_dir),
         argon=load_argon_settings(argon_env_file, cache_dir),
+        hedge_after_seconds=hedge_after,
     )
 
 
@@ -134,9 +161,12 @@ def load_argon_settings(env_file: Path, cache_dir: Path | None = None) -> ModelS
 
 def _read_endpoint_file(env_file: Path, missing_reason: str) -> dict[str, str]:
     env_file = Path(env_file)
-    if not env_file.is_file():
-        raise SettingsError(f"{missing_reason}：{env_file}")
-    values = read_env_file(env_file)
+    try:
+        if not env_file.is_file():
+            raise SettingsError(f"{missing_reason}：{env_file}")
+        values = read_env_file(env_file)
+    except (OSError, UnicodeDecodeError) as e:  # unreadable or not UTF-8: a settings error too
+        raise SettingsError(f"读不了环境文件 {env_file}：{type(e).__name__}") from e
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not values.get(k)]
     if missing:
         raise SettingsError(f"环境文件 {env_file} 缺少：{', '.join(missing)}")
