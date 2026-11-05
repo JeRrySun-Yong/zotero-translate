@@ -1,9 +1,12 @@
-/* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
- * the "翻译任务" window (from the item menu and the Tools menu), the notice
+/* The translation plugin inside Zotero: the "翻译为中文" item menu entry
+ * (greyed with "（没有 PDF）" for a selection without a source PDF), the
+ * "翻译任务" window (from the item menu and the Tools menu), the notice
  * "已提交 N 篇" after a submission (a click opens the task window), the
  * notice when a task is done or fails (with
  * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
- * window), and the Zotero side of the task lifecycle
+ * window), the notice asking whether to translate a paper that already has
+ * a translation again ("已有译文" with "再翻译一次"), and the Zotero side of
+ * the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
  * PDFs, importing an output PDF as an attachment, the attachments'
  * identities, saving the tasks in a preference.
@@ -142,13 +145,62 @@ var ZoteroTranslate = {
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
   },
 
-  // The entry shows for regular items (with or without a PDF) and for PDF
-  // attachments, with or without a parent item.
+  // The entry shows for regular items and for attachments (with or without
+  // a parent item). A selection without a source PDF shows it greyed, saying
+  // so, instead of failing after the click. Whether a regular item has one
+  // takes Zotero's item lists, which may not be loaded yet: the cache
+  // `_pdfCache` (item ID -> true/false) answers when it can, and the check
+  // is made again for the open menu.
+  _pdfCache: new Map(),
+  _menuChecks: 0,
+
   _onItemMenuShowing(event) {
     const window = event.target.ownerGlobal;
     const items = window.ZoteroPane.getSelectedItems();
     const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
-    menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
+    const selection = () => items.map((item) => ZoteroTranslate._menuState(item));
+    ZoteroTranslate._applyMenuItem(menu, ZoteroTranslateCore.translateMenuItem(selection()));
+    const check = ++ZoteroTranslate._menuChecks;
+    Promise.all(
+      items.map(async (item) => {
+        const state = ZoteroTranslate._menuState(item);
+        if (!state.candidate || state.known) {
+          return;
+        }
+        try {
+          ZoteroTranslate._pdfCache.set(item.id, !!(await ZoteroTranslate.sourcePdf(item)));
+        } catch (e) {
+          Zotero.logError(e);
+        }
+      }),
+    )
+      .then(() => {
+        // A later menu, or this one closed: the answer belongs to neither.
+        if (check !== ZoteroTranslate._menuChecks || !["open", "showing"].includes(menu.state)) {
+          return;
+        }
+        ZoteroTranslate._applyMenuItem(menu, ZoteroTranslateCore.translateMenuItem(selection()));
+      })
+      .catch((e) => Zotero.logError(e));
+  },
+
+  /** A selected item for the menu's decision: {candidate, hasPdf, known}. */
+  _menuState(item) {
+    if (!item.isRegularItem() && !item.isAttachment()) {
+      return { candidate: false, hasPdf: false, known: true };
+    }
+    if (item.isAttachment()) {
+      const pdf = ZoteroTranslateCore.pickSourcePdf([{ isPDF: item.isPDFAttachment(), title: item.getField("title") }]);
+      return { candidate: true, hasPdf: !!pdf, known: true };
+    }
+    const known = this._pdfCache.has(item.id);
+    return { candidate: true, hasPdf: this._pdfCache.get(item.id) ?? true, known };
+  },
+
+  _applyMenuItem(menu, { hidden, disabled, label }) {
+    menu.hidden = hidden;
+    menu.disabled = disabled;
+    menu.setAttribute("label", label);
   },
 
   /** Submit every selected item, one after another; the service runs them in
@@ -171,7 +223,9 @@ var ZoteroTranslate = {
     return this.lifecycle.submit(source);
   },
 
-  /** The item's source for the lifecycle, or why it has none (a string). */
+  /** The item's source for the lifecycle, or why it has none (a string).
+   *  `translated` tells the lifecycle that a translation output is already
+   *  attached, so it asks before translating the paper again. */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
@@ -183,7 +237,20 @@ var ZoteroTranslate = {
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
+      translated: parent ? await this._hasTranslation(parent) : false,
     };
+  },
+
+  /** Whether the item already has one of the plugin's translation outputs
+   *  among its attachments: the plugin's way of telling that the paper was
+   *  translated (also by an earlier Zotero session; a standalone PDF's
+   *  outputs are standalone attachments with no link back, so they do not
+   *  count). */
+  async _hasTranslation(item) {
+    const attachments = await Zotero.Items.getAsync(item.getAttachments());
+    return attachments.some(
+      (attachment) => !attachment.deleted && ZoteroTranslateCore.isTranslationOutput(attachment.getField("title")),
+    );
   },
 
   /** The PDF to translate: the selected attachment itself, or the item's best
@@ -337,6 +404,9 @@ var ZoteroTranslate = {
     if (payload.outcome === "submitted") {
       return this._openSubmissionNotice(payload, dismissed);
     }
+    if (payload.outcome === "resubmit") {
+      return this._openResubmitNotice(payload, dismissed);
+    }
     const { outcome, row } = payload;
     const done = outcome === "done";
     const parent = Zotero.getMainWindow();
@@ -380,6 +450,57 @@ var ZoteroTranslate = {
         doc.defaultView.sizeToContent();
         Zotero.ProgressWindowSet.tile(doc.defaultView);
       }
+      doc.addEventListener("click", () => {
+        dismissed();
+        notice.close();
+      });
+    });
+    return {
+      parent,
+      raise: () => window?.focus(),
+      close: () => {
+        closed = true;
+        notice.close();
+      },
+    };
+  },
+
+  /** The 已有译文 notice (lifecycle.js submitBatch): "已有译文" with the
+   *  papers that already have a translation, "再翻译一次？" and a
+   *  "再翻译一次" link that submits them (lifecycle.resubmit); a click
+   *  anywhere else only closes it, so nothing is translated again without
+   *  that click. It stays until it is clicked, like the notices of ended
+   *  tasks. */
+  _openResubmitNotice({ titles, keys }, dismissed) {
+    const parent = Zotero.getMainWindow();
+    const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
+    let window = null; // once loaded
+    let closed = false;
+    notice.changeHeadline("已有译文");
+    const lines = titles.map((title) => new notice.ItemProgress("attachmentPDF", title));
+    for (const line of lines) {
+      line.setProgress(100);
+    }
+    notice.addDescription("再翻译一次？");
+    notice.show();
+    this._noticeDocument(lines[0]).then((doc) => {
+      if (!doc || closed) {
+        return;
+      }
+      window = doc.defaultView;
+      const link = doc.createXULElement("label");
+      link.setAttribute("value", "再翻译一次");
+      link.setAttribute("class", "zotero-text-link");
+      link.setAttribute("role", "link");
+      link.dataset.action = "resubmit";
+      Object.assign(link.style, { color: "LinkText", textDecoration: "underline", cursor: "pointer" });
+      link.addEventListener("click", () => ZoteroTranslate.lifecycle.resubmit(keys).catch((e) => Zotero.logError(e)));
+      const box = doc.createXULElement("hbox");
+      box.setAttribute("class", "zotero-progress-item-hbox");
+      box.append(link);
+      doc.getElementById("zotero-progress-text-box").append(box);
+      window.sizeToContent();
+      Zotero.ProgressWindowSet.tile(window);
       doc.addEventListener("click", () => {
         dismissed();
         notice.close();

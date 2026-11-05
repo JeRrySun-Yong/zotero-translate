@@ -200,3 +200,27 @@ test("the submission notice says how many PDFs the service took, and why the oth
   // Uploads that failed have their own failure notices: nothing more to say.
   assert.equal(core.submissionNotice({ submitted: [], skipped: [] }), null);
 });
+
+test("the two translation outputs are recognized by their attachment titles", () => {
+  assert.equal(core.isTranslationOutput("中文译文"), true);
+  assert.equal(core.isTranslationOutput("双语对照"), true);
+  assert.equal(core.isTranslationOutput("Full Text PDF"), false);
+  assert.equal(core.isTranslationOutput("中文译文（副本）"), false);
+});
+
+test("the 翻译为中文 menu item: greyed with （没有 PDF） when no selected item has a PDF", () => {
+  const item = (candidate, hasPdf) => ({ candidate, hasPdf });
+  // Nothing that could be a source at all (a note, a collection): hidden.
+  assert.deepEqual(core.translateMenuItem([]), { hidden: true, disabled: true, label: "翻译为中文" });
+  assert.deepEqual(core.translateMenuItem([item(false, false)]), { hidden: true, disabled: true, label: "翻译为中文" });
+  // Items that could be sources, none with a PDF: shown, greyed, and saying why.
+  assert.deepEqual(core.translateMenuItem([item(true, false)]), { hidden: false, disabled: true, label: "翻译为中文（没有 PDF）" });
+  assert.deepEqual(core.translateMenuItem([item(true, false), item(false, false)]), {
+    hidden: false,
+    disabled: true,
+    label: "翻译为中文（没有 PDF）",
+  });
+  // One item with a PDF: usable as usual; the others without one are skipped on submission.
+  assert.deepEqual(core.translateMenuItem([item(true, false), item(true, true)]), { hidden: false, disabled: false, label: "翻译为中文" });
+  assert.deepEqual(core.translateMenuItem([item(true, true)]), { hidden: false, disabled: false, label: "翻译为中文" });
+});
