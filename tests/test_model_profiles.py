@@ -17,7 +17,6 @@ import stat
 import httpx
 import pytest
 
-from tests.conftest import EXCERPT
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FakeModel

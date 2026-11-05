@@ -156,7 +156,13 @@ from zotero_translate import processes
 from zotero_translate import task_dir as td
 from zotero_translate.paper_task import FIRST_STAGE
 from zotero_translate.request_log import REQUESTS_FILE
+from zotero_translate.model_client import check_connection
+from zotero_translate.profiles import BUILTIN_ID
+from zotero_translate.profiles import BUILTIN_NAME
+from zotero_translate.profiles import ProfileError
+from zotero_translate.profiles import ProfileStore
 from zotero_translate.request_log import load_records
+from zotero_translate.settings import DEFAULT_PROFILES_DIR
 from zotero_translate.settings import model_cache_dir
 
 HOST = "127.0.0.1"
@@ -169,6 +175,7 @@ RERUN_WAITS_SECONDS = (60.0, 300.0)  # before the first and the second rerun
 REAP_RETRY_SECONDS = 30.0  # between tries of a reap that failed
 CANCEL_REASON = "用户取消了任务"
 LOCK_FILE = "service.lock"
+WRITE_HEADER = "X-Zotero-Translate"  # the custom header of the profile writes; value "1"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"
 PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
@@ -216,6 +223,14 @@ _EVENTS = {
     "cleanup_error": "进程回收出错",
     "report_dropped": "丢弃上报",  # a worker report the service cannot use
 }
+_PROFILE_EVENTS = {
+    "created": "新建配置",
+    "updated": "修改配置",
+    "deleted": "删除配置",
+    "tested": "测试连接",  # the reason is the outcome
+    "applied": "应用配置",
+    "current_reset": "当前配置改回 Gemini",  # its file is gone, or it is no longer tested
+}
 
 
 class TaskQueue:
@@ -232,6 +247,7 @@ class TaskQueue:
         argon_env_file: Path,
         concurrency: int,
         hedging: bool = True,
+        profiles_dir: Path = DEFAULT_PROFILES_DIR,
     ):
         self.tasks_dir = Path(data_dir) / "tasks"
         self.cache_dir = model_cache_dir(data_dir)
@@ -239,6 +255,9 @@ class TaskQueue:
         self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
         self.hedging = hedging  # False: each worker gets ``--no-hedging``
+        self.profiles = ProfileStore(
+            profiles_dir, data_dir, env_file, argon_env_file, concurrency, self._log_profile
+        )
         # Waiting tasks: task ID -> (rank of its queue class, *sort key).
         self._waiting: dict[str, tuple] = {}
         # Tasks waiting for an automatic rerun: task ID -> (due time, submission time).
@@ -262,7 +281,11 @@ class TaskQueue:
         A task directory from before M3 keeps its final state; queued, it
         is queued as a first attempt; running, it fails.
         An error with one task fails that task alone, with a readable reason.
+
+        The current model profile is checked first: one whose file is gone
+        or that is no longer tested goes back to Gemini, with a log line.
         """
+        self.profiles.current()
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         for status_file in sorted(self.tasks_dir.glob(f"*/{td.STATUS_FILE}")):
             task_id = status_file.parent.name
@@ -568,22 +591,38 @@ class TaskQueue:
         )
         if reason:
             line += f" reason={json.dumps(reason, ensure_ascii=False)}"
-        try:
-            print(line, flush=True)
-        except (OSError, ValueError):  # no standard output: the transition stands
-            pass
+        _print_log_line(line)
+
+    def _log_profile(self, profile_id: str, event: str, name: str | None, reason: str | None) -> None:
+        """One service log line about a model profile; never its key (``ProfileStore``)."""
+        line = (
+            f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')}"
+            f" profile={profile_id} event={_PROFILE_EVENTS[event]}"
+            f" name={json.dumps(name, ensure_ascii=False)}"
+        )
+        if reason:
+            line += f" reason={json.dumps(reason, ensure_ascii=False)}"
+        _print_log_line(line)
 
     # -- HTTP side -----------------------------------------------------------
 
     def submit(self, pdf: bytes, filename: str) -> str:
+        """Queue a new task; it records the current model profile, for all its attempts."""
         task_id = uuid.uuid4().hex
         directory = self.tasks_dir / task_id
         directory.mkdir()
         (directory / td.SOURCE_PDF).write_bytes(pdf)
         submitted_at = time.time()
+        profile_id, profile_name = self.profiles.current()
         (directory / "task.json").write_text(
             json.dumps(
-                {"task_id": task_id, "filename": filename, "submitted_at": submitted_at},
+                {
+                    "task_id": task_id,
+                    "filename": filename,
+                    "submitted_at": submitted_at,
+                    "profile_id": profile_id,
+                    "profile_name": profile_name,
+                },
                 ensure_ascii=False,
             ),
             encoding="utf-8",
@@ -619,6 +658,10 @@ class TaskQueue:
             position = order.index(task_id) + 1 if task_id in order else None
         state = status["state"]
         due = status.get("next_attempt_at")
+        try:
+            profile = _task_profile(directory)
+        except (OSError, ValueError):
+            profile = None
         return {
             "task_id": task_id,
             "state": state,
@@ -640,7 +683,21 @@ class TaskQueue:
             "kept_source_paragraphs": status.get("kept_source_paragraphs", 0),
             "kept_source_algorithms": status.get("kept_source_algorithms", 0),
             "files": td.available_files(directory),
+            "profile": profile,  # {"id", "name"} recorded at submission
         }
+
+    def profile_users(self, profile_id: str) -> int:
+        """How many unfinished tasks recorded the model profile ``profile_id``."""
+        users = 0
+        with self._cond:
+            for status_file in self.tasks_dir.glob(f"*/{td.STATUS_FILE}"):
+                try:
+                    unfinished = td.read_status(status_file.parent)["state"] not in td.TERMINAL_STATES
+                    if unfinished and _task_profile(status_file.parent)["id"] == profile_id:
+                        users += 1
+                except (OSError, ValueError, KeyError):
+                    continue
+        return users
 
     def cancel(self, task_id: str) -> tuple[int, dict] | None:
         """Cancel the task: ``(HTTP status, the task as status() gives it)``, or None if unknown.
@@ -966,8 +1023,25 @@ class TaskQueue:
         return result
 
     def _start_worker(self, task_id: str, attempt: int, marker: str) -> tuple[subprocess.Popen, int]:
-        """Start the attempt's subprocess; return it and the read end of its report pipe."""
+        """Start the attempt's subprocess; return it and the read end of its report pipe.
+
+        The model settings are those of the profile the task recorded at
+        submission: the start options for Gemini, else the profile's file,
+        as it is now (an edit since, e.g. a new key, reaches the attempt).
+        """
         directory = self.tasks_dir / task_id
+        profile = _task_profile(directory)
+        if profile["id"] == BUILTIN_ID:
+            model_options = [
+                "--env-file",
+                str(self.env_file),
+                "--argon-env-file",
+                str(self.argon_env_file),
+                "--concurrency",
+                str(self.concurrency),
+            ]
+        else:
+            model_options = ["--profile-file", str(self.profiles.path(profile["id"]))]
         read_end, write_end = os.pipe()
         command = [
             sys.executable,
@@ -978,12 +1052,11 @@ class TaskQueue:
             str(attempt),
             "--report-fd",
             str(write_end),
-            "--env-file",
-            str(self.env_file),
-            "--argon-env-file",
-            str(self.argon_env_file),
-            "--concurrency",
-            str(self.concurrency),
+            *model_options,
+            "--profile-id",
+            profile["id"],
+            "--profile-name",
+            profile["name"],
             "--cache-dir",
             str(self.cache_dir),
         ]
@@ -1043,6 +1116,22 @@ def _submitted_at(directory: Path) -> float:
     return float(json.loads((directory / "task.json").read_text("utf-8"))["submitted_at"])
 
 
+def _task_profile(directory: Path) -> dict:
+    """``{"id", "name"}`` of the model profile the task recorded; Gemini for a task from before M4."""
+    task = json.loads((directory / "task.json").read_text("utf-8"))
+    return {
+        "id": task.get("profile_id") or BUILTIN_ID,
+        "name": task.get("profile_name") or BUILTIN_NAME,
+    }
+
+
+def _print_log_line(line: str) -> None:
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):  # no standard output: the transition stands
+        pass
+
+
 def _failure(error: str, category: str) -> dict:
     return {"outcome": "failed", "error": error, "category": category}
 
@@ -1088,6 +1177,8 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             parts = self.path.split("?", 1)[0].strip("/").split("/")
             if parts == ["health"]:
                 return self._json(200, {"service": "zotero-translate", "version": __version__})
+            if parts[0] == "profiles":
+                return self._profiles("GET", parts[1:])
             if len(parts) == 2 and parts[0] == "tasks":
                 status = queue.status(parts[1])
                 if status is None:
@@ -1097,8 +1188,85 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
                 return self._send_file(parts[1], parts[3])
             return self._not_found()
 
+        def do_PUT(self):
+            self._profiles("PUT", self._profile_path())
+
+        def do_DELETE(self):
+            self._profiles("DELETE", self._profile_path())
+
+        def do_OPTIONS(self):
+            # No CORS preflight passes: a web page cannot send the profile
+            # writes, which need a custom header and a JSON body.
+            self._json(403, {"error": "翻译服务不接受跨源请求"})
+
+        def _profile_path(self) -> list[str] | None:
+            parts = self.path.split("?", 1)[0].strip("/").split("/")
+            return parts[1:] if parts[0] == "profiles" else None
+
+        def _profiles(self, method: str, rest: list[str] | None):
+            """The model profile requests (see the module docstring)."""
+            # The body is read first, whatever the answer: a socket closed
+            # with unread data may reset the connection before the answer.
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else b""
+            if rest is None:
+                return self._not_found()
+            if not self._local_host():
+                return self._json(403, {"error": "请求的主机名不是本机翻译服务"})
+            body = {}
+            if method != "GET":
+                body = self._write_body(data)
+                if body is None:
+                    return None
+            store = queue.profiles
+            try:
+                if method == "GET" and rest == []:
+                    return self._json(200, store.listing())
+                if method == "POST" and rest == []:
+                    return self._json(201, store.create(body))
+                if len(rest) == 1 and method == "GET":
+                    return self._json(200, store.get(rest[0]))
+                if len(rest) == 1 and method == "PUT":
+                    return self._json(200, store.update(rest[0], body))
+                if len(rest) == 1 and method == "DELETE":
+                    return self._json(200, store.delete(rest[0], queue.profile_users(rest[0])))
+                if len(rest) == 2 and method == "POST" and rest[1] == "test":
+                    # The request itself runs outside the store's lock.
+                    check = check_connection(store.test_settings(rest[0]))
+                    return self._json(200, store.record_test(rest[0], check))
+                if len(rest) == 2 and method == "POST" and rest[1] == "apply":
+                    return self._json(200, store.apply(rest[0]))
+            except ProfileError as e:
+                return self._json(e.status, {"error": str(e)})
+            return self._json(404, {"error": "翻译服务没有这个接口"})
+
+        def _local_host(self) -> bool:
+            """Whether the Host header names this service (no page of another name resolved to it)."""
+            port = self.server.server_address[1]
+            return self.headers.get("Host", "") in (f"{HOST}:{port}", f"localhost:{port}")
+
+        def _write_body(self, data: bytes) -> dict | None:
+            """The JSON object body of a profile write; None once a refusal is sent."""
+            if self.headers.get(WRITE_HEADER) != "1":
+                self._json(403, {"error": f"缺少请求头 {WRITE_HEADER}: 1"})
+                return None
+            media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if media_type != "application/json":
+                self._json(415, {"error": "请求正文要是 JSON（Content-Type: application/json）"})
+                return None
+            try:
+                body = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                body = None
+            if not isinstance(body, dict):
+                self._json(400, {"error": "请求正文不是 JSON 对象"})
+                return None
+            return body
+
         def do_POST(self):
             parts = self.path.split("?", 1)[0].strip("/").split("/")
+            if parts[0] == "profiles":
+                return self._profiles("POST", parts[1:])
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
                 answer = queue.cancel(parts[1])
                 if answer is None:
@@ -1186,6 +1354,7 @@ def serve(
     port: int,
     concurrency: int,
     hedging: bool = True,
+    profiles_dir: Path = DEFAULT_PROFILES_DIR,
 ) -> int:
     """Run the service until interrupted; print ``{"url": ...}`` once listening.
 
@@ -1200,7 +1369,7 @@ def serve(
             file=sys.stderr,
         )
         return 1
-    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency, hedging)
+    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency, hedging, profiles_dir)
     try:
         server = ThreadingHTTPServer((HOST, port), make_handler(queue))
     except OSError as e:

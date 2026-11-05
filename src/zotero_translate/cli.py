@@ -42,6 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     serve = commands.add_parser("serve", help="start the translation service on 127.0.0.1")
     serve.add_argument("--port", type=int, default=s.DEFAULT_PORT, help="0 picks a free port")
     _add_model_options(serve)
+    serve.add_argument(
+        "--profiles-dir",
+        type=Path,
+        default=s.DEFAULT_PROFILES_DIR,
+        help="the user model profiles' files, <id>.env (ADR 0005); "
+        "default ~/.config/zotero-translate/profiles or ZT_PROFILES_DIR",
+    )
 
     run = commands.add_parser("run", help="run one paper task on a PDF")
     run.add_argument("pdf", type=Path)
@@ -64,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             args.port,
             args.concurrency,
             hedging=not args.no_hedging,
+            profiles_dir=args.profiles_dir,
         )
     run_then_exit(lambda: _run(args))  # does not return
 

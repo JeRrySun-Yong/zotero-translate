@@ -89,6 +89,11 @@ says so. The engine's own concurrency still comes from flash's setting.
 Closing a client cancels its sends in flight (a failed paper task does not
 wait for its algorithm requests to time out); they raise ``SendCancelled``.
 
+Connection test (M4 ticket 02, ADR 0005): ``check_connection`` sends a
+model profile's one small request, with the paper task's parameters, and
+tells the outcome apart (succeeded, unreachable, unauthorized, model not
+found, timeout, unparseable, another HTTP error).
+
 Request latency records (spec section 7, ``zotero_translate.request_log``):
 with a ``request_log``, every send gets a record when it ends, and so does
 every answer from the cache. A send's time is counted from the moment it
@@ -103,9 +108,11 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -845,6 +852,105 @@ class _Hedged:
         return error
 
 
+# The connection test of a model profile (M4 ticket 02, ADR 0005).
+CONNECTION_TEST_MESSAGES = [
+    {
+        "role": "system",
+        "content": "This is a connection test of the translation pipeline. "
+        'Reply with exactly this JSON object and nothing else: {"ok": true}',
+    },
+    {"role": "user", "content": 'Return {"ok": true}.'},
+]
+CONNECTION_TEST_TIMEOUT_SECONDS = 60.0  # at most; a profile's shorter request timeout wins
+# The outcomes of a connection test; "http_error" is any other HTTP error (429, 5xx).
+CONNECTION_TEST_RESULTS = (
+    "succeeded",
+    "unreachable",
+    "unauthorized",
+    "model_not_found",
+    "timeout",
+    "unparseable",
+    "http_error",
+)
+_CONNECTION_TEST_MESSAGES = {
+    "succeeded": "连接成功",
+    "unreachable": "地址连不上",
+    "unauthorized": "密钥无效",
+    "model_not_found": "模型不存在",
+    "timeout": "请求超时",
+    "unparseable": "回答不能解析",
+    "http_error": "端点出错",
+}
+
+
+@dataclass(frozen=True)
+class ConnectionCheck:
+    """The outcome of ``check_connection``: one of ``CONNECTION_TEST_RESULTS``."""
+
+    result: str
+    message: str  # readable Chinese, with the endpoint's reason; never the API key
+    seconds: float
+    http_status: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result == "succeeded"
+
+
+def check_connection(settings: ModelSettings) -> ConnectionCheck:
+    """Send one small request with the paper task's parameters; tell the outcome.
+
+    The body is built as for every paper task request (model, reasoning
+    effort, temperature: ``ModelClient._body``), and the answer's message
+    ``content`` must be the JSON object ``{"ok": true}``, fenced or not;
+    a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
+    is not read. One send: no retry, no cache, a timeout of at most
+    ``CONNECTION_TEST_TIMEOUT_SECONDS``. A 404, or a 400 or 422 whose body
+    names the model, means the model does not exist.
+    """
+    settings = replace(
+        settings,
+        timeout_seconds=min(settings.timeout_seconds, CONNECTION_TEST_TIMEOUT_SECONDS),
+        max_retries=0,
+        concurrency=1,
+        cache_dir=None,
+    )
+    client = ModelClient(settings)
+    timing = _SendTiming()
+    started = time.monotonic()
+
+    def outcome(result: str, detail: str = "") -> ConnectionCheck:
+        message = _CONNECTION_TEST_MESSAGES[result] + (f"：{detail}" if detail else "")
+        return ConnectionCheck(result, message, round(time.monotonic() - started, 3), timing.http_status)
+
+    try:
+        try:
+            content = client._send(client._body(CONNECTION_TEST_MESSAGES), timing)
+        except _Timeout as e:
+            return outcome("timeout", str(e))
+        except _NetworkError as e:
+            cause = f"{type(e.__cause__).__name__}" if e.__cause__ else ""
+            return outcome("unreachable", f"{e}（{cause}）" if cause else str(e))
+        except (ModelCallError, _HttpError) as e:
+            status = timing.http_status
+            if status in (401, 403):
+                return outcome("unauthorized", str(e))
+            if status == 404 or (status in (400, 422) and "model" in str(e).lower()):
+                return outcome("model_not_found", str(e))
+            return outcome("http_error", str(e))
+        except _RetryableError as e:  # an empty or malformed response body
+            return outcome("unparseable", str(e))
+        try:
+            answer = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content))
+        except ValueError:
+            answer = None
+        if not isinstance(answer, dict) or answer.get("ok") is not True:
+            return outcome("unparseable", f"回答不是 {{\"ok\": true}}：{' '.join(content.split())[:80]}")
+        return outcome("succeeded")
+    finally:
+        client.close()
+
+
 class PipelineModels:
     """The paper task's two clients (ADR 0004).
 
@@ -858,6 +964,7 @@ class PipelineModels:
 
     def __init__(self, settings: PipelineSettings, request_log: RequestLog | None = None):
         self.request_log = request_log
+        self.profile = settings.profile  # {"id", "name"} of a service task; None for ``run``
         flash, argon = settings.flash, settings.argon
         flash_endpoint = Endpoint(flash)
         argon_endpoint = None

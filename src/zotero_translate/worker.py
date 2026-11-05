@@ -1,7 +1,13 @@
 """Subprocess entry point: run one attempt of a paper task in its task directory.
 
 Usage: python -m zotero_translate.worker TASK_DIR --attempt N --report-fd FD
---env-file FILE --argon-env-file FILE --concurrency N [--cache-dir DIR] [--no-hedging]
+(--env-file FILE --argon-env-file FILE --concurrency N | --profile-file FILE)
+[--profile-id ID --profile-name NAME] [--cache-dir DIR] [--no-hedging]
+
+The model settings are the built-in profile's two endpoint files, or a user
+profile's one file for both roles (``--profile-file``, ADR 0005); the
+profile's id and name go to the task report. A profile file that is gone or
+incomplete is a settings error, ``permanent``.
 
 The subprocess never writes the status file: only the translation service
 decides the task's state. It reports to the service through the pipe ``FD``,
@@ -58,6 +64,7 @@ from zotero_translate.paper_task import run_paper_task
 from zotero_translate.process_exit import run_then_exit
 from zotero_translate.settings import SettingsError
 from zotero_translate.settings import load_pipeline_settings
+from zotero_translate.settings import load_profile_settings
 
 # Test only: when set, the subprocess first sends a line that is not JSON and
 # a progress report without a stage, which the service must drop.
@@ -72,12 +79,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("task_dir", type=Path)
     parser.add_argument("--attempt", type=int, required=True)
     parser.add_argument("--report-fd", type=int, required=True)
-    parser.add_argument("--env-file", type=Path, required=True)
-    parser.add_argument("--argon-env-file", type=Path, required=True)
-    parser.add_argument("--concurrency", type=int, required=True)
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--argon-env-file", type=Path)
+    parser.add_argument("--concurrency", type=int)
+    parser.add_argument("--profile-file", type=Path)
+    parser.add_argument("--profile-id")
+    parser.add_argument("--profile-name")
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--no-hedging", action="store_true")
     args = parser.parse_args(argv)
+    given = [v is not None for v in (args.env_file, args.argon_env_file, args.concurrency)]
+    if any(given) if args.profile_file is not None else not all(given):
+        parser.error("give either --profile-file or all of --env-file, --argon-env-file, --concurrency")
+    profile = {"id": args.profile_id, "name": args.profile_name} if args.profile_id else None
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     directory: Path = args.task_dir
@@ -112,13 +126,19 @@ def main(argv: list[str] | None = None) -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     try:
-        settings = load_pipeline_settings(
-            args.env_file,
-            args.argon_env_file,
-            args.concurrency,
-            args.cache_dir,
-            hedging=not args.no_hedging,
-        )
+        if args.profile_file is not None:
+            settings = load_profile_settings(
+                args.profile_file, args.cache_dir, hedging=not args.no_hedging, profile=profile
+            )
+        else:
+            settings = load_pipeline_settings(
+                args.env_file,
+                args.argon_env_file,
+                args.concurrency,
+                args.cache_dir,
+                hedging=not args.no_hedging,
+                profile=profile,
+            )
     except SettingsError as e:
         send("result", outcome="failed", error=str(e), category="permanent")
         return 1

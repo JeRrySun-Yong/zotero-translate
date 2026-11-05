@@ -5,7 +5,8 @@ with the attempt number; the service copies the last one to the task's
 ``report.json`` with a summary of all attempts (``zotero_translate.service``).
 ``run`` has one attempt and no attempt number.
 
-It records the time spent in each stage with the requests sent and the
+It records the model profile of a service task, with the model each role
+used (``profile``; ADR 0005), the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
 forwarded from flash to argon with their pages; for each endpoint: model,
@@ -102,6 +103,16 @@ class TaskReport:
             "error": self.error,
             "failure_category": self.failure_category,
             "total_seconds": round(now - self._started, 1),
+            # The model profile of a service task (ADR 0005) and the models
+            # its two roles used; None for ``run``.
+            "profile": (
+                {
+                    **self.models.profile,
+                    "models": {name: c.model for name, c in endpoints.items()},
+                }
+                if self.models.profile
+                else None
+            ),
             "stages": [
                 {
                     "stage": stage,
