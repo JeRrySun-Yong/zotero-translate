@@ -41,9 +41,39 @@ function environment({ pdfs = new Map(), sourcePdf = null } = {}) {
       throw e;
     },
   });
-  env.show = (items) => env.controller.showing({ popup: env.popup, menu: env.menu, items });
+  env.show = (items, selection = null) => env.controller.showing({ popup: env.popup, menu: env.menu, items, selection });
   env.hide = () => env.controller.hidden({ popup: env.popup });
   return env;
+}
+
+/** Let every pending promise and I/O callback run. */
+async function settle() {
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** A popup stand-in: addEventListener/removeEventListener as in the DOM, and
+ *  dispatch(type, target), which runs the listeners with `currentTarget` the
+ *  popup, the way a bubbling event does. */
+function fakePopup() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) {
+        listeners.set(type, new Set());
+      }
+      listeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    dispatch(type, target) {
+      for (const fn of [...(listeners.get(type) || [])]) {
+        fn({ type, target, currentTarget: this });
+      }
+    },
+  };
 }
 
 test("the first opening greys the entry once its source check answers, with no second opening", async () => {
@@ -120,4 +150,74 @@ test("one item with a PDF keeps the entry usable while the others are checked", 
   await env.show([regular(10), regular(11)]);
   assert.deepEqual(stateOf(env.menu), { hidden: false, disabled: false, label: "翻译为中文" });
   assert.deepEqual(env.asked, [10, 11]);
+});
+
+test("a submenu's popupshowing and popuphidden are not the item menu's own; its check still settles", async () => {
+  let answer;
+  const env = environment({
+    sourcePdf: (item) => {
+      env.asked.push(item.id);
+      return new Promise((resolve) => (answer = resolve));
+    },
+  });
+  const popup = fakePopup();
+  const submenu = { id: "a submenu popup" };
+  const detach = env.controller.addToPopup(popup, { menu: () => env.menu, selection: () => [regular(10)] });
+
+  popup.dispatch("popupshowing", popup); // the item menu opens
+  assert.deepEqual(stateOf(env.menu), { hidden: false, disabled: false, label: "翻译为中文" });
+  popup.dispatch("popupshowing", submenu); // a submenu of it opens, while the check is under way
+  popup.dispatch("popuphidden", submenu); // and closes again
+  assert.deepEqual(env.asked, [10]); // neither is a new opening of the item menu
+
+  answer(null);
+  await settle();
+  assert.deepEqual(stateOf(env.menu), { hidden: false, disabled: true, label: "翻译为中文（没有 PDF）" });
+
+  detach();
+  popup.dispatch("popupshowing", popup);
+  assert.deepEqual(env.asked, [10]); // the listeners are gone
+});
+
+test("an answer is not used when the selection changed under the open menu: a no-PDF item gives way to one with a PDF", async () => {
+  const waiting = [];
+  const env = environment({
+    sourcePdf: (item) => {
+      env.asked.push(item.id);
+      return new Promise((resolve) => waiting.push({ id: item.id, resolve }));
+    },
+  });
+  let selection = [regular(10)];
+  const opening = env.show(selection, () => selection);
+
+  selection = [regular(11)]; // the menu does not open again
+  waiting[0].resolve(null); // A has no PDF; B must not be greyed by that
+  await settle();
+  assert.equal(env.menu.disabled, false);
+  assert.deepEqual(env.asked, [10, 11]); // the current selection is checked instead
+
+  waiting[1].resolve({ id: 1 }); // B has one
+  await opening;
+  assert.deepEqual(stateOf(env.menu), { hidden: false, disabled: false, label: "翻译为中文" });
+});
+
+test("an answer is not used when the selection changed under the open menu: a PDF on the old item does not keep the new one usable", async () => {
+  const waiting = [];
+  const env = environment({
+    sourcePdf: (item) => {
+      env.asked.push(item.id);
+      return new Promise((resolve) => waiting.push({ id: item.id, resolve }));
+    },
+  });
+  let selection = [regular(10)];
+  const opening = env.show(selection, () => selection);
+
+  selection = [regular(11)];
+  waiting[0].resolve({ id: 1 }); // A has a PDF; B must still be checked
+  await settle();
+  assert.deepEqual(env.asked, [10, 11]);
+
+  waiting[1].resolve(null);
+  await opening;
+  assert.deepEqual(stateOf(env.menu), { hidden: false, disabled: true, label: "翻译为中文（没有 PDF）" });
 });
