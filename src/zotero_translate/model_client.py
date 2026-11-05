@@ -87,6 +87,18 @@ same address and API key, they are one endpoint and share one budget, of
 flash's concurrency setting; argon's own setting is ignored, and the log
 says so. The engine's own concurrency still comes from flash's setting.
 
+Streamed requests (M4 ticket 12): with ``settings.stream`` (a user
+profile's setting, ``ZT_STREAM=1``; off for the built-in Gemini, whose
+request bodies and cache keys stay as they were), the body asks for
+``"stream": true`` and the answer is the stream's content deltas, joined
+(``_streamed_content``); thinking deltas are not read. The endpoint reads
+the whole stream as it reads a plain body, so the request timeout, a
+cancel, a hedge's winner and closing the client end a stream in flight as
+they end any send. A stream that ends without a ``finish_reason`` broke off
+and is retried like an unparseable answer (recorded ``invalid_answer``).
+Why: Command Code's DeepSeek Fast answers a plain request that thinks
+longer than about 125 seconds with HTTP 524 (ticket 03).
+
 Closing a client cancels its sends in flight (a failed paper task does not
 wait for its algorithm requests to time out); they raise ``SendCancelled``.
 
@@ -976,7 +988,7 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
     """Send one small request with the paper task's parameters; tell the outcome.
 
     The body is built as for every paper task request (model, reasoning
-    effort, temperature: ``ModelClient._body``), and the answer's message
+    effort, temperature, streaming: ``ModelClient._body``), and the answer's message
     ``content`` must be the JSON object ``{"ok": true}``, fenced or not;
     a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
     is not read. One send: no retry, no cache, a timeout of at most
