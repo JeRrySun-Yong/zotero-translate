@@ -161,14 +161,20 @@
 
     test() {
       return this.run(async () => {
-        this.showResult({ ok: true, text: "正在测试连接…（最长约 1 分钟）", detail: "" });
-        const outcome = await client.saveAndTest(this.form(), this.saved());
-        if (outcome.profile) {
-          await this.refresh();
-          this.select(outcome.profile.id); // the form as saved (the key field empty again)
-        }
+        const testing = { ok: true, text: "正在测试连接…（最长约 1 分钟）", detail: "" };
+        this.showResult(testing);
+        const outcome = await client.saveAndTest(this.form(), this.saved(), {
+          // Saved: show the service's state now (the current mark, "未测试"),
+          // not after the test; a save of the current profile's model makes
+          // the built-in profile current again.
+          onSaved: async (profile) => {
+            await this.refresh();
+            this.select(profile.id); // the form as saved (the key field empty again)
+            this.showResult(testing);
+          },
+        });
         this.showResult(outcome.error ? { ok: false, text: outcome.error, detail: "" } : outcome.view);
-      });
+      }); // run() asks the service again once the test is over
     },
 
     apply() {

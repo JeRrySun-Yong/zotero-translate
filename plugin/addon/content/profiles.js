@@ -252,8 +252,12 @@ var ZoteroTranslateProfiles = (() => {
       },
 
       /** Save the form when it differs from `saved` (or is new), then test the
-       *  saved profile: {profile, view} with the profile as saved, or {error}. */
-      async saveAndTest(form, saved) {
+       *  saved profile: {profile, view} with the profile as saved, or {error}.
+       *  After a save, `onSaved(profile)` is awaited before the test starts:
+       *  a save can already have changed the service's current profile (a new
+       *  model makes the built-in one current again), and the test takes up
+       *  to a minute. */
+      async saveAndTest(form, saved, { onSaved = () => {} } = {}) {
         const request = profileRequest(form, saved);
         if (request && request.error) {
           return { error: request.error };
@@ -268,6 +272,7 @@ var ZoteroTranslateProfiles = (() => {
             return { error: refusal("没有保存", answer) };
           }
           profile = answer.body;
+          await onSaved(profile);
         }
         const answer = await send("POST", ["profiles", profile.id, "test"], {}, TEST_LIMIT_MS);
         if (!answer) {

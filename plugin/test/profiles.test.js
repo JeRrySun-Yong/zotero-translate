@@ -262,6 +262,44 @@ test("testing an unchanged saved profile sends only the test; an edited one is s
   assert.equal(after.profile.model, "vendor/model-b");
 });
 
+test("once the form is saved the page hears of it before the test starts, and the test waits for it", async () => {
+  // Saving a current profile's model makes Gemini current again in the
+  // service; the page must show that during the test (up to 60 s), not after it.
+  const events = [];
+  let release;
+  const refreshed = new Promise((resolve) => {
+    release = resolve;
+  });
+  const edited = fakeFetch(
+    () => json(200, { ...SAVED, current: false, tested: false, model: "vendor/model-b" }),
+    () => {
+      events.push("test request");
+      return json(200, answer("succeeded", "连接成功", 1));
+    },
+  );
+  const client = profiles.createClient({ fetch: edited.fetch, serviceUrl: () => SERVICE });
+  const form = { ...profiles.formFromProfile(SAVED), model: "vendor/model-b" };
+  const done = client.saveAndTest(form, { ...SAVED, current: true }, {
+    onSaved: (profile) => {
+      events.push(`saved ${profile.model} current=${profile.current}`);
+      return refreshed; // the page asks the service for its profiles here
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["saved vendor/model-b current=false"]); // no test until the page has refreshed
+  release();
+  const result = await done;
+  assert.deepEqual(events, ["saved vendor/model-b current=false", "test request"]);
+  assert.equal(result.view.ok, true);
+
+  const unchanged = fakeFetch(() => json(200, answer("succeeded", "连接成功", 1)));
+  const calls = [];
+  await profiles
+    .createClient({ fetch: unchanged.fetch, serviceUrl: () => SERVICE })
+    .saveAndTest(profiles.formFromProfile(SAVED), SAVED, { onSaved: () => calls.push("saved") });
+  assert.deepEqual(calls, []); // nothing saved, nothing to refresh
+});
+
 test("a form the service refuses, or an unreachable service, tests nothing and says why", async () => {
   const invalid = await profiles.createClient({ fetch: fakeFetch().fetch, serviceUrl: () => SERVICE }).saveAndTest({ ...NEW_FORM, apiKey: "" }, null);
   assert.deepEqual(invalid, { error: "请填写密钥" });
