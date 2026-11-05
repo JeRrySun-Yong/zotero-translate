@@ -414,12 +414,15 @@ class ModelClient:
         return self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
 
     def _body(self, messages: list[dict]) -> dict:
-        return {
+        body = {
             "model": self.settings.model,
             "messages": messages,
             "temperature": self.settings.temperature,
             "reasoning_effort": self.settings.reasoning_effort,
         }
+        if self.settings.stream:  # off: the body, and so its cache key, as before ticket 12
+            body["stream"] = True
+        return body
 
     def _send(
         self,
@@ -464,15 +467,64 @@ class ModelClient:
             raise ModelCallError(
                 f"管线模型拒绝了请求（HTTP {status_code}）" + self._body_excerpt(data)
             )
-        try:
-            content = json.loads(data)["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as e:
-            raise _RetryableError("无法解析管线模型的响应") from e
+        if self.settings.stream:
+            content = self._streamed_content(data)
+        else:
+            try:
+                content = json.loads(data)["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError) as e:
+                raise _RetryableError("无法解析管线模型的响应") from e
         if content is not None and not isinstance(content, str):  # e.g. an array or an object
             raise _RetryableError(f"管线模型回答的 content 不是文本（{type(content).__name__}）")
         if not content or not content.strip():
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
+
+    def _streamed_content(self, data: bytes):
+        """The answer of a streamed response: its server-sent events' content deltas, joined.
+
+        Each event's ``data`` is a chat completion chunk, up to ``data:
+        [DONE]``; comments (``:``) and other fields are skipped. Only
+        ``delta.content`` of the first choice counts: thinking deltas
+        (``reasoning``, ``reasoning_content``, ``reasoning_details``) are not
+        read. A stream with no ``finish_reason`` broke off before the answer
+        ended, and one whose ``finish_reason`` is ``error``, or with an
+        ``error`` chunk, failed on the way: both are retried. A content delta
+        that is not text is returned as it is, for ``_send`` to reject.
+        """
+        parts: list = []
+        finish = None
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise _RetryableError("无法解析管线模型的流式响应") from e
+        for event in _sse_data(text):
+            if event == "[DONE]":
+                break
+            try:
+                chunk = json.loads(event)
+            except ValueError as e:
+                raise _RetryableError("无法解析管线模型的流式响应") from e
+            if not isinstance(chunk, dict):
+                raise _RetryableError("无法解析管线模型的流式响应")
+            if chunk.get("error"):
+                excerpt = self._body_excerpt(json.dumps(chunk["error"], ensure_ascii=False).encode())
+                raise _RetryableError("管线模型在流式回答中出错" + excerpt)
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                content = delta.get("content") if isinstance(delta, dict) else None
+                if content is not None and not isinstance(content, str):
+                    return content
+                if content:
+                    parts.append(content)
+                finish = choice.get("finish_reason") or finish
+        if finish is None:
+            raise _RetryableError("管线模型的流式回答在结束之前中断（没有 finish_reason）")
+        if finish == "error":
+            raise _RetryableError("管线模型的流式回答以出错结束（finish_reason 为 error）")
+        return "".join(parts)
 
     def _post(
         self,
@@ -555,6 +607,23 @@ class ModelClient:
     def close(self) -> None:
         """Cancel the endpoint's sends in flight and close it (also for a client sharing it)."""
         self.endpoint.close()
+
+
+_SSE_LINE_END = re.compile(r"\r\n|\r|\n")  # not str.splitlines: a JSON string may hold U+2028
+
+
+def _sse_data(text: str):
+    """The ``data`` of each server-sent event in ``text``, its ``data:`` lines joined by newlines."""
+    lines: list[str] = []
+    for line in [*_SSE_LINE_END.split(text), ""]:  # the end of the body ends an event too
+        if not line:
+            if lines:
+                yield "\n".join(lines)
+                lines = []
+            continue
+        name, _, value = line.partition(":")
+        if name == "data":
+            lines.append(value[1:] if value.startswith(" ") else value)
 
 
 def _result_of(error: _RetryableError) -> str:

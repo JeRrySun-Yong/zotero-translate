@@ -92,6 +92,10 @@ class ModelSettings:
     # endpoint: together about a minute, the network outage of closure-02.
     connection_retry_seconds: tuple[float, ...] = (5.0, 15.0, 45.0)
     cache_dir: Path | None = None  # successful responses; None turns the cache off
+    # Streamed requests (M4 ticket 12, ``ZT_STREAM``): the body asks for an
+    # event stream, whose content deltas make the answer. Off for the
+    # built-in Gemini, whose request bodies (and cache keys) stay as they were.
+    stream: bool = False
 
 
 def read_env_file(path: Path) -> dict[str, str]:
