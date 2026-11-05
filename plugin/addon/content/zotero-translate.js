@@ -113,7 +113,10 @@ var ZoteroTranslate = {
     toolsMenu.addEventListener("command", () => this.openTaskWindow(window));
     doc.getElementById("menu_ToolsPopup").append(toolsMenu);
     window.addEventListener("activate", this._onMainWindowActivate);
-    this.notices.activated(); // a new main window may be active before its listener is added
+    // A new main window may be active before its listener is added, and a
+    // notice opened while the window is still coming up ends behind it: open
+    // the waiting notices, and raise the open ones, once it is up.
+    window.setTimeout(() => this.notices.activated(), 1000);
   },
 
   /** A main window closes (or the plugin shuts down): its listeners go, and
