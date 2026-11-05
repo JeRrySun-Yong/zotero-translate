@@ -60,6 +60,9 @@
       status.dataset.running = String(view.running);
       $("zotero-translate-status-help").textContent = view.help;
       $("zotero-translate-status-help").hidden = !view.help;
+      if (this.listing && !found.listing) {
+        this.showResult(null); // what the last action said no longer holds
+      }
       this.listing = found.listing || null;
       if (this.listing && !this.picked) {
         // First answer: a new profile's form when there is none yet, else the current one.
@@ -111,13 +114,17 @@
     },
 
     drawButtons() {
-      const state = P.buttons(this.form(), this.saved());
       const connected = Boolean(this.listing);
-      $("zotero-translate-test").disabled = this.busy || !connected || !state.test;
-      $("zotero-translate-apply").disabled = this.busy || !connected || !state.apply;
-      $("zotero-translate-remove").disabled = this.busy || !connected || !state.remove;
-      $("zotero-translate-test").hidden = !state.test;
-      $("zotero-translate-remove").hidden = !state.remove;
+      const state = P.buttons(this.form(), this.saved(), { connected });
+      $("zotero-translate-test").disabled = this.busy || !state.test;
+      $("zotero-translate-apply").disabled = this.busy || !state.apply;
+      $("zotero-translate-remove").disabled = this.busy || !state.remove;
+      if (connected) {
+        // Hidden where they never apply: no test for the built-in profile, no delete for a new one.
+        const saved = this.saved();
+        $("zotero-translate-test").hidden = Boolean(saved && saved.builtin);
+        $("zotero-translate-remove").hidden = !saved || saved.builtin;
+      }
       $("zotero-translate-apply-hint").textContent = state.applyHint;
       $("zotero-translate-new").disabled = !connected;
     },

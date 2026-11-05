@@ -119,7 +119,8 @@ var ZoteroTranslateProfiles = (() => {
     const colon = text.indexOf("：");
     let [label, detail] = colon < 0 ? [text, ""] : [text.slice(0, colon), text.slice(colon + 1)];
     if (ok) {
-      label = `${label}（${Number(seconds || 0).toFixed(1)} 秒）`;
+      const time = Number(seconds || 0);
+      label = `${label}（${time < 0.1 ? "不到 0.1" : time.toFixed(1)} 秒）`;
     }
     const hint = TEST_HINTS[result];
     return { ok: Boolean(ok), text: hint ? `${label}，${hint}` : label, detail };
@@ -128,8 +129,12 @@ var ZoteroTranslateProfiles = (() => {
   /** Which buttons are clickable for the form showing `saved` (null: a new
    *  profile), and, while "应用" is not, why. "测试连接" saves the form first,
    *  so it is clickable for any user profile; "应用" only for a saved one
-   *  whose last test succeeded, that is not current, with no unsaved change. */
-  function buttons(form, saved) {
+   *  whose last test succeeded, that is not current, with no unsaved change;
+   *  none while the service cannot be reached (`connected` false). */
+  function buttons(form, saved, { connected = true } = {}) {
+    if (!connected) {
+      return { test: false, apply: false, remove: false, applyHint: "连上翻译服务后才能测试和应用" };
+    }
     const current = saved && saved.current;
     if (saved && saved.builtin) {
       return { test: false, apply: !current, remove: false, applyHint: current ? CURRENT_HINT : "" };

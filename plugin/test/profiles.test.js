@@ -130,6 +130,19 @@ test("each connection test outcome reads as what happened and what to check", ()
   }
 });
 
+test("a test faster than a tenth of a second does not read as 0.0 seconds", () => {
+  assert.equal(profiles.testResultView(answer("succeeded", "连接成功", 0.003)).text, "连接成功（不到 0.1 秒），可以应用");
+});
+
+test("while the service cannot be reached nothing can be tested, applied or deleted", () => {
+  assert.deepEqual(profiles.buttons(profiles.formFromProfile(SAVED), SAVED, { connected: false }), {
+    test: false,
+    apply: false,
+    remove: false,
+    applyHint: "连上翻译服务后才能测试和应用",
+  });
+});
+
 test("a result the plugin does not know still shows the service's message", () => {
   assert.deepEqual(profiles.testResultView(answer("new_kind", "新的情况：详情")), { ok: false, text: "新的情况", detail: "详情" });
 });
