@@ -110,3 +110,55 @@ test("an unchanged saved profile needs no request", () => {
   assert.equal(profiles.profileRequest(profiles.formFromProfile(SAVED), SAVED), null);
   assert.equal(profiles.profileRequest({ ...profiles.formFromProfile(SAVED), name: "DeepSeek " }, SAVED), null);
 });
+
+// POST /profiles/{id}/test answers (service.py): the service's message, then what to check.
+const answer = (result, message, seconds = 2.3) => ({ ok: result === "succeeded", result, message, seconds, http_status: null });
+
+test("each connection test outcome reads as what happened and what to check", () => {
+  const cases = [
+    [answer("succeeded", "连接成功", 1.25), "连接成功（1.3 秒），可以应用", ""],
+    [answer("unauthorized", "密钥无效：HTTP 401 invalid api key"), "密钥无效，请检查密钥", "HTTP 401 invalid api key"],
+    [answer("model_not_found", "模型不存在：HTTP 404 no such model"), "模型不存在，请检查模型 ID", "HTTP 404 no such model"],
+    [answer("unreachable", "地址连不上：Connection refused（ConnectError）"), "地址连不上，请检查地址和网络", "Connection refused（ConnectError）"],
+    [answer("invalid_address", "地址无效：没有主机名"), "地址无效，请检查地址", "没有主机名"],
+    [answer("timeout", "请求超时：60 秒内没有回答"), "请求超时，端点没有按时回答，可以稍后再试或加大请求超时", "60 秒内没有回答"],
+    [answer("unparseable", "回答不能解析：回答不是 {\"ok\": true}：hello"), "回答不能解析，请确认地址是 OpenAI 兼容接口、模型 ID 正确", "回答不是 {\"ok\": true}：hello"],
+    [answer("http_error", "端点出错：HTTP 503 busy"), "端点出错，可以稍后再试", "HTTP 503 busy"],
+  ];
+  for (const [given, text, detail] of cases) {
+    assert.deepEqual(profiles.testResultView(given), { ok: given.ok, text, detail }, given.result);
+  }
+});
+
+test("a result the plugin does not know still shows the service's message", () => {
+  assert.deepEqual(profiles.testResultView(answer("new_kind", "新的情况：详情")), { ok: false, text: "新的情况", detail: "详情" });
+});
+
+test("apply is only clickable for a saved, tested profile whose form has no unsaved change", () => {
+  const form = profiles.formFromProfile(SAVED);
+  assert.deepEqual(profiles.buttons(form, SAVED), { test: true, apply: true, remove: true, applyHint: "" });
+  const untested = { ...SAVED, tested: false, last_test: null };
+  assert.deepEqual(profiles.buttons(form, untested), { test: true, apply: false, remove: true, applyHint: "测试连接成功后才能应用" });
+  const failed = { ...SAVED, tested: false, last_test: { ...SAVED.last_test, result: "unauthorized" } };
+  assert.equal(profiles.buttons(form, failed).apply, false);
+  const edited = { ...form, model: "vendor/model-b" };
+  assert.deepEqual(profiles.buttons(edited, SAVED), {
+    test: true,
+    apply: false,
+    remove: true,
+    applyHint: "有改动还没测试：先点“测试连接”",
+  });
+  assert.deepEqual(profiles.buttons(profiles.formFromProfile(null), null), {
+    test: true,
+    apply: false,
+    remove: false,
+    applyHint: "测试连接成功后才能应用",
+  });
+  assert.deepEqual(profiles.buttons(form, { ...SAVED, current: true }), { test: true, apply: false, remove: true, applyHint: "正在使用这份配置" });
+});
+
+test("the built-in profile can only be applied", () => {
+  const form = profiles.formFromProfile(BUILTIN);
+  assert.deepEqual(profiles.buttons(form, { ...BUILTIN, current: false }), { test: false, apply: true, remove: false, applyHint: "" });
+  assert.deepEqual(profiles.buttons(form, BUILTIN), { test: false, apply: false, remove: false, applyHint: "正在使用这份配置" });
+});

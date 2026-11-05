@@ -100,7 +100,53 @@ var ZoteroTranslateProfiles = (() => {
     return { method: "PUT", path: ["profiles", saved.id], body: changed };
   }
 
-  return { formFromProfile, profileRequest };
+  // What to check after each connection test outcome (model_client.CONNECTION_TEST_RESULTS).
+  const TEST_HINTS = {
+    succeeded: "可以应用",
+    invalid_address: "请检查地址",
+    unreachable: "请检查地址和网络",
+    unauthorized: "请检查密钥",
+    model_not_found: "请检查模型 ID",
+    timeout: "端点没有按时回答，可以稍后再试或加大请求超时",
+    unparseable: "请确认地址是 OpenAI 兼容接口、模型 ID 正确",
+    http_error: "可以稍后再试",
+  };
+
+  /** A connection test's answer as {ok, text, detail}: the outcome and what to
+   *  check, and the service's detail (the endpoint's reason, no API key). */
+  function testResultView({ ok, result, message, seconds }) {
+    const text = String(message || result || "");
+    const colon = text.indexOf("：");
+    let [label, detail] = colon < 0 ? [text, ""] : [text.slice(0, colon), text.slice(colon + 1)];
+    if (ok) {
+      label = `${label}（${Number(seconds || 0).toFixed(1)} 秒）`;
+    }
+    const hint = TEST_HINTS[result];
+    return { ok: Boolean(ok), text: hint ? `${label}，${hint}` : label, detail };
+  }
+
+  /** Which buttons are clickable for the form showing `saved` (null: a new
+   *  profile), and, while "应用" is not, why. "测试连接" saves the form first,
+   *  so it is clickable for any user profile; "应用" only for a saved one
+   *  whose last test succeeded, that is not current, with no unsaved change. */
+  function buttons(form, saved) {
+    const current = saved && saved.current;
+    if (saved && saved.builtin) {
+      return { test: false, apply: !current, remove: false, applyHint: current ? CURRENT_HINT : "" };
+    }
+    let applyHint = "";
+    if (!saved || !saved.tested) {
+      applyHint = "测试连接成功后才能应用";
+    } else if (profileRequest(form, saved) !== null) {
+      applyHint = "有改动还没测试：先点“测试连接”";
+    } else if (current) {
+      applyHint = CURRENT_HINT;
+    }
+    return { test: true, apply: !applyHint, remove: Boolean(saved), applyHint };
+  }
+  const CURRENT_HINT = "正在使用这份配置";
+
+  return { formFromProfile, profileRequest, testResultView, buttons };
 })();
 
 if (typeof module !== "undefined") {
