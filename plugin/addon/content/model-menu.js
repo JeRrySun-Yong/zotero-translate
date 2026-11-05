@@ -10,6 +10,10 @@
  * have been answered before it took effect. So a late answer can never put
  * the menu back to the profile the user has just left.
  *
+ * Switches are numbered too: two windows can click one almost at once, and
+ * the answers can arrive in either order. Only the newest switch's answer
+ * changes the state; an older one comes back {superseded: true}.
+ *
  * A profile changed in the settings page shows up at the next look: that
  * page has its own client (profiles.js) and writes nothing here.
  */
@@ -24,6 +28,7 @@ var ZoteroTranslateModelMenu = (() => {
   function createModelMenu({ client, onChange = () => {} }) {
     let state = { listing: null, problem: "正在连接翻译服务…" };
     let asked = 0;
+    let switched = 0;
 
     return {
       state: () => state,
@@ -44,10 +49,15 @@ var ZoteroTranslateModelMenu = (() => {
       },
 
       /** The "切换模型" click: make the profile current. {ok} or {error}, as
-       *  the client answers; nothing changes when the service refuses. */
+       *  the client answers; nothing changes when the service refuses. A
+       *  switch answered after a newer one changes nothing: {superseded}. */
       async switchTo(id) {
+        const attempt = ++switched;
         asked += 1; // answers asked before the switch describe the service before it
         const outcome = await client.apply(id);
+        if (attempt !== switched) {
+          return { ...outcome, superseded: true }; // a newer click owns the menu
+        }
         if (!outcome.ok) {
           return outcome;
         }

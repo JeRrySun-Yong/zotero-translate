@@ -95,6 +95,26 @@ test("answers asked while the switch was under way do not undo it either", async
   assert.equal(menu.state().listing.current, DEEPSEEK.id);
 });
 
+test("two switches whose answers arrive out of order: the last click decides", async () => {
+  const client = heldClient();
+  const menu = createModelMenu({ client });
+  const warm = menu.refresh();
+  client.answer(0, { listing: listing(GEMINI.id) });
+  await warm;
+  assert.equal(menu.state().listing.current, GEMINI.id);
+
+  const waiting = [];
+  client.apply = (id) => new Promise((resolve) => waiting.push({ id, resolve }));
+  const first = menu.switchTo(DEEPSEEK.id);
+  const second = menu.switchTo(GEMINI.id);
+  // The service applied DeepSeek and then Gemini; only the answers arrive reversed.
+  waiting[1].resolve({ ok: true });
+  assert.deepEqual(await second, { ok: true });
+  waiting[0].resolve({ ok: true }); // the older click's answer, too late
+  assert.deepEqual(await first, { ok: true, superseded: true });
+  assert.equal(menu.state().listing.current, GEMINI.id);
+});
+
 test("a refused switch reports the reason, draws no change, and keeps the new answers counting", async () => {
   const client = heldClient();
   client.failing = "这份配置还没有通过测试连接";

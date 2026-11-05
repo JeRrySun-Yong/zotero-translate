@@ -279,18 +279,17 @@ var ZoteroTranslate = {
 
   /** A "切换模型" click: make the profile current. One request; only the
    *  papers submitted afterwards use it. The service refuses a profile whose
-   *  connection test has not passed; the menu is then drawn again from the
-   *  known current profile, so the radio XUL checked stays where it was.
-   *  Answers already on their way cannot undo the switch (model-menu.js). */
+   *  connection test has not passed. XUL checked the clicked radio itself,
+   *  so the menu is drawn again from the known current profile after every
+   *  answer, even one that changes nothing (`force`: the items may be the
+   *  same); a refused switch says why, a superseded one says nothing
+   *  (model-menu.js). Answers already on their way cannot undo the switch. */
   async switchToProfile(id) {
     const outcome = await this.modelMenu.switchTo(id);
-    if (outcome.superseded) {
-      return; // a newer switch owns the menu, and draws it when it answers
+    for (const window of Zotero.getMainWindows()) {
+      this._drawModelMenu(window, { force: true });
     }
-    if (!outcome.ok) {
-      for (const window of Zotero.getMainWindows()) {
-        this._drawModelMenu(window, { force: true });
-      }
+    if (!outcome.ok && !outcome.superseded) {
       this._tell(`没有切换模型：${outcome.error}`);
     }
   },

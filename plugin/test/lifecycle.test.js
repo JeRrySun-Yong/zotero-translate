@@ -427,9 +427,18 @@ test("a switch made in the model menu is the profile the next submission records
     },
   };
   const menu = createModelMenu({ client });
-  let uploads = 0;
+  const forms = [];
   const env = environment({
-    routes: { [UPLOAD]: async () => json(201, { task_id: `t${++uploads}`, profile: current }) },
+    routes: {
+      // The service records the profile the request names, else its current one.
+      [UPLOAD]: async (options) => {
+        const form = await uploadFields(options);
+        forms.push(form);
+        const named = form.get("profile");
+        const recorded = named ? { id: named, name: PROFILES.find((profile) => profile.id === named).name } : current;
+        return json(201, { task_id: `t${forms.length}`, profile: recorded });
+      },
+    },
   });
   env.lifecycle.start();
   await menu.refresh(); // the item menu's first opening
@@ -437,6 +446,10 @@ test("a switch made in the model menu is the profile the next submission records
   await menu.switchTo(PROFILE.id); // one click in "切换模型"
   await env.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "Second" });
 
+  // A new submission names no profile (also after the switch): the service
+  // takes the one the switch made current.
+  assert.equal(forms[0].get("profile"), null);
+  assert.equal(forms[1].get("profile"), null);
   assert.deepEqual(env.lifecycle.tasks.map((task) => task.profile), [
     { id: GEMINI.id, name: GEMINI.name },
     { id: PROFILE.id, name: PROFILE.name },
