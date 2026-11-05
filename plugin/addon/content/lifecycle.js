@@ -130,6 +130,7 @@ var ZoteroTranslateLifecycle = (() => {
     "serviceUrl",
     "taskId",
     "state",
+    "submittedAt",
     "disconnectedSince",
     "generation",
     "error",
@@ -173,7 +174,10 @@ var ZoteroTranslateLifecycle = (() => {
 
     const lifecycle = {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
-      // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
+      // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, submittedAt
+      // (clock time the upload of this submission or retry started; the row's elapsed
+      // time counts from it, core.js), endedAt (clock time the task was first seen in an
+      // ended state, or null; not saved, ended tasks are not), stage,
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
       // service stopped answering, or null), generation (0 for a new task, one more for
@@ -441,6 +445,8 @@ var ZoteroTranslateLifecycle = (() => {
         serviceUrl: serviceUrl(),
         taskId: null,
         state: "submitting",
+        submittedAt: clock.now(),
+        endedAt: null,
         stage: null,
         progress: null,
         attempt: null,
@@ -819,7 +825,20 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** Stop the elapsed time of the tasks that have just ended (the first
+     *  change that finds them ended; every change into an ended state comes
+     *  here at once); a retried task's upload clears endedAt again. */
+    function stampEnded() {
+      const now = clock.now();
+      for (const task of lifecycle.tasks) {
+        if (ENDED_STATES.includes(task.state) && task.endedAt == null) {
+          task.endedAt = now;
+        }
+      }
+    }
+
     function changed() {
+      stampEnded();
       saveTasks();
       announceEnded();
       for (const listener of lifecycle.listeners) {
