@@ -1,5 +1,7 @@
-/* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
- * the "翻译任务" window (from the item menu and the Tools menu), the notice
+/* The translation plugin inside Zotero: the item menu entries ("翻译为中文
+ * （<current model profile>）", the "切换模型" submenu that makes a tested
+ * profile current in one click, and "翻译任务"), the "翻译任务" window (from
+ * the item menu and the Tools menu), the notice
  * "已提交 N 篇" after a submission (a click opens the task window), the
  * notice when a task is done or fails (with
  * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
@@ -26,6 +28,8 @@ var ZoteroTranslate = {
   TASK_WINDOW_URL: "chrome://zotero-translate/content/tasks.xhtml",
   TASK_WINDOW_TYPE: "zotero-translate:tasks",
   ITEM_MENU_ID: "zotero-translate-itemmenu",
+  ITEM_MODEL_MENU_ID: "zotero-translate-itemmenu-model",
+  ITEM_MODEL_POPUP_ID: "zotero-translate-itemmenu-model-popup",
   ITEM_TASKS_MENU_ID: "zotero-translate-itemmenu-tasks",
   TOOLS_MENU_ID: "zotero-translate-toolsmenu",
   // The submission notice closes by itself after this long (not while the pointer is over it).
@@ -33,6 +37,16 @@ var ZoteroTranslate = {
 
   // The task lifecycle; the task window reads its rows, notices and listeners.
   lifecycle: null,
+  // The service's model profiles as of the last item-menu opening (GET
+  // /profiles, via profileClient), or null while it cannot be reached (or
+  // has no profiles). The menu draws from it at once and asks again for
+  // every opening, so a change made in the settings page shows up.
+  profiles: null,
+  // Why there is no `profiles`, for the "切换模型" submenu's single grey
+  // item: "正在连接翻译服务…" until the first answer, then "翻译服务连不上"
+  // or "翻译服务版本太旧" ("" while there is a listing).
+  profilesProblem: "正在连接翻译服务…",
+  profileClient: null,
 
   startup({ id }) {
     Zotero.ZoteroTranslate = this;
@@ -41,6 +55,12 @@ var ZoteroTranslate = {
       src: "content/preferences.xhtml",
       scripts: ["content/core.js", "content/profiles.js", "content/preferences.js"],
       label: "中文翻译",
+    });
+    // The item menu's GET /profiles and the "切换模型" click (profiles.js,
+    // loaded into the plugin scope by bootstrap.js).
+    this.profileClient = ZoteroTranslateProfiles.createClient({
+      fetch: (url, options) => fetch(url, options),
+      serviceUrl: () => Zotero.Prefs.get(this.SERVICE_URL_PREF, true),
     });
     this.notices = ZoteroTranslateNotices.createNotices({
       // With no main window open (macOS: Zotero runs on), notices wait for the next one.
@@ -110,12 +130,20 @@ var ZoteroTranslate = {
     itemMenu.id = this.ITEM_MENU_ID;
     itemMenu.setAttribute("label", "翻译为中文");
     itemMenu.addEventListener("command", () => this.translateSelected(window));
+    // "切换模型 ▸": the tested model profiles, one click to make one current
+    // (built from the service's answer on each opening, _drawModelMenu).
+    const modelMenu = doc.createXULElement("menu");
+    modelMenu.id = this.ITEM_MODEL_MENU_ID;
+    modelMenu.setAttribute("label", "切换模型");
+    const modelPopup = doc.createXULElement("menupopup");
+    modelPopup.id = this.ITEM_MODEL_POPUP_ID;
+    modelMenu.append(modelPopup);
     // "翻译任务" in the item menu too, always shown, so the task window is one right-click away.
     const itemTasksMenu = doc.createXULElement("menuitem");
     itemTasksMenu.id = this.ITEM_TASKS_MENU_ID;
     itemTasksMenu.setAttribute("label", "翻译任务");
     itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
-    itemPopup.append(itemMenu, itemTasksMenu);
+    itemPopup.append(itemMenu, modelMenu, itemTasksMenu);
     itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
 
     const toolsMenu = doc.createXULElement("menuitem");
@@ -138,17 +166,91 @@ var ZoteroTranslate = {
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
+    doc.getElementById(this.ITEM_MODEL_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
   },
 
   // The entry shows for regular items (with or without a PDF) and for PDF
-  // attachments, with or without a parent item.
+  // attachments, with or without a parent item. Its label names the current
+  // model profile, and "切换模型" lists the tested ones: both from the last
+  // answer at once, then from the service again (it may have changed in the
+  // settings page since).
   _onItemMenuShowing(event) {
     const window = event.target.ownerGlobal;
     const items = window.ZoteroPane.getSelectedItems();
     const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
     menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
+    ZoteroTranslate._drawModelMenu(window);
+    ZoteroTranslate._readProfiles(window);
+  },
+
+  /** Ask the service for its model profiles and draw the menu with the answer. */
+  async _readProfiles(window) {
+    const found = await this.profileClient.status();
+    if (!window.document.getElementById(this.ITEM_MENU_ID)) {
+      return; // the window closed, or the plugin shut down, meanwhile
+    }
+    if (found.listing) {
+      this.profiles = found.listing;
+      this.profilesProblem = "";
+    } else {
+      this.profiles = null;
+      this.profilesProblem = found.noProfiles ? "翻译服务版本太旧" : "翻译服务连不上";
+    }
+    this._drawModelMenu(window);
+  },
+
+  /** The item menu's label with the current profile's name (core.itemMenuLabel)
+   *  and the "切换模型" submenu (core.modelMenuItems): rebuilt only when its
+   *  items change, so an answer that arrives while the menu is open does not
+   *  close an open submenu. */
+  _drawModelMenu(window) {
+    const doc = window.document;
+    const itemMenu = doc.getElementById(this.ITEM_MENU_ID);
+    const popup = doc.getElementById(this.ITEM_MODEL_POPUP_ID);
+    if (!itemMenu || !popup) {
+      return;
+    }
+    const Core = ZoteroTranslateCore;
+    const current = this.profiles && this.profiles.profiles.find((profile) => profile.id === this.profiles.current);
+    itemMenu.setAttribute("label", Core.itemMenuLabel(current ? current.name : ""));
+    const items = Core.modelMenuItems(this.profiles, this.profilesProblem || undefined);
+    const signature = JSON.stringify(items);
+    if (popup.dataset.items === signature) {
+      return;
+    }
+    popup.dataset.items = signature;
+    popup.replaceChildren(
+      ...items.map((item) => {
+        const element = doc.createXULElement("menuitem");
+        element.setAttribute("type", "radio");
+        element.setAttribute("label", item.label);
+        element.checked = item.checked; // the property: "checked" as an attribute would be true even for false
+        element.disabled = item.disabled;
+        if (item.id != null) {
+          element.addEventListener("command", () => this.switchToProfile(item.id));
+        }
+        return element;
+      }),
+    );
+  },
+
+  /** A "切换模型" click: make the profile current. One request; only the
+   *  papers submitted afterwards use it. The service refuses a profile whose
+   *  connection test has not passed. */
+  async switchToProfile(id) {
+    const outcome = await this.profileClient.apply(id);
+    if (!outcome.ok) {
+      this._tell(`没有切换模型：${outcome.error}`);
+      return;
+    }
+    if (this.profiles) {
+      this.profiles = { ...this.profiles, current: id };
+    }
+    for (const window of Zotero.getMainWindows()) {
+      this._drawModelMenu(window);
+    }
   },
 
   /** Submit every selected item, one after another; the service runs them in

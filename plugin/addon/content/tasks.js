@@ -1,5 +1,6 @@
 /* The "翻译任务" window: one row per task, updated after every poll and
- * every second (for the elapsed time): title, stage, a progress bar with the
+ * every second (for the elapsed time): title, the model profile the task was
+ * submitted with, stage, a progress bar with the
  * percentage, the elapsed time (core.js), a short status word with its
  * detail line in small type under it, and a "取消" button on rows that can be cancelled (no confirmation), a "重试"
  * button on failed and cancelled rows, a "继续挂回" button on rows whose
@@ -50,7 +51,15 @@ function rowElement(key) {
     progress.append(bar, element("span", "percent"));
     const status = element("td", "status");
     status.append(element("div", "status-word"), element("div", "status-detail"));
-    tr.append(element("td", "title"), element("td", "stage"), progress, element("td", "elapsed"), status, element("td", "buttons"));
+    tr.append(
+      element("td", "title"),
+      element("td", "profile"),
+      element("td", "stage"),
+      progress,
+      element("td", "elapsed"),
+      status,
+      element("td", "buttons"),
+    );
     for (const [action, label] of [["cancel", "取消"], ["retry", "重试"], ["continueAttach", "继续挂回"]]) {
       const button = document.createElementNS(XHTML, "button");
       button.textContent = label;
@@ -90,6 +99,7 @@ function render() {
   for (const row of rows) {
     const tr = rowElement(row.key);
     setText(tr.querySelector(".title"), row.title);
+    setText(tr.querySelector(".profile"), row.profile);
     setText(tr.querySelector(".stage"), row.stage);
     const bar = tr.querySelector("progress");
     bar.hidden = row.progress == null;

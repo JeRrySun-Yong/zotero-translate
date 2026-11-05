@@ -26,6 +26,8 @@
     concurrency: "zotero-translate-concurrency",
     timeout: "zotero-translate-timeout",
   };
+  // The 流式请求 switch (a checkbox: .checked, not .value), ticket 12.
+  const STREAM_ID = "zotero-translate-stream";
 
   const client = P.createClient({
     fetch: (url, options) => fetch(url, options),
@@ -46,7 +48,10 @@
     },
 
     form() {
-      return Object.fromEntries(Object.entries(FIELDS).map(([name, id]) => [name, $(id).value]));
+      return {
+        ...Object.fromEntries(Object.entries(FIELDS).map(([name, id]) => [name, $(id).value])),
+        stream: $(STREAM_ID).checked,
+      };
     },
 
     async refresh() {
@@ -85,6 +90,8 @@
         $(fieldId).value = form[name];
         $(fieldId).disabled = Boolean(saved && saved.builtin);
       }
+      $(STREAM_ID).checked = form.stream;
+      $(STREAM_ID).disabled = Boolean(saved && saved.builtin);
       $(FIELDS.apiKey).placeholder = saved && !saved.builtin ? `${P.keyText(saved)}（不改就留空）` : "密钥只保存在本机翻译服务";
       $("zotero-translate-form-title").textContent = !saved
         ? "新建配置"
@@ -216,7 +223,7 @@
     },
 
     init() {
-      for (const id of Object.values(FIELDS)) {
+      for (const id of [...Object.values(FIELDS), STREAM_ID]) {
         $(id).addEventListener("input", () => {
           this.resetRemove();
           this.drawButtons();

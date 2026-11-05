@@ -13,6 +13,8 @@
     #zotero-translate-prefs tbody tr[data-selected="true"] { background: #dbe8fb; }
     #zotero-translate-prefs .zt-fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; align-items: center; }
     #zotero-translate-prefs .zt-fields input { width: 100%; box-sizing: border-box; }
+    #zotero-translate-prefs .zt-fields input[type="checkbox"] { width: auto; margin: 0 6px 0 0; vertical-align: middle; }
+    #zotero-translate-prefs .zt-check { display: flex; align-items: center; }
     #zotero-translate-prefs .zt-buttons { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
     #zotero-translate-prefs .zt-result { margin: 8px 0 0; font-weight: 600; }
     #zotero-translate-prefs .zt-result[data-ok="true"] { color: #1d5b1a; }
@@ -55,6 +57,8 @@
       <html:input id="zotero-translate-concurrency" type="text" inputmode="numeric" placeholder="默认 16；按端点允许的并发填，例如 32"/>
       <html:label for="zotero-translate-timeout">请求超时（秒，可选）</html:label>
       <html:input id="zotero-translate-timeout" type="text" inputmode="numeric" placeholder="默认 480；回答慢的模型可填 900"/>
+      <html:label for="zotero-translate-stream">流式请求</html:label>
+      <html:label class="zt-check"><html:input id="zotero-translate-stream" type="checkbox"/> 回答边到边读；思考很久的模型（例如 DeepSeek Fast）需要开启</html:label>
     </html:div>
     <html:p id="zotero-translate-builtin" class="zt-note" hidden="hidden"/>
     <html:p id="zotero-translate-key-note" class="zt-note">密钥只发给本机翻译服务保存，Zotero 不保存。“测试连接”会先保存改动。</html:p>
