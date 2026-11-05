@@ -37,8 +37,8 @@ var ZoteroTranslate = {
       label: "中文翻译",
     });
     this.notices = ZoteroTranslateNotices.createNotices({
-      // No main window: the notice opens without one (Zotero shows it on top).
-      isActive: () => !Zotero.getMainWindow() || Services.focus.activeWindow != null,
+      // With no main window open (macOS: Zotero runs on), notices wait for the next one.
+      isActive: () => Zotero.getMainWindow() != null && Services.focus.activeWindow != null,
       open: (payload, dismissed) => this._openNotice(payload, dismissed),
     });
     this.lifecycle = ZoteroTranslateLifecycle.createTaskLifecycle({
@@ -113,13 +113,14 @@ var ZoteroTranslate = {
     toolsMenu.addEventListener("command", () => this.openTaskWindow(window));
     doc.getElementById("menu_ToolsPopup").append(toolsMenu);
     window.addEventListener("activate", this._onMainWindowActivate);
+    this.notices.activated(); // a new main window may be active before its listener is added
   },
 
-  /** The main window closes (or the plugin shuts down): its listeners go,
-   *  and so do all notices (their windows close with the main window). */
+  /** A main window closes (or the plugin shuts down): its listeners go, and
+   *  the notices in it wait for the next main window activated (notices.js). */
   removeFromWindow(window) {
     window.removeEventListener("activate", this._onMainWindowActivate);
-    this.notices.clear();
+    this.notices.windowClosed(window);
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
@@ -306,11 +307,12 @@ var ZoteroTranslate = {
     ZoteroTranslate.notices.activated();
   },
 
-  /** Open a notice's window (for notices.js): {raise(), close()}. A click
-   *  on it calls `dismissed` and closes it. */
+  /** Open a notice's window in the main window (for notices.js): {parent,
+   *  raise(), close()}. A click on it calls `dismissed` and closes it. */
   _openNotice({ outcome, row }, dismissed) {
     const done = outcome === "done";
-    const notice = new Zotero.ProgressWindow({ closeOnClick: false });
+    const parent = Zotero.getMainWindow();
+    const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
     let window = null; // once loaded
     notice.changeHeadline(done ? "翻译完成" : "翻译失败");
     const line = new notice.ItemProgress("attachmentPDF", row.title);
@@ -356,6 +358,7 @@ var ZoteroTranslate = {
       });
     });
     return {
+      parent,
       raise: () => window?.focus(),
       close: () => {
         closed = true;
@@ -384,26 +387,45 @@ var ZoteroTranslate = {
 
   /** Open the attachment the way Zotero opens it on a double click (a reader tab, by default). */
   async openAttachment(id) {
-    const window = Zotero.getMainWindow();
     const item = await this._liveItem(id);
-    if (!window || !item) {
+    if (!item) {
       this._tell("找不到这份译文附件，可能已被删除");
       return;
     }
-    window.focus();
-    await window.ZoteroPane.viewAttachment(item.id);
+    const window = await this._readyMainWindow();
+    if (window) {
+      window.focus();
+      await window.ZoteroPane.viewAttachment(item.id);
+    }
   },
 
   /** Select the attachments in the library (switching to the library tab, expanding their item). */
   async showInLibrary(ids) {
-    const window = Zotero.getMainWindow();
     const items = (await Promise.all(ids.map((id) => this._liveItem(id)))).filter(Boolean);
-    if (!window || !items.length) {
+    if (!items.length) {
       this._tell("找不到这两份译文附件，可能已被删除");
       return;
     }
-    window.focus();
-    await window.ZoteroPane.selectItems(items.map((item) => item.id));
+    const window = await this._readyMainWindow();
+    if (window) {
+      window.focus();
+      await window.ZoteroPane.selectItems(items.map((item) => item.id));
+    }
+  },
+
+  /** The main window to act in; with none open (macOS), a new one once its
+   *  panes are ready (up to 10 seconds; otherwise a short notice and null). */
+  async _readyMainWindow() {
+    const window = await ZoteroTranslateNotices.readyMainWindow({
+      mainWindow: () => Zotero.getMainWindow(),
+      openMainWindow: () => Zotero.openMainWindow(),
+      isReady: (w) => !!(w.ZoteroPane && w.ZoteroPane.collectionsView && w.ZoteroPane.itemsView),
+      delay: () => Zotero.Promise.delay(100),
+    });
+    if (!window) {
+      this._tell("Zotero 主窗口没能打开，请先打开主窗口再试");
+    }
+    return window;
   },
 
   /** The item with this ID, unless it is gone or in the trash; else null. */
