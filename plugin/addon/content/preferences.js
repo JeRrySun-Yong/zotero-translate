@@ -92,6 +92,7 @@
           ? `内置配置：${saved.name}`
           : `编辑配置：${saved.name}`;
       $("zotero-translate-fields").hidden = Boolean(saved && saved.builtin);
+      $("zotero-translate-key-note").hidden = Boolean(saved && saved.builtin);
       $("zotero-translate-builtin").hidden = !(saved && saved.builtin);
       $("zotero-translate-builtin").textContent = saved && saved.builtin ? P.builtinDetail(saved) : "";
       this.showResult(null);

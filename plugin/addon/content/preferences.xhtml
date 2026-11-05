@@ -2,6 +2,7 @@
       xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
       xmlns:html="http://www.w3.org/1999/xhtml">
   <html:style>
+    #zotero-translate-prefs [hidden] { display: none !important; }
     #zotero-translate-prefs .zt-status { padding: 6px 10px; border-radius: 4px; font-weight: 600; }
     #zotero-translate-prefs .zt-status[data-running="true"] { background: #e3f4e1; color: #1d5b1a; }
     #zotero-translate-prefs .zt-status[data-running="false"] { background: #fde7e5; color: #8a1c12; }
@@ -56,7 +57,7 @@
       <html:input id="zotero-translate-timeout" type="text" inputmode="numeric" placeholder="默认 480；回答慢的模型可填 900"/>
     </html:div>
     <html:p id="zotero-translate-builtin" class="zt-note" hidden="hidden"/>
-    <html:p class="zt-note">密钥只发给本机翻译服务保存，Zotero 不保存。“测试连接”会先保存改动。</html:p>
+    <html:p id="zotero-translate-key-note" class="zt-note">密钥只发给本机翻译服务保存，Zotero 不保存。“测试连接”会先保存改动。</html:p>
     <html:div class="zt-buttons">
       <html:button id="zotero-translate-test">测试连接</html:button>
       <html:button id="zotero-translate-apply">应用</html:button>
