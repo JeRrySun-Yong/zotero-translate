@@ -218,15 +218,31 @@ var ZoteroTranslateProfiles = (() => {
   const REQUEST_LIMIT_MS = 10000;
   const TEST_LIMIT_MS = 90000;
 
+  /** The abort signal of a request that would outlast `ms`. AbortSignal.timeout
+   *  needs a window: in the plugin scope (bootstrap.js) it throws "Could not
+   *  find window", so the item menu passes its own (zotero-translate.js);
+   *  without one the request goes out without a signal. */
+  function timeoutSignal(ms) {
+    try {
+      return AbortSignal.timeout(ms);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The service's profile interface, through `fetch` at `serviceUrl()`.
    *  Every method resolves (never rejects); a failure is {error: text}. */
-  function createClient({ fetch, serviceUrl }) {
+  function createClient({ fetch, serviceUrl, timeoutSignal: makeSignal = timeoutSignal }) {
     const Core = typeof ZoteroTranslateCore !== "undefined" ? ZoteroTranslateCore : require("./core.js");
     const unreachable = () => `连不上翻译服务（${serviceUrl().trim()}）`;
 
     /** {status, body} of one request, or null when the service cannot be reached. */
     async function send(method, path, body, limitMs = REQUEST_LIMIT_MS) {
-      const options = { method, signal: AbortSignal.timeout(limitMs) };
+      const options = { method };
+      const signal = makeSignal(limitMs);
+      if (signal) {
+        options.signal = signal;
+      }
       if (method !== "GET") {
         options.headers = { "X-Zotero-Translate": "1", "Content-Type": "application/json" };
         options.body = JSON.stringify(body ?? {});

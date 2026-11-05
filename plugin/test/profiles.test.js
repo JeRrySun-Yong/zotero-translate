@@ -49,7 +49,13 @@ const NEW_FORM = {
 function fakeFetch(...answers) {
   const calls = [];
   const fetch = async (url, options = {}) => {
-    calls.push({ url, method: options.method || "GET", headers: options.headers || {}, body: options.body && JSON.parse(options.body) });
+    calls.push({
+      url,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      body: options.body && JSON.parse(options.body),
+      signal: "signal" in options ? options.signal : undefined,
+    });
     const answer = answers.shift();
     if (!answer) {
       throw new Error(`unexpected request ${url}`);
@@ -348,6 +354,33 @@ test("the status asks the service for its profiles", async () => {
   assert.deepEqual(await client.status(), { listing: LISTING });
   assert.deepEqual(await client.status(), { noProfiles: true, serviceUrl: SERVICE });
   assert.deepEqual(calls.map((c) => [c.method, c.url]), [["GET", `${SERVICE}/profiles`], ["GET", `${SERVICE}/profiles`]]);
+});
+
+test("without AbortSignal.timeout (the plugin scope has no window) the caller's timer is used", async () => {
+  // bootstrap.js loads profiles.js into the plugin scope, where
+  // AbortSignal.timeout throws "Could not find window"; the item menu passes
+  // its own signal, and a request without one still goes out.
+  const { fetch, calls } = fakeFetch(() => json(200, LISTING));
+  const limits = [];
+  const client = profiles.createClient({
+    fetch,
+    serviceUrl: () => SERVICE,
+    timeoutSignal: (ms) => {
+      limits.push(ms);
+      return undefined;
+    },
+  });
+  assert.deepEqual(await client.status(), { listing: LISTING });
+  assert.deepEqual(limits, [10000]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].signal, undefined);
+
+  const signal = new AbortController().signal;
+  const withSignal = fakeFetch(() => json(200, answer("succeeded", "连接成功", 1)));
+  await profiles
+    .createClient({ fetch: withSignal.fetch, serviceUrl: () => SERVICE, timeoutSignal: () => signal })
+    .saveAndTest(profiles.formFromProfile(SAVED), SAVED);
+  assert.deepEqual(withSignal.calls.map((c) => c.signal), [signal]);
 });
 
 test("apply refused by the service says why", async () => {

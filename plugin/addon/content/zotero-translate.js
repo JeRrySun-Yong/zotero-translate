@@ -57,10 +57,17 @@ var ZoteroTranslate = {
       label: "中文翻译",
     });
     // The item menu's GET /profiles and the "切换模型" click (profiles.js,
-    // loaded into the plugin scope by bootstrap.js).
+    // loaded into the plugin scope by bootstrap.js). AbortSignal.timeout
+    // needs a window, which this scope has none of: the main window's timer
+    // makes the request's signal.
     this.profileClient = ZoteroTranslateProfiles.createClient({
       fetch: (url, options) => fetch(url, options),
       serviceUrl: () => Zotero.Prefs.get(this.SERVICE_URL_PREF, true),
+      timeoutSignal: (ms) => {
+        const controller = new AbortController();
+        Zotero.getMainWindow()?.setTimeout(() => controller.abort(), ms);
+        return controller.signal;
+      },
     });
     this.notices = ZoteroTranslateNotices.createNotices({
       // With no main window open (macOS: Zotero runs on), notices wait for the next one.
