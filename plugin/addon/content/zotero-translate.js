@@ -123,8 +123,15 @@ var ZoteroTranslate = {
     itemTasksMenu.setAttribute("label", "翻译任务");
     itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
     itemPopup.append(itemMenu, itemTasksMenu);
-    itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
-    itemPopup.addEventListener("popuphidden", this._onItemMenuHidden);
+    // Only the popup's own popupshowing/popuphidden events: a submenu's
+    // bubble up and must not close or replace this menu's source check.
+    this._menuDetach.set(
+      window,
+      this.menu.addToPopup(itemPopup, {
+        menu: () => doc.getElementById(this.ITEM_MENU_ID),
+        selection: () => window.ZoteroPane.getSelectedItems(),
+      }),
+    );
 
     const toolsMenu = doc.createXULElement("menuitem");
     toolsMenu.id = this.TOOLS_MENU_ID;
@@ -143,9 +150,9 @@ var ZoteroTranslate = {
   removeFromWindow(window) {
     window.removeEventListener("activate", this._onMainWindowActivate);
     this.notices.windowClosed(window);
+    this._menuDetach.get(window)?.();
+    this._menuDetach.delete(window);
     const doc = window.document;
-    doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
-    doc.getElementById("zotero-itemmenu")?.removeEventListener("popuphidden", this._onItemMenuHidden);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
@@ -156,21 +163,8 @@ var ZoteroTranslate = {
   // so, instead of failing after the click (itemmenu.js).
   menu: null,
 
-  _onItemMenuShowing(event) {
-    const popup = event.target;
-    const window = popup.ownerGlobal;
-    ZoteroTranslate.menu
-      .showing({
-        popup,
-        menu: window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID),
-        items: window.ZoteroPane.getSelectedItems(),
-      })
-      .catch((e) => Zotero.logError(e));
-  },
-
-  _onItemMenuHidden(event) {
-    ZoteroTranslate.menu.hidden({ popup: event.target });
-  },
+  // Main window -> the function that removes the item menu popup's listeners.
+  _menuDetach: new WeakMap(),
 
   /** Submit every selected item, one after another; the service runs them in
    *  turn. The task window does not open (the main window keeps the focus):
@@ -194,7 +188,12 @@ var ZoteroTranslate = {
 
   /** The item's source for the lifecycle, or why it has none (a string).
    *  `translated` tells the lifecycle that a translation output is already
-   *  attached, so it asks before translating the paper again. */
+   *  there, so it asks before translating the paper again: one among a
+   *  regular item's attachments, or for a standalone PDF (whose outputs have
+   *  no link back to it) a task of this Zotero session that attached both
+   *  outputs. A task record removed by "清除已结束", and one of an earlier
+   *  session (ended tasks are not saved), are gone: such a standalone PDF is
+   *  translated again without the ask. */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
@@ -206,15 +205,15 @@ var ZoteroTranslate = {
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
-      translated: parent ? await this._hasTranslation(parent) : false,
+      translated: parent ? await this._hasTranslation(parent) : this.lifecycle.wasTranslated(source.id),
     };
   },
 
   /** Whether the item already has one of the plugin's translation outputs
    *  among its attachments: the plugin's way of telling that the paper was
-   *  translated (also by an earlier Zotero session; a standalone PDF's
-   *  outputs are standalone attachments with no link back, so they do not
-   *  count). */
+   *  translated, also by an earlier Zotero session. A standalone PDF has no
+   *  such parent item: `_sourceOf` asks the lifecycle's task records
+   *  (`wasTranslated`) for it instead. */
   async _hasTranslation(item) {
     const attachments = await Zotero.Items.getAsync(item.getAttachments());
     return attachments.some(
