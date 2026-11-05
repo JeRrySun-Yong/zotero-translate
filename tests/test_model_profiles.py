@@ -498,6 +498,20 @@ def test_a_profile_streams_its_requests_once_stream_is_set_and_tested_again(star
         assert not _listed(service, profile["id"])["tested"]
 
 
+def test_a_connection_test_with_a_malformed_stream_is_unparseable(start_service):
+    """A malformed stream event is "回答不能解析", as a malformed plain answer is, not a crash."""
+    with FakeModel() as model:
+        service = start_service(model)
+        profile = _create(service, model, stream=True)
+        model.stream_body = b'data: {"choices": 1}\n\ndata: [DONE]\n\n'
+        response = _write(service, "POST", f"/profiles/{profile['id']}/test")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "unparseable", response.text
+    assert "无法解析管线模型的流式响应" in response.json()["message"]
+    assert KEY not in response.text
+
+
 def test_a_test_passed_before_ticket_12_still_counts_for_a_profile_with_stream_off():
     """The fingerprint of a profile with streaming off is the one ticket 02 saved."""
     import hashlib

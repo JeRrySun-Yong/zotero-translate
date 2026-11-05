@@ -35,7 +35,10 @@ Test fixture only. It can:
   bytes keep arriving on a send that never answers. Every other fault
   applies to a stream as to a plain answer (an error status is a plain JSON
   answer; "empty", "invalid_json" and the not-text faults are the streamed
-  content). Each request records its raw body (``raw_body``).
+  content). Each request records its raw body (``raw_body``). A test can
+  set ``stream_body`` to make every streamed answer exactly those bytes
+  (e.g. a malformed event, an ``event: error``, or an event split across
+  several ``data:`` lines), whatever the responder gives.
 
 Request kinds are recognised from the message content:
 
@@ -224,6 +227,7 @@ class FakeModel:
     keep_alive: bool = False  # HTTP/1.1: a connection stays open for the client's next request
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
+    stream_body: bytes | None = None  # a streamed answer's whole body, instead of the usual stream
 
     def __post_init__(self):
         self._lock = threading.Lock()
@@ -365,7 +369,9 @@ class FakeModel:
             if body.get("stream") is True:
                 if fault in _NOT_TEXT_CONTENT:
                     content = _NOT_TEXT_CONTENT[fault]
-                request.disconnected = not _send_stream(handler, body.get("model", ""), content, fault)
+                request.disconnected = not _send_stream(
+                    handler, body.get("model", ""), content, fault, self.stream_body
+                )
                 return None
             payload = _completion(body.get("model", ""), content)
             if fault in _NOT_TEXT_CONTENT:
@@ -599,9 +605,16 @@ def _send_text(handler: BaseHTTPRequestHandler, status: int, text: str) -> None:
     handler.wfile.write(data)
 
 
-def _send_stream(handler: BaseHTTPRequestHandler, model: str, content, fault: str | None) -> bool:
+def _send_stream(
+    handler: BaseHTTPRequestHandler,
+    model: str,
+    content,
+    fault: str | None,
+    body: bytes | None = None,
+) -> bool:
     """Answer as a server-sent event stream (see the module docstring); close the connection after.
 
+    ``body``, when given, is the whole stream, as it is.
     Return False if the client closed the connection before the stream ended.
     """
     handler.close_connection = True
@@ -609,6 +622,13 @@ def _send_stream(handler: BaseHTTPRequestHandler, model: str, content, fault: st
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Connection", "close")
     handler.end_headers()
+    if body is not None:
+        try:
+            handler.wfile.write(body)
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        return True
 
     def chunk(delta: dict | None, finish: str | None = None, **extra) -> bytes:
         choices = [] if delta is None else [{"index": 0, "delta": delta, "finish_reason": finish}]

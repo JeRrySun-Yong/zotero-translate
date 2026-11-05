@@ -28,6 +28,7 @@ from zotero_translate.endpoint import SendCancelled
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 from zotero_translate.model_client import PipelineModels
+from zotero_translate.model_client import REDACTED
 from zotero_translate.model_client import ResponseCache
 from zotero_translate.request_log import REQUESTS_FILE
 from zotero_translate.request_log import RequestLog
@@ -252,3 +253,74 @@ def test_a_hedged_copy_that_wins_aborts_the_streaming_original(tmp_path):
         (2, "argon", "succeeded", True),
     ]
     assert argon.requests[0].body["stream"] is True
+
+
+# Malformed stream events are "unparseable", as a malformed plain answer is:
+# they are retried (no cache, no crash) and the final reason says so.
+MALFORMED_STREAM_EVENTS = [
+    ('{"choices": 1}', "choices-not-a-list"),
+    ('{"choices": "x"}', "choices-a-string"),
+    ('{"choices": [1]}', "choice-not-an-object"),
+    ('{"choices": ["x"]}', "choice-a-string"),
+    ('{"choices": [{"index": 0, "delta": "x"}]}', "delta-not-an-object"),
+    ('{"choices": [{"index": 0, "delta": {"content": ["ok"]}}]}', "content-not-text"),
+    ('{"choices": [{"index": 0, "delta": {"content": 1}}]}', "content-a-number"),
+]
+
+
+@pytest.mark.parametrize(
+    "event", [event for event, _ in MALFORMED_STREAM_EVENTS], ids=[name for _, name in MALFORMED_STREAM_EVENTS]
+)
+def test_a_malformed_stream_event_is_retried_like_an_unparseable_answer(tmp_path, event):
+    with FakeModel() as fake:
+        fake.stream_body = f"data: {event}\n\ndata: [DONE]\n\n".encode()
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                client.complete(MESSAGES)
+        finally:
+            client.close()
+
+    assert "无法解析管线模型的流式响应" in str(failure.value)
+    assert failure.value.category == "retryable"
+    assert len(fake.requests) == 4  # 1 + max_retries
+    assert not (tmp_path / "cache").exists()  # a failed answer is never cached
+    assert FAKE_API_KEY not in str(failure.value)
+
+
+@pytest.mark.parametrize("event_field", ["", "event: error\n"], ids=["data-only", "event-error"])
+def test_an_error_event_in_a_stream_is_retryable_and_redacts_the_key(tmp_path, event_field):
+    error = json.dumps({"error": {"message": f"the endpoint rejected the key {FAKE_API_KEY}"}})
+    with FakeModel() as fake:
+        fake.stream_body = f"{event_field}data: {error}\n\ndata: [DONE]\n\n".encode()
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                client.complete(MESSAGES)
+        finally:
+            client.close()
+
+    message = str(failure.value)
+    assert "管线模型在流式回答中出错" in message
+    assert REDACTED in message
+    assert FAKE_API_KEY not in message
+    assert failure.value.category == "retryable"
+    assert not (tmp_path / "cache").exists()
+
+
+def test_one_event_may_be_split_across_several_data_lines(tmp_path):
+    with FakeModel() as fake:
+        fake.stream_body = (
+            b'data: {"choices": [{"index": 0,\n'
+            b'data: "delta": {"content": "multi-line"}, "finish_reason": null}]}\n\n'
+            b'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            assert client.complete(MESSAGES) == "multi-line"
+        finally:
+            client.close()
+
+    [request] = fake.requests
+    assert request.fault is None and not request.disconnected

@@ -501,34 +501,51 @@ class ModelClient:
         (``reasoning``, ``reasoning_content``, ``reasoning_details``) are not
         read. A stream with no ``finish_reason`` broke off before the answer
         ended, and one whose ``finish_reason`` is ``error``, or with an
-        ``error`` chunk, failed on the way: both are retried. A content delta
-        that is not text is returned as it is, for ``_send`` to reject.
+        ``error`` chunk, failed on the way: both are retried. So is a chunk
+        whose shape is not that of a chat completion chunk (choices that are
+        not a list of objects, a delta that is not an object, a content that
+        is not text): it cannot be read, like an answer that does not parse,
+        rather than end the request with a ``TypeError``.
         """
-        parts: list = []
+        parts: list[str] = []
         finish = None
+        unreadable = "无法解析管线模型的流式响应"
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as e:
-            raise _RetryableError("无法解析管线模型的流式响应") from e
+            raise _RetryableError(unreadable) from e
         for event in _sse_data(text):
             if event == "[DONE]":
                 break
             try:
                 chunk = json.loads(event)
             except ValueError as e:
-                raise _RetryableError("无法解析管线模型的流式响应") from e
+                raise _RetryableError(unreadable) from e
             if not isinstance(chunk, dict):
-                raise _RetryableError("无法解析管线模型的流式响应")
+                raise _RetryableError(unreadable)
             if chunk.get("error"):
                 excerpt = self._body_excerpt(json.dumps(chunk["error"], ensure_ascii=False).encode())
                 raise _RetryableError("管线模型在流式回答中出错" + excerpt)
-            for choice in chunk.get("choices") or []:
-                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+            choices = chunk.get("choices")
+            if choices is None:
+                choices = []
+            if not isinstance(choices, list):
+                raise _RetryableError(f"{unreadable}（choices 不是列表）")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise _RetryableError(f"{unreadable}（choice 不是对象）")
+                if choice.get("index", 0) != 0:
                     continue
-                delta = choice.get("delta") or {}
-                content = delta.get("content") if isinstance(delta, dict) else None
+                delta = choice.get("delta")
+                if delta is None:
+                    delta = {}
+                if not isinstance(delta, dict):
+                    raise _RetryableError(f"{unreadable}（delta 不是对象）")
+                content = delta.get("content")
                 if content is not None and not isinstance(content, str):
-                    return content
+                    raise _RetryableError(
+                        f"{unreadable}（content 不是文本：{type(content).__name__}）"
+                    )
                 if content:
                     parts.append(content)
                 finish = choice.get("finish_reason") or finish
