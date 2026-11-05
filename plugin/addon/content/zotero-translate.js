@@ -153,37 +153,36 @@ var ZoteroTranslate = {
   /** Submit every selected item, one after another; the service runs them in
    *  turn. The task window does not open (the main window keeps the focus):
    *  once all are uploaded, the submission notice says "已提交 N 篇" (and why
-   *  any were skipped); a click on it opens the task window. */
+   *  any were skipped; lifecycle.js submitBatch, which announces it, never
+   *  after the plugin is shut down); a click on it opens the task window. */
   async translateSelected(window) {
-    this.lifecycle.clearNotices();
-    const submitted = [];
-    for (const item of window.ZoteroPane.getSelectedItems()) {
-      const task = await this.submit(item);
-      if (task && task.taskId) {
-        submitted.push(task.title);
-      }
-    }
-    const notice = ZoteroTranslateCore.submissionNotice({ submitted, skipped: this.lifecycle.notices });
-    if (notice) {
-      this.notices.announce({ outcome: "submitted", ...notice });
-    }
+    await this.lifecycle.submitBatch(window.ZoteroPane.getSelectedItems(), (item) => this._sourceOf(item));
   },
 
   /** Submit the item's source PDF, unless the item has no PDF; the lifecycle
    *  skips a PDF that already has an unfinished task. Returns the new task, or null. */
   async submit(item) {
-    const source = await this.sourcePdf(item);
-    if (!source) {
-      this.lifecycle.notice(`${item.getDisplayTitle()}：该条目没有 PDF 附件`);
+    const source = await this._sourceOf(item);
+    if (typeof source === "string") {
+      this.lifecycle.notice(source);
       return null;
     }
+    return this.lifecycle.submit(source);
+  },
+
+  /** The item's source for the lifecycle, or why it has none (a string). */
+  async _sourceOf(item) {
+    const source = await this.sourcePdf(item);
+    if (!source) {
+      return `${item.getDisplayTitle()}：该条目没有 PDF 附件`;
+    }
     const parent = source.parentItem; // null for a standalone PDF
-    return this.lifecycle.submit({
+    return {
       sourceItemID: source.id,
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
-    });
+    };
   },
 
   /** The PDF to translate: the selected attachment itself, or the item's best

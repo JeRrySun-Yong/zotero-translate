@@ -1698,6 +1698,52 @@ test("submit returns the new task, or null when the PDF already has an unfinishe
   assert.deepEqual([failed.taskId, failed.state], [null, "failed"]);
 });
 
+const NO_PDF = (title) => `${title}：该条目没有 PDF 附件`;
+const sourceNamed = (title, id) => ({ sourceItemID: id, itemID: id + 100, title, sourceFileName: `${title}.pdf` });
+/** sourceOf for submitBatch: an item is a source, or the reason it has none. */
+const asSource = async (item) => item;
+
+test("a batch's submission notice: the titles the service took, and why the others were skipped", async () => {
+  const env = await submitted(); // SOURCE has an unfinished task
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.submitBatch([sourceNamed("B", 21), NO_PDF("C"), SOURCE], asSource);
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "已提交 1 篇", titles: ["B"], reasons: [NO_PDF("C"), ALREADY_ACTIVE("AutoDesign")] },
+  ]);
+  // The task window shows this submission's reasons too.
+  assert.deepEqual(env.lifecycle.notices, [NO_PDF("C"), ALREADY_ACTIVE("AutoDesign")]);
+});
+
+test("after stop, an upload under way when it comes back brings no submission notice", async () => {
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const batch = env.lifecycle.submitBatch([SOURCE, NO_PDF("C")], asSource);
+  await settle();
+  env.lifecycle.stop();
+  upload.answer(json(201, { task_id: "t1" }));
+  await batch;
+  assert.deepEqual(env.announced, []);
+});
+
+test("two batches at once each tell only their own skipped items", async () => {
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const first = env.lifecycle.submitBatch([SOURCE, NO_PDF("C")], asSource);
+  await settle(); // the first batch's upload is under way
+  await env.lifecycle.submitBatch([NO_PDF("D")], asSource);
+  upload.answer(json(201, { task_id: "t1" }));
+  await first;
+  assert.deepEqual(
+    env.announced.map(({ headline, reasons }) => [headline, reasons]),
+    [
+      ["没有提交", [NO_PDF("D")]],
+      ["已提交 1 篇", [NO_PDF("C")]],
+    ],
+  );
+});
+
 test("清除已结束 removes only the done, cancelled and failed rows; unfinished ones stay, saved and still handled", async () => {
   const UNFINISHED = ["queued", "running", "waiting_rerun", "attaching", "attach_failed", "cancelling"];
   const saved = UNFINISHED.map((state, i) => ({

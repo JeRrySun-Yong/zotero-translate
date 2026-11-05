@@ -74,7 +74,8 @@
  *   change is saved: a state restored after a restart is no change, so no
  *   notice comes again (done and failed tasks are not even saved). A state
  *   that restoring itself changes (an upload under way at quit fails) is
- *   one, measured from the saved state. Never after stop();
+ *   one, measured from the saved state. Also, at the end of submitBatch(),
+ *   {outcome: "submitted", headline, titles, reasons}. Never after stop();
  * - debug(message), logError(error): logging.
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript after
@@ -136,6 +137,9 @@ var ZoteroTranslateLifecycle = (() => {
     "importIntents",
   ];
   const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
+
+  /** Why a source PDF with an unfinished task was not submitted again. */
+  const activeNotice = (title) => `${title}：已有未结束的翻译任务，本次提交已忽略`;
 
   /** The service could not be reached, did not answer in full within the
    *  time limit, or gave an answer that cannot be read. */
@@ -234,6 +238,40 @@ var ZoteroTranslateLifecycle = (() => {
         return task;
       },
 
+      /** "翻译为中文" on several items: submit them one after another
+       *  (`sourceOf(item)`: the item's source, or why it has none, a string,
+       *  also shown in the task window), then announce the submission notice
+       *  (core.js submissionNotice) with this batch's own titles and reasons;
+       *  none once stop() has come meanwhile. */
+      async submitBatch(items, sourceOf) {
+        lifecycle.clearNotices();
+        const submitted = [];
+        const skipped = [];
+        for (const item of items) {
+          const source = await sourceOf(item);
+          if (typeof source === "string") {
+            lifecycle.notice(source);
+            skipped.push(source);
+            continue;
+          }
+          const task = await lifecycle.submit(source);
+          if (!task) {
+            skipped.push(activeNotice(source.title));
+          } else if (task.taskId) {
+            submitted.push(task.title);
+          }
+        }
+        const notice = Core.submissionNotice({ submitted, skipped });
+        if (!started || !notice) {
+          return;
+        }
+        try {
+          announce({ outcome: "submitted", ...notice });
+        } catch (e) {
+          logError(e);
+        }
+      },
+
       /** The "清除已结束" button: remove the done, failed and cancelled
        *  tasks (never saved; nothing more to do for them); the unfinished
        *  ones stay as they are. */
@@ -325,7 +363,7 @@ var ZoteroTranslateLifecycle = (() => {
     function skippedAsActive(sourceItemID, title) {
       const active = lifecycle.tasks.some((t) => t.sourceItemID === sourceItemID && ACTIVE_STATES.includes(t.state));
       if (active) {
-        lifecycle.notice(`${title}：已有未结束的翻译任务，本次提交已忽略`);
+        lifecycle.notice(activeNotice(title));
       }
       return active;
     }
