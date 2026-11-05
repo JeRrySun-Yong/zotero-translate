@@ -68,10 +68,13 @@ function fakeClock(time = 0) {
  *  which a restart passes on. `failWrite` (a file name), `failRemove`,
  *  `failImport` and `failMark` (a reason) inject errors; `quitAfterImport`
  *  and `quitAfterMark` make Zotero quit there: the attachment is saved (with
- *  its identity, after mark) and the lifecycle never goes on. */
-function environment({ routes = {}, saved = null, time = 0, library = [] } = {}) {
+ *  its identity, after mark) and the lifecycle never goes on. The notices
+ *  of ended tasks go to `announced` (`announce` replaces that; `logError`
+ *  replaces throwing). */
+function environment({ routes = {}, saved = null, time = 0, library = [], announce = null, logError = null } = {}) {
   const env = {
     clock: fakeClock(time),
+    announced: [],
     requests: [],
     requestTimes: [],
     imports: [],
@@ -191,12 +194,17 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
         env.saved = value;
       },
     },
+    announce: announce || ((notice) => env.announced.push(notice)),
     debug: () => {},
-    logError: (e) => {
-      throw e;
-    },
+    logError:
+      logError ||
+      ((e) => {
+        throw e;
+      }),
   });
   env.status = () => env.lifecycle.rows().map((row) => row.status);
+  /** The notices so far: [outcome, title, status, results]. */
+  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, row.status, row.results]);
   /** The attachments the user sees: [title, text, identity]. */
   env.attached = () => env.library.filter((a) => !a.deleted).map((a) => [a.title, a.text, a.identity]);
   /** When (clock time) each request for `key` was sent. */
@@ -1428,4 +1436,222 @@ test("a retry starts with no attach records or import intent of the old task", a
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
   await env.lifecycle.retry(rowOf(env).key);
   assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.attached, t.importIntents]), [["t2", {}, {}]]);
+});
+
+// ---- the done notice and opening the results (M4 ticket 07) ----
+
+const RESULTS = { mono: 100, dual: 101 }; // the attachments imported first in an environment
+
+test("only an 已挂回 row has results (打开译文, 打开双语, 在库中显示): its two attachments", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("queued", { queue_position: 1 }) });
+  const seen = [[env.lifecycle.tasks[0].state, rowOf(env).results]];
+  for (const state of ["running", "waiting_rerun"]) {
+    env.routes[QUERY("t1")] = status(state, { reruns_used: 0, reruns_max: 2, next_attempt_in_seconds: 60 });
+    await env.clock.advance(2000);
+    seen.push([env.lifecycle.tasks[0].state, rowOf(env).results]);
+  }
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.writeHold = held(); // the first PDF is downloaded, not yet written (never)
+  await env.clock.advance(2000);
+  seen.push([env.lifecycle.tasks[0].state, rowOf(env).results]);
+  assert.deepEqual(seen, [
+    ["queued", null],
+    ["running", null],
+    ["waiting_rerun", null],
+    ["attaching", null],
+  ]);
+
+  const attachFailed = await submitted(succeededRoutes("t1"));
+  attachFailed.failImport = "x";
+  await attachFailed.clock.advance(2000);
+  assert.deepEqual([attachFailed.lifecycle.tasks[0].state, rowOf(attachFailed).results], ["attach_failed", null]);
+
+  const failed = await submitted({ [QUERY("t1")]: status("failed", { error: "x" }) });
+  await failed.clock.advance(2000);
+  assert.deepEqual([failed.lifecycle.tasks[0].state, rowOf(failed).results], ["failed", null]);
+
+  const cancelled = await submitted({ [CANCEL("t1")]: json(200, { state: "cancelled" }) });
+  await cancelled.lifecycle.cancel(rowOf(cancelled).key);
+  assert.deepEqual([cancelled.lifecycle.tasks[0].state, rowOf(cancelled).results], ["cancelled", null]);
+
+  const done = await submitted(succeededRoutes("t1"));
+  await done.clock.advance(2000);
+  assert.deepEqual([done.lifecycle.tasks[0].state, rowOf(done).results], ["done", RESULTS]);
+});
+
+test("an 已挂回 row has the results also when attaching found the attachments instead of importing them", async () => {
+  const library = [
+    { id: 7, target: { parentItemID: 10 }, title: "中文译文", text: "mono pdf", addedAt: 0, identity: "t1/mono", deleted: false },
+    { id: 8, target: { parentItemID: 10 }, title: "双语对照", text: "dual pdf", addedAt: 0, identity: "t1/dual", deleted: false },
+  ];
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attaching", attached: {} }]);
+  const env = environment({ saved, library, routes: succeededRoutes("t1") });
+  env.lifecycle.start();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.imports, []);
+  assert.deepEqual(rowOf(env).results, { mono: 7, dual: 8 });
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回", { mono: 7, dual: 8 }]]);
+});
+
+test("a notice comes once when a task becomes 已挂回, with the row's status and the two attachments", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running", { progress: 40 }) });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices(), []);
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.routes[QUERY("t1")] = status("succeeded", { kept_source_paragraphs: 2 });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回（2 段保留原文）", RESULTS]]);
+  await env.clock.advance(60000);
+  assert.equal(env.announced.length, 1);
+});
+
+test("a notice comes once when a task fails, with the reason: the service's failure, a refused upload, a failed attach", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）" }) });
+  await env.clock.advance(2000);
+  await env.clock.advance(60000);
+  assert.deepEqual(env.notices(), [["failed", "AutoDesign", "失败：管线模型拒绝了请求（HTTP 400）", null]]);
+
+  const refusedUpload = environment({ routes: { [UPLOAD]: json(413, {}) } });
+  refusedUpload.lifecycle.start();
+  await refusedUpload.lifecycle.submit(SOURCE);
+  assert.deepEqual(refusedUpload.notices(), [
+    ["failed", "AutoDesign", `失败：翻译服务拒绝了提交（HTTP 413，服务地址：${SERVICE}）`, null],
+  ]);
+
+  const attachFailed = await submitted(succeededRoutes("t1"));
+  attachFailed.failImport = "无法写入 Zotero 存储目录";
+  await attachFailed.clock.advance(2000);
+  await attachFailed.clock.advance(60000);
+  assert.deepEqual(attachFailed.notices(), [["failed", "AutoDesign", ATTACH_FAILED("无法写入 Zotero 存储目录"), null]]);
+});
+
+test("no notice while a task is unfinished, disconnected or cancelled", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("waiting_rerun", { reruns_used: 0, reruns_max: 2, next_attempt_in_seconds: 60, error: "HTTP 500" }) });
+  await env.clock.advance(2000);
+  delete env.routes[QUERY("t1")];
+  await env.clock.advance(20000);
+  assert.deepEqual(env.status(), [DISCONNECTED(1)]);
+  env.routes[CANCEL("t1")] = json(200, { state: "cancelled" });
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.announced, []);
+
+  const attachCancelled = await submitted(succeededRoutes("t1"));
+  attachCancelled.failImport = "x";
+  await attachCancelled.clock.advance(2000);
+  assert.equal(attachCancelled.announced.length, 1); // 挂回失败
+  await attachCancelled.lifecycle.cancel(rowOf(attachCancelled).key);
+  assert.deepEqual(attachCancelled.status(), ["已取消"]);
+  assert.equal(attachCancelled.announced.length, 1);
+});
+
+test("each new failure after 重试 or 继续挂回 has its own notice", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("failed", { error: "第一次" }) });
+  await env.clock.advance(2000);
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("failed", { error: "第二次" });
+  await env.lifecycle.retry(rowOf(env).key);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices().map((n) => n[2]), ["失败：第一次", "失败：第二次"]);
+
+  const attach = await submitted(succeededRoutes("t1"));
+  attach.failImport = "第一次";
+  await attach.clock.advance(2000);
+  attach.failImport = "第二次";
+  await attach.lifecycle.continueAttach(rowOf(attach).key);
+  attach.failImport = null;
+  await attach.lifecycle.continueAttach(rowOf(attach).key);
+  assert.deepEqual(attach.notices().map((n) => [n[0], n[2]]), [
+    ["failed", ATTACH_FAILED("第一次")],
+    ["failed", ATTACH_FAILED("第二次")],
+    ["done", "已挂回"],
+  ]);
+});
+
+test("after a Zotero restart no notice comes again; a task that ends after the restart has its one notice", async () => {
+  // Before the restart: one task done (notice), one attach_failed (notice), one running.
+  const before = environment({
+    routes: {
+      [UPLOAD]: json(201, { task_id: "t1" }),
+      ...succeededRoutes("t1"),
+      [QUERY("t2")]: status("succeeded"),
+      [MONO("t2")]: pdfBytes("mono 2"),
+      [DUAL("t2")]: pdfBytes("dual 2"),
+      [QUERY("t3")]: status("running"),
+    },
+  });
+  before.lifecycle.start();
+  await before.lifecycle.submit(SOURCE);
+  before.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await before.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "AutoRef" });
+  before.routes[UPLOAD] = json(201, { task_id: "t3" });
+  await before.lifecycle.submit({ ...SOURCE, sourceItemID: 13, title: "MaLiang" });
+  before.routes[DUAL("t2")] = () => {
+    before.failImport = "磁盘已满";
+    return pdfBytes("dual 2");
+  };
+  await before.clock.advance(2000);
+  assert.deepEqual(before.notices().map((n) => [n[0], n[1]]), [["done", "AutoDesign"], ["failed", "AutoRef"]]);
+  before.lifecycle.stop();
+
+  const after = environment({ saved: before.saved, library: before.library, time: before.clock.now(), routes: { [QUERY("t3")]: status("running") } });
+  after.lifecycle.start();
+  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, r.status]), [
+    ["AutoRef", ATTACH_FAILED("磁盘已满")],
+    ["MaLiang", "翻译中"],
+  ]);
+  await after.clock.advance(10000);
+  assert.deepEqual(after.announced, []);
+  Object.assign(after.routes, { [QUERY("t3")]: status("succeeded"), [MONO("t3")]: pdfBytes("mono 3"), [DUAL("t3")]: pdfBytes("dual 3") });
+  await after.clock.advance(2000);
+  assert.deepEqual(after.notices().map((n) => [n[0], n[1]]), [["done", "MaLiang"]]);
+
+  // A second restart: nothing again.
+  after.lifecycle.stop();
+  const again = environment({ saved: after.saved, library: after.library, time: after.clock.now() });
+  again.lifecycle.start();
+  await again.clock.advance(10000);
+  assert.deepEqual(again.announced, []);
+});
+
+test("a task that fails while being restored (an upload under way at quit) has its notice once, not after the next restart", async () => {
+  const before = environment({ routes: { [UPLOAD]: never } });
+  before.lifecycle.start();
+  before.lifecycle.submit(SOURCE);
+  await settle();
+  before.lifecycle.stop();
+
+  const after = environment({ saved: before.saved });
+  after.lifecycle.start();
+  assert.deepEqual(after.notices(), [["failed", "AutoDesign", "失败：提交未完成，请重试", null]]);
+  after.lifecycle.stop();
+
+  const again = environment({ saved: after.saved });
+  again.lifecycle.start();
+  assert.deepEqual(again.announced, []);
+});
+
+test("an attaching task from before attach records becomes 挂回失败 at restore with one notice; restored again, none", async () => {
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attaching" }]);
+  const env = environment({ saved });
+  env.lifecycle.start();
+  assert.deepEqual(env.notices(), [["failed", "AutoDesign", ATTACH_FAILED(UPGRADE_ATTACH_ERROR), null]]);
+  env.lifecycle.stop();
+  const again = environment({ saved: env.saved });
+  again.lifecycle.start();
+  assert.deepEqual(again.announced, []);
+});
+
+test("a notice that throws is logged; the task goes on", async () => {
+  const logged = [];
+  const env = await submitted(succeededRoutes("t1"), {
+    announce: () => {
+      throw new Error("no window");
+    },
+    logError: (e) => logged.push(e.message),
+  });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.equal(env.saved, "[]");
+  assert.deepEqual(logged, ["no window"]);
 });
