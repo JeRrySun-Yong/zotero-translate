@@ -139,6 +139,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
       },
       remove: async (dir) => {
         env.steps.push(`remove ${dir}`);
+        if (env.removeHold) {
+          await env.removeHold();
+        }
         if (env.failRemove) {
           throw new Error("无法删除临时目录");
         }
@@ -1874,6 +1877,83 @@ test("an ended task's elapsed time stops at its end; 重试 counts again from th
   await env.lifecycle.retry(rowOf(env).key);
   assert.deepEqual(elapsedOf(env), ["0 秒"]);
   await env.clock.advance(2000);
+  assert.deepEqual(elapsedOf(env), ["2 秒"]);
+});
+
+/** Elapsed time at the end and 10 minutes later: the two are the same once the task has ended. */
+async function elapsedStops(env) {
+  const atEnd = elapsedOf(env);
+  await env.clock.advance(10 * MINUTE);
+  return [atEnd, elapsedOf(env)];
+}
+
+test("every way into an ended state stops the elapsed time there, the restart's included", async (t) => {
+  const SUBMITTED_AT = 1_000_000;
+  const savedTask = (fields) => JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", submittedAt: SUBMITTED_AT, ...fields }]);
+
+  await t.test("an upload under way when Zotero quit fails at the restart", async () => {
+    const env = environment({ saved: savedTask({ taskId: null, state: "submitting" }), time: SUBMITTED_AT + 3 * MINUTE });
+    env.lifecycle.start();
+    assert.deepEqual(env.status(), ["失败：提交未完成，请重试"]);
+    assert.deepEqual(await elapsedStops(env), [["3 分 0 秒"], ["3 分 0 秒"]]);
+  });
+
+  await t.test("a pre-upgrade attaching task becomes attach_failed at the restart, then 取消 ends it here", async () => {
+    const env = environment({ saved: savedTask({ state: "attaching" }), time: SUBMITTED_AT + MINUTE });
+    env.lifecycle.start();
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["1 分 0 秒"], ["1 分 0 秒"]]);
+  });
+
+  await t.test("an upload the service refuses", async () => {
+    const env = environment({ routes: { [UPLOAD]: json(413, {}) } });
+    env.lifecycle.start();
+    await env.lifecycle.submit(SOURCE);
+    assert.match(env.status()[0], /^失败：/);
+    assert.deepEqual(await elapsedStops(env), [["0 秒"], ["0 秒"]]);
+  });
+
+  for (const [name, answer, shown] of [
+    ["the service says failed", status("failed", { error: "x" }), "失败：x"],
+    ["the service says cancelled", status("cancelled"), "已取消"],
+    ["the service no longer knows the task", json(404, {}), "失败：翻译服务中找不到该任务，请重试"],
+  ]) {
+    await t.test(name, async () => {
+      const env = await submitted({ [QUERY("t1")]: answer });
+      await env.clock.advance(2000);
+      assert.deepEqual(env.status(), [shown]);
+      assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+    });
+  }
+
+  await t.test("a cancel the service confirms", async () => {
+    const env = await submitted({ [QUERY("t1")]: status("queued"), [CANCEL("t1")]: cancelledAnswer("t1") });
+    await env.clock.advance(5000);
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["5 秒"], ["5 秒"]]);
+  });
+
+  await t.test("both PDFs attached", async () => {
+    const env = await submitted(succeededRoutes("t1"));
+    await env.clock.advance(2000);
+    assert.deepEqual(env.status(), ["已挂回"]);
+    assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+  });
+});
+
+test("a task's end time is taken when it changes into the ended state, before anything else is awaited", async () => {
+  // Removing the temporary directory after both PDFs are attached takes 30 seconds.
+  const env = await submitted(succeededRoutes("t1"));
+  let removing = null;
+  env.removeHold = () => new Promise((resolve) => (removing = resolve));
+  await env.clock.advance(2000);
+  assert.ok(removing, "the removal is under way");
+  await env.clock.advance(30000);
+  removing();
+  await env.clock.advance(0);
+  assert.deepEqual(env.status(), ["已挂回"]);
   assert.deepEqual(elapsedOf(env), ["2 秒"]);
 });
 

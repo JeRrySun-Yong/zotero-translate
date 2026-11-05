@@ -176,8 +176,8 @@ var ZoteroTranslateLifecycle = (() => {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
       // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, submittedAt
       // (clock time the upload of this submission or retry started; the row's elapsed
-      // time counts from it, core.js), endedAt (clock time the task was first seen in an
-      // ended state, or null; not saved, ended tasks are not), stage,
+      // time counts from it, core.js), endedAt (clock time the task changed into an
+      // ended state, set by setState, or null; not saved, ended tasks are not), stage,
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
       // service stopped answering, or null), generation (0 for a new task, one more for
@@ -311,7 +311,8 @@ var ZoteroTranslateLifecycle = (() => {
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (task && cancelsLocally(task)) {
-          Object.assign(task, { state: "cancelled", error: null, disconnectedSince: null });
+          setState(task, "cancelled");
+          Object.assign(task, { error: null, disconnectedSince: null });
           changed(); // saved first: the task is no longer unfinished, so no restart attaches it
           endOperation(task);
           return;
@@ -319,7 +320,8 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || !CANCELLABLE_STATES.includes(task.state)) {
           return;
         }
-        Object.assign(task, { state: "cancelling", cleanupError: null });
+        setState(task, "cancelling");
+        task.cleanupError = null;
         endOperation(task);
         changed(); // the intent is saved before the request goes out
         if (started) {
@@ -334,7 +336,8 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || task.state !== "attach_failed") {
           return;
         }
-        Object.assign(task, { state: "attaching", error: null });
+        setState(task, "attaching");
+        task.error = null;
         changed();
         if (started) {
           await run(task);
@@ -477,9 +480,9 @@ var ZoteroTranslateLifecycle = (() => {
           throw new Error(`翻译服务拒绝了提交（HTTP ${answer.status}，服务地址：${task.serviceUrl}）`);
         }
         task.taskId = answer.body;
-        task.state = "queued";
+        setState(task, "queued");
       } catch (e) {
-        task.state = "failed";
+        setState(task, "failed");
         task.error = e.message;
       }
       changed();
@@ -513,7 +516,7 @@ var ZoteroTranslateLifecycle = (() => {
         keptSourceParagraphs: status.kept_source_paragraphs,
         keptSourceAlgorithms: status.kept_source_algorithms,
       });
-      task.state = status.state === "succeeded" ? "attaching" : status.state;
+      setState(task, status.state === "succeeded" ? "attaching" : status.state);
       changed();
       if (task.state === "attaching") {
         await attachOutputs(task, operation);
@@ -556,7 +559,8 @@ var ZoteroTranslateLifecycle = (() => {
         return;
       }
       if ([200, 409, 404].includes(answer.status)) {
-        Object.assign(task, { state: "cancelled", disconnectedSince: null, cleanupError: null });
+        setState(task, "cancelled");
+        Object.assign(task, { disconnectedSince: null, cleanupError: null });
       } else if (answer.status === 503) {
         Object.assign(task, { disconnectedSince: null, cleanupError: answer.body.cleanup_error });
       } else {
@@ -654,7 +658,7 @@ var ZoteroTranslateLifecycle = (() => {
         changed();
       }
       if (isCurrent(task, operation)) {
-        task.state = "done";
+        setState(task, "done");
         task.disconnectedSince = null;
       }
     }
@@ -745,14 +749,14 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** The task has failed for good: only "重试" goes on. */
     function fail(task, reason) {
-      task.state = "failed";
+      setState(task, "failed");
       task.error = reason;
       task.disconnectedSince = null;
     }
 
     /** Attaching hit a local error: "继续挂回" or "取消" go on. */
     function attachFailed(task, reason) {
-      task.state = "attach_failed";
+      setState(task, "attach_failed");
       task.error = reason;
       task.disconnectedSince = null;
     }
@@ -825,20 +829,22 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    /** Stop the elapsed time of the tasks that have just ended (the first
-     *  change that finds them ended; every change into an ended state comes
-     *  here at once); a retried task's upload clears endedAt again. */
-    function stampEnded() {
-      const now = clock.now();
-      for (const task of lifecycle.tasks) {
-        if (ENDED_STATES.includes(task.state) && task.endedAt == null) {
-          task.endedAt = now;
-        }
+    /** Every change of a task's state after its upload began goes through
+     *  here: into an ended state (done, failed, cancelled) it takes the end
+     *  time, which stops the row's elapsed time (core.js); out of one (only
+     *  attach_failed after done, when removing the temporary directory fails)
+     *  it clears it. The upload sets submittedAt and clears endedAt itself. */
+    function setState(task, state) {
+      const ended = ENDED_STATES.includes(state);
+      if (ended && !(ENDED_STATES.includes(task.state) && task.endedAt != null)) {
+        task.endedAt = clock.now();
+      } else if (!ended) {
+        task.endedAt = null;
       }
+      task.state = state;
     }
 
     function changed() {
-      stampEnded();
       saveTasks();
       announceEnded();
       for (const listener of lifecycle.listeners) {
