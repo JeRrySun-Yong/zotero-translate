@@ -50,7 +50,7 @@ function rowElement(key) {
     progress.append(bar, element("span", "percent"));
     const status = element("td", "status");
     status.append(element("div", "status-word"), element("div", "status-detail"));
-    tr.append(element("td", "title"), element("td", "stage"), progress, element("td", "elapsed"), status, element("td"));
+    tr.append(element("td", "title"), element("td", "stage"), progress, element("td", "elapsed"), status, element("td", "buttons"));
     for (const [action, label] of [["cancel", "取消"], ["retry", "重试"], ["continueAttach", "继续挂回"]]) {
       const button = document.createElementNS(XHTML, "button");
       button.textContent = label;
