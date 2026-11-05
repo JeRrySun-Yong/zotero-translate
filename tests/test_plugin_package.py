@@ -50,21 +50,36 @@ def test_default_service_address_is_the_services_default_port(xpi):
     assert DEFAULT_PORT not in (8916, 8890)  # old development line, upstream plugin
 
 
-def test_settings_page_has_only_the_service_address(xpi):
+def test_the_only_zotero_setting_is_the_service_address(xpi):
+    # The model profiles' form (M4 ticket 04) is sent to the service, not
+    # kept in Zotero's settings: no field of it is bound to a preference.
     prefs = xpi.read("prefs.js").decode("utf-8")
     assert re.findall(r'pref\("([^"]+)"', prefs) == ["extensions.zotero-translate.serviceUrl"]
     page = xpi.read("content/preferences.xhtml").decode("utf-8")
     assert re.findall(r'preference="([^"]+)"', page) == ["extensions.zotero-translate.serviceUrl"]
+    key_field = re.search(r"<html:input[^>]*\bid=\"zotero-translate-key\"[^>]*>", page).group(0)
+    assert 'type="password"' in key_field
+    for name in SETTINGS_PAGE:
+        assert "Prefs.set" not in xpi.read(name).decode("utf-8"), name
+
+
+# The settings page's files: the form of a model profile names its fields
+# (ADR 0005); the key itself goes to the service once and is never in the package.
+SETTINGS_PAGE = {"content/profiles.js", "content/preferences.js", "content/preferences.xhtml"}
 
 
 def test_package_holds_no_credentials_or_translation_parameters(xpi):
     forbidden = re.compile(
-        r"api[_-]?key|OPENAI|AI_DEFAULT_MODEL|Bearer|sk-[A-Za-z0-9]|gemini|temperature|"
-        r"reasoning|concurrency",
+        r"OPENAI_|AI_DEFAULT_MODEL|ZT_CONCURRENCY|Bearer|sk-[A-Za-z0-9]|gemini|temperature|reasoning",
         re.IGNORECASE,
     )
+    profile_fields = re.compile(r"api[_-]?key|concurrency", re.IGNORECASE)
+    assert SETTINGS_PAGE <= set(xpi.namelist())
     for name in xpi.namelist():
-        assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name
+        text = xpi.read(name).decode("utf-8", "replace")
+        assert not forbidden.search(text), name
+        if name not in SETTINGS_PAGE:
+            assert not profile_fields.search(text), name
 
 
 def test_package_leaves_out_tests_and_dev_tools(xpi):

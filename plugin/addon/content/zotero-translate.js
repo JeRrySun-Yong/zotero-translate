@@ -32,6 +32,7 @@ var ZoteroTranslate = {
     Zotero.PreferencePanes.register({
       pluginID: id,
       src: "content/preferences.xhtml",
+      scripts: ["content/core.js", "content/profiles.js", "content/preferences.js"],
       label: "中文翻译",
     });
     this.lifecycle = ZoteroTranslateLifecycle.createTaskLifecycle({
