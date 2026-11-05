@@ -12,8 +12,9 @@ The current profile and each profile's last connection test are saved in
 ``<data dir>/model-profiles.json``: the profile a submitted task records
 belongs to the service of that data directory, so a development service
 with a data directory of its own never changes the user's. A test counts
-only for the settings it tested: a fingerprint of the address, key, model
-and request timeout is saved with it (a SHA-256 digest; the key itself is
+only for the settings it tested: a fingerprint of the address, key, model,
+request timeout and, when on, streaming (M4 ticket 12; off leaves the
+fingerprint as it was before) is saved with it (a SHA-256 digest; the key itself is
 not), so an edit of any of these, through the service or in the file,
 makes the profile untested. Its name and concurrency limit are not part
 of it.
@@ -51,13 +52,14 @@ from zotero_translate.settings import SettingsError
 from zotero_translate.settings import base_url_problem
 from zotero_translate.settings import load_pipeline_settings
 from zotero_translate.settings import read_env_file
+from zotero_translate.settings import stream_setting
 
 BUILTIN_ID = "gemini"
 BUILTIN_NAME = "Gemini"
 STATE_FILE = "model-profiles.json"  # in the data directory
 MAX_CONCURRENCY = 256
 MAX_REQUEST_TIMEOUT_SECONDS = 3600
-_FIELDS = ("name", "base_url", "api_key", "model", "concurrency", "request_timeout_seconds")
+_FIELDS = ("name", "base_url", "api_key", "model", "concurrency", "request_timeout_seconds", "stream")
 _REQUIRED = ("name", "base_url", "api_key", "model")
 _LENGTHS = {"name": 60, "base_url": 500, "api_key": 500, "model": 200}
 # The connection settings a test is valid for (see the module docstring).
@@ -81,9 +83,13 @@ class Profile:
     model: str = ""
     concurrency: int = DEFAULT_PROFILE_CONCURRENCY
     request_timeout_seconds: float | None = None
+    stream: bool = False  # streamed requests (M4 ticket 12, ``ZT_STREAM``)
 
     def fingerprint(self) -> str:
-        data = json.dumps([getattr(self, name) for name in _TESTED_FIELDS])
+        values = [getattr(self, name) for name in _TESTED_FIELDS]
+        if self.stream:  # only when on: a test from before ticket 12 still counts
+            values.append({"stream": True})
+        data = json.dumps(values)
         return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
     def model_settings(self) -> ModelSettings:
@@ -94,6 +100,7 @@ class Profile:
             model=self.model,
             concurrency=self.concurrency,
             timeout_seconds=float(timeout),
+            stream=self.stream,
         )
 
 
@@ -185,6 +192,7 @@ class ProfileStore:
         fields = _validate(body, required=_REQUIRED)
         fields.setdefault("concurrency", DEFAULT_PROFILE_CONCURRENCY)
         fields.setdefault("request_timeout_seconds", None)
+        fields.setdefault("stream", False)
         with self._lock:
             profile = Profile(id=uuid.uuid4().hex[:12], **fields)
             self._write(profile)
@@ -310,6 +318,7 @@ class ProfileStore:
             "model": profile.model,
             "concurrency": profile.concurrency,
             "request_timeout_seconds": profile.request_timeout_seconds,
+            "stream": profile.stream,
             # The last 4 characters only of a key long enough to keep the rest unknown.
             "api_key": {
                 "set": bool(profile.api_key),
@@ -350,6 +359,9 @@ class ProfileStore:
         try:
             values = read_env_file(self.path(profile_id))
             timeout = values.get("ZT_REQUEST_TIMEOUT_SECONDS")
+            stream = stream_setting(values.get("ZT_STREAM", ""))
+            if stream is None:
+                return None  # as the worker would refuse it (``load_profile_settings``)
             return Profile(
                 id=profile_id,
                 name=values.get("ZT_PROFILE_NAME") or profile_id,
@@ -358,6 +370,7 @@ class ProfileStore:
                 model=values["AI_DEFAULT_MODEL"],
                 concurrency=int(values.get("ZT_CONCURRENCY") or DEFAULT_PROFILE_CONCURRENCY),
                 request_timeout_seconds=float(timeout) if timeout else None,
+                stream=stream,
             )
         except (OSError, UnicodeDecodeError, KeyError, ValueError):
             return None
@@ -374,6 +387,8 @@ class ProfileStore:
         }
         if profile.request_timeout_seconds is not None:
             lines["ZT_REQUEST_TIMEOUT_SECONDS"] = repr(float(profile.request_timeout_seconds))
+        if profile.stream:  # off: no line, the file as before ticket 12
+            lines["ZT_STREAM"] = "1"
         # Quoted, so that read_env_file gives every value back as written.
         text = "".join(f'{key}="{value}"\n' for key, value in lines.items())
         path = self.path(profile.id)
@@ -452,4 +467,8 @@ def _validate(body: dict, required: tuple[str, ...]) -> dict:
                 400, f"request_timeout_seconds 要是 0 到 {MAX_REQUEST_TIMEOUT_SECONDS} 之间的秒数，或 null"
             )
         fields["request_timeout_seconds"] = None if value is None else float(value)
+    if "stream" in body:
+        if not isinstance(body["stream"], bool):
+            raise ProfileError(400, "stream 要是 true 或 false")
+        fields["stream"] = body["stream"]
     return fields

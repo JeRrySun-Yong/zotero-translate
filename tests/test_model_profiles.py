@@ -462,6 +462,70 @@ def test_an_answer_whose_content_is_not_text_is_unparseable(start_service, fault
     assert response.json()["result"] == "unparseable"
 
 
+# M4 ticket 12: a profile's "stream" setting (streamed requests, ZT_STREAM).
+def test_a_profile_streams_its_requests_once_stream_is_set_and_tested_again(start_service):
+    with FakeModel() as gemini, FakeModel() as deepseek:
+        service = start_service(gemini)
+        profile = _create(service, deepseek)
+        assert profile["stream"] is False  # the default
+        path = f"/profiles/{profile['id']}"
+        file = service.profiles_dir / f"{profile['id']}.env"
+        assert "ZT_STREAM" not in file.read_text("utf-8")  # off: the file as before ticket 12
+        assert _write(service, "POST", f"{path}/test").json()["ok"]
+        assert _write(service, "POST", f"{path}/apply").status_code == 200
+
+        streamed = _write(service, "PUT", path, {"stream": True})
+        assert streamed.status_code == 200, streamed.text
+        assert streamed.json()["stream"] is True
+        assert not streamed.json()["tested"]  # a new connection setting
+        assert _profiles(service)["current"] == "gemini"
+        assert sum(CURRENT_RESET in line for line in service.output) == 1
+        assert 'ZT_STREAM="1"' in file.read_text("utf-8")
+        assert _listed(service, profile["id"])["stream"] is True
+
+        # The connection test sends as the profile does: streamed.
+        tested = _write(service, "POST", f"{path}/test").json()
+        assert tested["ok"], tested
+        first, second = deepseek.requests
+        assert "stream" not in first.body
+        assert second.body["stream"] is True
+        assert _listed(service, profile["id"])["tested"]
+
+        # A stream that breaks off is not a passed test.
+        deepseek.inject_error("stream_cut", kind="connection_test")
+        cut = _write(service, "POST", f"{path}/test").json()
+        assert cut["result"] == "unparseable", cut
+        assert not _listed(service, profile["id"])["tested"]
+
+
+def test_a_test_passed_before_ticket_12_still_counts_for_a_profile_with_stream_off():
+    """The fingerprint of a profile with streaming off is the one ticket 02 saved."""
+    import hashlib
+
+    from zotero_translate.profiles import Profile
+
+    profile = Profile(id="0123456789ab", name="D", base_url="http://x/v1", api_key="k", model="m")
+    saved_by_ticket_02 = hashlib.sha256(b'["http://x/v1", "k", "m", null]').hexdigest()
+    assert profile.fingerprint() == saved_by_ticket_02
+    assert Profile(**{**profile.__dict__, "stream": True}).fingerprint() != saved_by_ticket_02
+
+
+def test_a_profile_created_with_stream_on_says_so(start_service):
+    with FakeModel() as model:
+        service = start_service(model)
+        assert _create(service, model, stream=True)["stream"] is True
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_a_stream_setting_that_is_not_true_or_false_is_refused(start_service, value):
+    with FakeModel() as model:
+        service = start_service(model)
+        body = {"name": "DeepSeek", "base_url": model.base_url, "api_key": KEY, "model": PROFILE_MODEL, "stream": value}
+        response = _write(service, "POST", "/profiles", body)
+        assert response.status_code == 400, response.text
+        assert "stream" in response.json()["error"]
+
+
 def test_an_error_building_the_client_is_redacted(monkeypatch):
     """The text of an exception raised while the client is built goes through the same redaction."""
     from zotero_translate import model_client
