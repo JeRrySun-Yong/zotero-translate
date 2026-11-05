@@ -43,20 +43,52 @@ var ZoteroTranslateCore = (() => {
   }
 
   /** The POST /tasks body: a multipart form with the PDF and its original
-   *  file name, nothing else. The plugin scope has Blob but no FormData. */
-  function uploadRequest(pdfBytes, fileName) {
+   *  file name, and for a retry the profile ID its task recorded (`profile`),
+   *  which the service uses instead of the current profile. A new submission
+   *  names none. The plugin scope has Blob but no FormData. */
+  function uploadRequest(pdfBytes, fileName, profileId) {
     const boundary = `zotero-translate-${crypto.randomUUID()}`;
     const part = (headers) => `--${boundary}\r\n${headers}\r\n\r\n`;
+    const profile = profileId
+      ? ["\r\n", part('Content-Disposition: form-data; name="profile"'), profileId]
+      : [];
     const body = new Blob([
       part('Content-Disposition: form-data; name="file"; filename="source.pdf"\r\nContent-Type: application/pdf'),
       pdfBytes,
       "\r\n",
       part('Content-Disposition: form-data; name="filename"'),
       fileName,
+      ...profile,
       `\r\n--${boundary}--\r\n`,
     ]);
     return { contentType: `multipart/form-data; boundary=${boundary}`, body };
   }
+
+  /** The item menu's label: "翻译为中文（DeepSeek）" once the service has said
+   *  which profile is current, else plain "翻译为中文"; `suffix` is for the
+   *  menu's other states (an appendage after the profile's name). */
+  function itemMenuLabel(profileName, suffix = "") {
+    return `翻译为中文${profileName ? `（${profileName}）` : ""}${suffix}`;
+  }
+
+  /** The "切换模型" submenu: one radio item per profile whose connection test
+   *  passed ({id, label, checked, disabled}), the current one checked. With no
+   *  listing (the service cannot be reached, or has no profiles) one disabled
+   *  item `unavailable`, which says why. */
+  function modelMenuItems(listing, unavailable = "翻译服务连不上") {
+    if (!listing) {
+      return [{ id: null, label: unavailable, checked: false, disabled: true }];
+    }
+    return listing.profiles
+      .filter((profile) => profile.tested)
+      .map((profile) => ({
+        id: profile.id,
+        label: profile.name,
+        checked: profile.id === listing.current,
+        disabled: false,
+      }));
+  }
+
 
   // Task states: the service's queued/running/waiting_rerun/failed/cancelled,
   // plus the plugin's own submitting (upload under way), attaching (service
@@ -80,11 +112,13 @@ var ZoteroTranslateCore = (() => {
   // same source PDF); only these show a disconnection.
   const UNFINISHED_STATES = ["submitting", "queued", "running", "waiting_rerun", "attaching", "attach_failed", "cancelling"];
 
-  /** What the task window shows for one task (at `now`): title, stage,
-   *  `progress` (the service's percentage, the progress bar's value; null
-   *  before the service answers) and `percent` (the same as text), `elapsed`
-   *  (see the file header), a short `status` word and a `detail` line ("" when
-   *  there is nothing more to say), shown in small type under the word.
+  /** What the task window shows for one task (at `now`): title, `profile`
+   *  (the model profile's name the task was submitted with, "" until the
+   *  service answers), stage, `progress` (the service's percentage, the
+   *  progress bar's value; null before the service answers) and `percent`
+   *  (the same as text), `elapsed` (see the file header), a short `status`
+   *  word and a `detail` line ("" when there is nothing more to say), shown
+   *  in small type under the word.
    *  The detail: a waiting task's place in the service's queue, a running
    *  one's attempt when the service has started more than one (after a
    *  restart or a rerun), for one waiting for an automatic rerun about how
@@ -99,6 +133,7 @@ var ZoteroTranslateCore = (() => {
     const progress = task.progress == null ? null : task.progress;
     const row = {
       title: task.title,
+      profile: (task.profile && task.profile.name) || "",
       stage: task.stage || "",
       progress,
       percent: progress == null ? "" : `${progress}%`,
@@ -184,7 +219,19 @@ var ZoteroTranslateCore = (() => {
     };
   }
 
-  return { OUTPUTS, UNFINISHED_STATES, pickSourcePdf, outputFileName, serviceUrl, uploadRequest, taskRow, statusText, submissionNotice };
+  return {
+    OUTPUTS,
+    UNFINISHED_STATES,
+    pickSourcePdf,
+    outputFileName,
+    serviceUrl,
+    uploadRequest,
+    itemMenuLabel,
+    modelMenuItems,
+    taskRow,
+    statusText,
+    submissionNotice,
+  };
 })();
 
 if (typeof module !== "undefined") {

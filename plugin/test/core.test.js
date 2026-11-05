@@ -43,7 +43,16 @@ const statusOf = (task, now) => {
 test("a task window row shows title, stage, progress, elapsed time, a status word and a detail line", () => {
   assert.deepEqual(
     core.taskRow({ title: "AutoDesign", state: "running", stage: "翻译与审校", progress: 42, submittedAt: 1000 }, 1000 + 65000),
-    { title: "AutoDesign", stage: "翻译与审校", progress: 42, percent: "42%", elapsed: "1 分 5 秒", status: "翻译中", detail: "" },
+    {
+      title: "AutoDesign",
+      profile: "",
+      stage: "翻译与审校",
+      progress: 42,
+      percent: "42%",
+      elapsed: "1 分 5 秒",
+      status: "翻译中",
+      detail: "",
+    },
   );
   assert.deepEqual(statusOf({ title: "AutoDesign", state: "queued", stage: "排队中", progress: 0 }), ["排队中", ""]);
   assert.deepEqual(statusOf({ title: "A", state: "attaching", stage: "完成", progress: 100 }), ["挂回中", ""]);
@@ -153,6 +162,7 @@ test("a failed row shows the reason; so does a row whose attaching failed", () =
 test("a row before the service answers has no stage or percentage yet", () => {
   assert.deepEqual(core.taskRow({ title: "A", state: "submitting", submittedAt: 0 }, 2000), {
     title: "A",
+    profile: "",
     stage: "",
     progress: null,
     percent: "",
@@ -162,6 +172,13 @@ test("a row before the service answers has no stage or percentage yet", () => {
   });
 });
 
+test("a row names the profile the task was submitted with", () => {
+  const task = { title: "A", state: "running", profile: { id: "0123456789ab", name: "DeepSeek" } };
+  assert.equal(core.taskRow(task, 0).profile, "DeepSeek");
+  assert.equal(core.taskRow({ title: "A", state: "running" }, 0).profile, "");
+  assert.equal(core.taskRow({ title: "A", state: "running", profile: { id: "gemini" } }, 0).profile, "");
+});
+
 test("the upload carries only the PDF bytes and the original file name", async () => {
   const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0x0d, 0x0a]); // "%PDF-" + binary
   const upload = core.uploadRequest(pdfBytes, "Smith 2024 智能体.pdf");
@@ -169,6 +186,50 @@ test("the upload carries only the PDF bytes and the original file name", async (
   assert.deepEqual([...form.keys()], ["file", "filename"]);
   assert.deepEqual(new Uint8Array(await form.get("file").arrayBuffer()), pdfBytes);
   assert.equal(form.get("filename"), "Smith 2024 智能体.pdf");
+});
+
+test("a retry's upload names the profile its task recorded; a new submission names none", async () => {
+  const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x01, 0x02]);
+  const upload = core.uploadRequest(pdfBytes, "paper.pdf", "0123456789ab");
+  const form = await new Response(upload.body, { headers: { "Content-Type": upload.contentType } }).formData();
+  assert.deepEqual([...form.keys()], ["file", "filename", "profile"]);
+  assert.equal(form.get("profile"), "0123456789ab");
+  assert.deepEqual(new Uint8Array(await form.get("file").arrayBuffer()), pdfBytes);
+  assert.equal(form.get("filename"), "paper.pdf");
+});
+
+test("the item menu names the current profile; without one it is plain 翻译为中文", () => {
+  assert.equal(core.itemMenuLabel("DeepSeek"), "翻译为中文（DeepSeek）");
+  assert.equal(core.itemMenuLabel(""), "翻译为中文");
+  assert.equal(core.itemMenuLabel(null), "翻译为中文");
+  // The suffix is for the item menu's other states (no PDF selected): it comes after the profile.
+  assert.equal(core.itemMenuLabel("Gemini", "（没有 PDF）"), "翻译为中文（Gemini）（没有 PDF）");
+  assert.equal(core.itemMenuLabel(null, "（没有 PDF）"), "翻译为中文（没有 PDF）");
+});
+
+test("the switch-model submenu lists the tested profiles as radio items, the current one checked", () => {
+  const listing = {
+    current: "0123456789ab",
+    profiles: [
+      { id: "gemini", name: "Gemini", builtin: true, tested: true },
+      { id: "0123456789ab", name: "DeepSeek", builtin: false, tested: true },
+      { id: "ba9876543210", name: "Untested", builtin: false, tested: false },
+    ],
+  };
+  assert.deepEqual(core.modelMenuItems(listing), [
+    { id: "gemini", label: "Gemini", checked: false, disabled: false },
+    { id: "0123456789ab", label: "DeepSeek", checked: true, disabled: false },
+  ]);
+  assert.deepEqual(core.modelMenuItems({ ...listing, current: "gemini" }).map((item) => item.checked), [true, false]);
+});
+
+test("with the service unreachable the switch-model submenu has only a grey item saying so", () => {
+  assert.deepEqual(core.modelMenuItems(null), [
+    { id: null, label: "翻译服务连不上", checked: false, disabled: true },
+  ]);
+  assert.deepEqual(core.modelMenuItems(null, "翻译服务版本太旧"), [
+    { id: null, label: "翻译服务版本太旧", checked: false, disabled: true },
+  ]);
 });
 
 test("a disconnected unfinished row says how many whole minutes it has waited, at least 1", () => {

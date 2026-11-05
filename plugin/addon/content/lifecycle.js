@@ -136,6 +136,7 @@ var ZoteroTranslateLifecycle = (() => {
     "error",
     "attached",
     "importIntents",
+    "profile",
   ];
   const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
 
@@ -176,7 +177,9 @@ var ZoteroTranslateLifecycle = (() => {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
       // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, submittedAt
       // (clock time the upload of this submission or retry started; the row's elapsed
-      // time counts from it, core.js), endedAt (clock time the task changed into an
+      // time counts from it, core.js), profile ({id, name}: the model profile the
+      // service recorded for the task, from its answers; null until one answers, and
+      // saved so a retry names it), endedAt (clock time the task changed into an
       // ended state, set by setState, or null; not saved, ended tasks are not), stage,
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
@@ -442,7 +445,9 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    /** Send the task's source PDF to the service address currently set. */
+    /** Send the task's source PDF to the service address currently set. A
+     *  retry names the profile its task recorded (`profile`), so it keeps
+     *  that profile whatever is current by then; a new task names none. */
     async function upload(task) {
       Object.assign(task, {
         serviceUrl: serviceUrl(),
@@ -467,7 +472,7 @@ var ZoteroTranslateLifecycle = (() => {
       });
       changed();
       try {
-        const body = Core.uploadRequest(await readSource(task), task.sourceFileName);
+        const body = Core.uploadRequest(await readSource(task), task.sourceFileName, task.profile?.id);
         const answer = await exchange(
           Core.serviceUrl(task.serviceUrl, "tasks"),
           { method: "POST", headers: { "Content-Type": body.contentType }, body: body.body },
@@ -515,6 +520,7 @@ var ZoteroTranslateLifecycle = (() => {
         error: status.error,
         keptSourceParagraphs: status.kept_source_paragraphs,
         keptSourceAlgorithms: status.kept_source_algorithms,
+        ...(status.profile ? { profile: status.profile } : {}),
       });
       setState(task, status.state === "succeeded" ? "attaching" : status.state);
       changed();

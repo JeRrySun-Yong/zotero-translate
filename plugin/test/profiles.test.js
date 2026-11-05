@@ -18,6 +18,7 @@ const SAVED = {
   model: "vendor/model-a",
   concurrency: 32,
   request_timeout_seconds: 900,
+  stream: false,
   api_key: { set: true, last4: "wxyz" },
   last_test: { result: "succeeded", message: "连接成功", seconds: 1.5, http_status: 200, tested_at: "2026-11-05T01:00:00Z" },
 };
@@ -41,6 +42,7 @@ const NEW_FORM = {
   model: "vendor/model-a",
   concurrency: "32",
   timeout: "900",
+  stream: false,
 };
 
 /** A fake fetch: answers in turn, recording each request. */
@@ -68,13 +70,14 @@ test("a new profile's form becomes one POST with every field the service takes",
       model: "vendor/model-a",
       concurrency: 32,
       request_timeout_seconds: 900,
+      stream: false,
     },
   });
 });
 
 test("an empty concurrency or timeout leaves the service's default", () => {
   const { body } = profiles.profileRequest({ ...NEW_FORM, concurrency: "", timeout: " " }, null);
-  assert.deepEqual(Object.keys(body).sort(), ["api_key", "base_url", "model", "name"]);
+  assert.deepEqual(Object.keys(body).sort(), ["api_key", "base_url", "model", "name", "stream"]);
 });
 
 test("a form that cannot be a profile names the field instead of a request", () => {
@@ -109,6 +112,24 @@ test("an edit sends only the fields that changed; an empty key field keeps the k
 test("an unchanged saved profile needs no request", () => {
   assert.equal(profiles.profileRequest(profiles.formFromProfile(SAVED), SAVED), null);
   assert.equal(profiles.profileRequest({ ...profiles.formFromProfile(SAVED), name: "DeepSeek " }, SAVED), null);
+});
+
+test("the form's 流式请求 setting is the profile's stream field (ticket 12)", () => {
+  const form = profiles.formFromProfile(SAVED);
+  assert.equal(form.stream, false);
+  assert.equal(profiles.formFromProfile({ ...SAVED, stream: true }).stream, true);
+  assert.equal(profiles.formFromProfile(null).stream, false);
+  // A new profile states it even when off (the service's default is off).
+  assert.equal(profiles.profileRequest({ ...NEW_FORM, stream: true }, null).body.stream, true);
+  // Editing only this setting sends only it; an unchanged one sends nothing.
+  assert.deepEqual(profiles.profileRequest({ ...form, stream: true }, SAVED), {
+    method: "PUT",
+    path: ["profiles", SAVED.id],
+    body: { stream: true },
+  });
+  const on = { ...SAVED, stream: true, tested: false };
+  assert.deepEqual(profiles.profileRequest({ ...profiles.formFromProfile(on), stream: false }, on).body, { stream: false });
+  assert.equal(profiles.profileRequest(profiles.formFromProfile(on), on), null);
 });
 
 // POST /profiles/{id}/test answers (service.py): the service's message, then what to check.

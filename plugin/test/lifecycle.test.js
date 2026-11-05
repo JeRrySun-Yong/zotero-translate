@@ -282,6 +282,76 @@ test("a failed task shows the service's reason and a retry button that uploads a
   assert.equal(env.lifecycle.tasks[0].taskId, "t2");
 });
 
+/** The multipart fields of an upload request, read where the fake fetch sees it. */
+async function uploadFields(options) {
+  return new Response(options.body, { headers: options.headers }).formData();
+}
+
+const PROFILE = { id: "0123456789ab", name: "DeepSeek" };
+
+test("a task records the profile the service says it uses, shows it, and 重试 names it in the upload", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2" });
+      },
+      [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  assert.deepEqual([...forms[0].keys()], ["file", "filename"]); // a new submission names no profile
+  assert.equal(env.lifecycle.tasks[0].profile, undefined);
+
+  await env.clock.advance(2000);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  const [row] = env.lifecycle.rows();
+  assert.equal(row.profile, "DeepSeek");
+
+  await env.lifecycle.retry(row.key);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE); // kept until the service answers again
+  assert.equal(env.lifecycle.tasks[0].taskId, "t2");
+});
+
+test("a saved task's recorded profile survives a restart, and its 重试 names it", async () => {
+  const saved = JSON.stringify([
+    {
+      ...SOURCE,
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "failed",
+      submittedAt: 0,
+      generation: 0,
+      error: "管线模型拒绝了请求（HTTP 400）",
+      profile: PROFILE,
+    },
+  ]);
+  const forms = [];
+  const env = environment({
+    saved,
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: "t2" });
+      },
+    },
+  });
+  env.lifecycle.start();
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  assert.equal(env.lifecycle.rows()[0].profile, "DeepSeek");
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[0].get("profile"), PROFILE.id);
+});
+
+test("a running task's profile is saved with it", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running", { progress: 40, profile: PROFILE }) });
+  await env.clock.advance(2000);
+  assert.equal(JSON.parse(env.saved)[0].profile.id, PROFILE.id);
+});
+
 test("after Zotero restarts, saved tasks are queried again and still attached", async () => {
   const before = await submitted({ [QUERY("t1")]: status("running", { progress: 40 }) });
   await before.clock.advance(2000);

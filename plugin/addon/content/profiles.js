@@ -19,11 +19,12 @@ var ZoteroTranslateProfiles = (() => {
   const MAX_CONCURRENCY = 256;
   const MAX_TIMEOUT_SECONDS = 3600;
 
-  /** The form's fields (strings) for a saved profile, or for a new one (null).
-   *  The key field stays empty: the key is never sent back. */
+  /** The form's fields (strings, and the 流式请求 switch as a boolean) for a
+   *  saved profile, or for a new one (null). The key field stays empty: the
+   *  key is never sent back. */
   function formFromProfile(profile) {
     if (!profile) {
-      return { name: "", baseUrl: "", apiKey: "", model: "", concurrency: "", timeout: "" };
+      return { name: "", baseUrl: "", apiKey: "", model: "", concurrency: "", timeout: "", stream: false };
     }
     return {
       name: profile.name || "",
@@ -32,13 +33,19 @@ var ZoteroTranslateProfiles = (() => {
       model: profile.model || "",
       concurrency: profile.concurrency == null ? "" : String(profile.concurrency),
       timeout: profile.request_timeout_seconds == null ? "" : String(profile.request_timeout_seconds),
+      stream: Boolean(profile.stream),
     };
   }
 
   /** The form as the service's profile fields, or {error} naming the field to fix. */
   function formFields(form, isNew) {
     const text = (value) => String(value ?? "").trim();
-    const fields = { name: text(form.name), base_url: text(form.baseUrl), model: text(form.model) };
+    const fields = {
+      name: text(form.name),
+      base_url: text(form.baseUrl),
+      model: text(form.model),
+      stream: Boolean(form.stream),
+    };
     for (const [name, label] of [["name", "名称"], ["base_url", "地址"]]) {
       if (!fields[name]) {
         return { error: `请填写${label}` };
@@ -92,6 +99,7 @@ var ZoteroTranslateProfiles = (() => {
       model: saved.model,
       concurrency: saved.concurrency,
       request_timeout_seconds: saved.request_timeout_seconds ?? null,
+      stream: Boolean(saved.stream),
     };
     const changed = Object.fromEntries(Object.entries(fields).filter(([name, value]) => before[name] !== value));
     if (Object.keys(changed).length === 0) {
