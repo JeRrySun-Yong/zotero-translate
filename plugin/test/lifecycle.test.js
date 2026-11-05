@@ -4,10 +4,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTaskLifecycle } = require("../addon/content/lifecycle.js");
+const { statusText } = require("../addon/content/core.js");
 
 const SERVICE = "http://127.0.0.1:8920";
 const SOURCE = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "AutoDesign.pdf" };
-const DISCONNECTED = (minutes) => `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
+// Rows' status word and detail line, as statusText joins them ("失败：原因").
+const DISCONNECTED = (minutes) => `等待服务：翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
 const MINUTE = 60000;
 const ALREADY_ACTIVE = (title) => `${title}：已有未结束的翻译任务，本次提交已忽略`;
 
@@ -202,9 +204,10 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
         throw e;
       }),
   });
-  env.status = () => env.lifecycle.rows().map((row) => row.status);
-  /** The notices so far: [outcome, title, status, results]. */
-  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, row.status, row.results]);
+  /** The rows' status words and details, joined by statusText. */
+  env.status = () => env.lifecycle.rows().map(statusText);
+  /** The notices so far: [outcome, title, status and detail (statusText), results]. */
+  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, statusText(row), row.results]);
   /** The attachments the user sees: [title, text, identity]. */
   env.attached = () => env.library.filter((a) => !a.deleted).map((a) => [a.title, a.text, a.identity]);
   /** When (clock time) each request for `key` was sent. */
@@ -244,7 +247,7 @@ test("a submitted PDF is uploaded and its row shows the place in the queue", asy
   assert.deepEqual(env.requests, [UPLOAD]);
   await env.clock.advance(1);
   assert.deepEqual(env.requests, [UPLOAD, QUERY("t1")]);
-  assert.deepEqual(env.status(), ["排队中（第 2 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 2 位"]);
 });
 
 test("after the service succeeds, both PDFs are attached to the original item", async () => {
@@ -266,7 +269,7 @@ test("a failed task shows the service's reason and a retry button that uploads a
   const env = await submitted({ [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）" }) });
   await env.clock.advance(2000);
   const [row] = env.lifecycle.rows();
-  assert.equal(row.status, "失败：管线模型拒绝了请求（HTTP 400）");
+  assert.deepEqual([row.status, row.detail], ["失败", "管线模型拒绝了请求（HTTP 400）"]);
   assert.equal(row.canRetry, true);
 
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
@@ -679,7 +682,7 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     await env.clock.advance(120000);
     assert.equal(env.lifecycle.tasks[0].state, "attaching");
     assert.ok(env.lifecycle.tasks[0].disconnectedSince != null);
-    assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
+    assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
     assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // the first is attached
     assert.deepEqual(env.files, new Map());
     assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntents]), [["attaching", { mono: 100 }, {}]]);
@@ -766,7 +769,7 @@ test("an attaching task saved before a restart downloads again after it", async 
 // ---- cancel, retry and duplicate submissions (ticket 08) ----
 
 const CANCELLING = "取消中";
-const CANCELLING_DISCONNECTED = "取消中（翻译服务暂时连不上）";
+const CANCELLING_DISCONNECTED = "取消中：翻译服务暂时连不上";
 const cancelledAnswer = (taskId, code = 200) => json(code, { task_id: taskId, state: code === 200 ? "cancelled" : "succeeded", cancel_requested: code === 200 });
 const rowOf = (env, index = 0) => env.lifecycle.rows()[index];
 const savedOf = (env) => JSON.parse(env.saved);
@@ -1101,7 +1104,7 @@ test("a retry of a cancelled task starts a new generation with nothing of the ol
   assert.equal(task.taskId, "t2");
   await env.clock.advance(6000);
   assert.deepEqual(env.times(QUERY("t2")), [16000, 18000, 20000]); // one schedule, every 2 seconds
-  assert.deepEqual(env.status(), ["排队中（第 3 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 3 位"]);
   assert.ok(!env.requests.some((r) => r.includes("/files/")));
 });
 
@@ -1343,7 +1346,7 @@ test("取消 while waiting to download again ends the task; nothing is downloade
   const env = await submitted(succeededRoutes("t1"));
   delete env.routes[DUAL("t1")];
   await env.clock.advance(2000);
-  assert.match(env.status()[0], /^翻译服务暂时连不上/);
+  assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上/);
   assert.equal(rowOf(env).canCancel, true);
   await env.lifecycle.cancel(rowOf(env).key);
   assert.deepEqual(env.status(), ["已取消"]);
@@ -1500,7 +1503,7 @@ test("a notice comes once when a task becomes 已挂回, with the row's status a
   Object.assign(env.routes, succeededRoutes("t1"));
   env.routes[QUERY("t1")] = status("succeeded", { kept_source_paragraphs: 2 });
   await env.clock.advance(2000);
-  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回（2 段保留原文）", RESULTS]]);
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回：2 段保留原文", RESULTS]]);
   await env.clock.advance(60000);
   assert.equal(env.announced.length, 1);
 });
@@ -1596,7 +1599,7 @@ test("after a Zotero restart no notice comes again; a task that ends after the r
 
   const after = environment({ saved: before.saved, library: before.library, time: before.clock.now(), routes: { [QUERY("t3")]: status("running") } });
   after.lifecycle.start();
-  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, r.status]), [
+  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, statusText(r)]), [
     ["AutoRef", ATTACH_FAILED("磁盘已满")],
     ["MaLiang", "翻译中"],
   ]);
