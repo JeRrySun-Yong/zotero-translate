@@ -86,7 +86,11 @@
         $(fieldId).disabled = Boolean(saved && saved.builtin);
       }
       $(FIELDS.apiKey).placeholder = saved && !saved.builtin ? `${P.keyText(saved)}（不改就留空）` : "密钥只保存在本机翻译服务";
-      $("zotero-translate-form-title").textContent = saved ? `编辑配置：${saved.name}` : "新建配置";
+      $("zotero-translate-form-title").textContent = !saved
+        ? "新建配置"
+        : saved.builtin
+          ? `内置配置：${saved.name}`
+          : `编辑配置：${saved.name}`;
       $("zotero-translate-fields").hidden = Boolean(saved && saved.builtin);
       $("zotero-translate-builtin").hidden = !(saved && saved.builtin);
       $("zotero-translate-builtin").textContent = saved && saved.builtin ? P.builtinDetail(saved) : "";
