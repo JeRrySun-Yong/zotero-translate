@@ -4,10 +4,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTaskLifecycle } = require("../addon/content/lifecycle.js");
+const { statusText } = require("../addon/content/core.js");
 
 const SERVICE = "http://127.0.0.1:8920";
 const SOURCE = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "AutoDesign.pdf" };
-const DISCONNECTED = (minutes) => `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
+// Rows' status word and detail line, as statusText joins them ("失败：原因").
+const DISCONNECTED = (minutes) => `等待服务：翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
 const MINUTE = 60000;
 const ALREADY_ACTIVE = (title) => `${title}：已有未结束的翻译任务，本次提交已忽略`;
 
@@ -137,6 +139,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
       },
       remove: async (dir) => {
         env.steps.push(`remove ${dir}`);
+        if (env.removeHold) {
+          await env.removeHold();
+        }
         if (env.failRemove) {
           throw new Error("无法删除临时目录");
         }
@@ -202,9 +207,10 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
         throw e;
       }),
   });
-  env.status = () => env.lifecycle.rows().map((row) => row.status);
-  /** The notices so far: [outcome, title, status, results]. */
-  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, row.status, row.results]);
+  /** The rows' status words and details, joined by statusText. */
+  env.status = () => env.lifecycle.rows().map(statusText);
+  /** The notices so far: [outcome, title, status and detail (statusText), results]. */
+  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, statusText(row), row.results]);
   /** The attachments the user sees: [title, text, identity]. */
   env.attached = () => env.library.filter((a) => !a.deleted).map((a) => [a.title, a.text, a.identity]);
   /** When (clock time) each request for `key` was sent. */
@@ -244,7 +250,7 @@ test("a submitted PDF is uploaded and its row shows the place in the queue", asy
   assert.deepEqual(env.requests, [UPLOAD]);
   await env.clock.advance(1);
   assert.deepEqual(env.requests, [UPLOAD, QUERY("t1")]);
-  assert.deepEqual(env.status(), ["排队中（第 2 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 2 位"]);
 });
 
 test("after the service succeeds, both PDFs are attached to the original item", async () => {
@@ -266,7 +272,7 @@ test("a failed task shows the service's reason and a retry button that uploads a
   const env = await submitted({ [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）" }) });
   await env.clock.advance(2000);
   const [row] = env.lifecycle.rows();
-  assert.equal(row.status, "失败：管线模型拒绝了请求（HTTP 400）");
+  assert.deepEqual([row.status, row.detail], ["失败", "管线模型拒绝了请求（HTTP 400）"]);
   assert.equal(row.canRetry, true);
 
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
@@ -287,6 +293,7 @@ test("after Zotero restarts, saved tasks are queried again and still attached", 
       serviceUrl: SERVICE,
       taskId: "t1",
       state: "running",
+      submittedAt: 0,
       disconnectedSince: null,
       generation: 0,
       attached: {},
@@ -640,6 +647,7 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
       serviceUrl: SERVICE,
       taskId: null,
       state: "submitting",
+      submittedAt: 0,
       disconnectedSince: null,
       generation: 0,
       error: null,
@@ -679,7 +687,7 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     await env.clock.advance(120000);
     assert.equal(env.lifecycle.tasks[0].state, "attaching");
     assert.ok(env.lifecycle.tasks[0].disconnectedSince != null);
-    assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
+    assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
     assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // the first is attached
     assert.deepEqual(env.files, new Map());
     assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntents]), [["attaching", { mono: 100 }, {}]]);
@@ -766,7 +774,7 @@ test("an attaching task saved before a restart downloads again after it", async 
 // ---- cancel, retry and duplicate submissions (ticket 08) ----
 
 const CANCELLING = "取消中";
-const CANCELLING_DISCONNECTED = "取消中（翻译服务暂时连不上）";
+const CANCELLING_DISCONNECTED = "取消中：翻译服务暂时连不上";
 const cancelledAnswer = (taskId, code = 200) => json(code, { task_id: taskId, state: code === 200 ? "cancelled" : "succeeded", cancel_requested: code === 200 });
 const rowOf = (env, index = 0) => env.lifecycle.rows()[index];
 const savedOf = (env) => JSON.parse(env.saved);
@@ -1101,7 +1109,7 @@ test("a retry of a cancelled task starts a new generation with nothing of the ol
   assert.equal(task.taskId, "t2");
   await env.clock.advance(6000);
   assert.deepEqual(env.times(QUERY("t2")), [16000, 18000, 20000]); // one schedule, every 2 seconds
-  assert.deepEqual(env.status(), ["排队中（第 3 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 3 位"]);
   assert.ok(!env.requests.some((r) => r.includes("/files/")));
 });
 
@@ -1343,7 +1351,7 @@ test("取消 while waiting to download again ends the task; nothing is downloade
   const env = await submitted(succeededRoutes("t1"));
   delete env.routes[DUAL("t1")];
   await env.clock.advance(2000);
-  assert.match(env.status()[0], /^翻译服务暂时连不上/);
+  assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上/);
   assert.equal(rowOf(env).canCancel, true);
   await env.lifecycle.cancel(rowOf(env).key);
   assert.deepEqual(env.status(), ["已取消"]);
@@ -1500,7 +1508,7 @@ test("a notice comes once when a task becomes 已挂回, with the row's status a
   Object.assign(env.routes, succeededRoutes("t1"));
   env.routes[QUERY("t1")] = status("succeeded", { kept_source_paragraphs: 2 });
   await env.clock.advance(2000);
-  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回（2 段保留原文）", RESULTS]]);
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回：2 段保留原文", RESULTS]]);
   await env.clock.advance(60000);
   assert.equal(env.announced.length, 1);
 });
@@ -1596,7 +1604,7 @@ test("after a Zotero restart no notice comes again; a task that ends after the r
 
   const after = environment({ saved: before.saved, library: before.library, time: before.clock.now(), routes: { [QUERY("t3")]: status("running") } });
   after.lifecycle.start();
-  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, r.status]), [
+  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, statusText(r)]), [
     ["AutoRef", ATTACH_FAILED("磁盘已满")],
     ["MaLiang", "翻译中"],
   ]);
@@ -1824,4 +1832,134 @@ test("a cleared task's late answers change nothing, and a cleared failed PDF can
   env.routes[QUERY("t2")] = status("queued");
   assert.equal((await env.lifecycle.submit(SOURCE)).taskId, "t2");
   assert.deepEqual(env.status(), ["排队中"]);
+});
+
+// ---- progress and elapsed time (ticket M4-09) ----
+
+const elapsedOf = (env) => env.lifecycle.rows().map((row) => row.elapsed);
+
+test("a row's progress is the service's percentage; elapsed time counts from the submission", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("queued", { progress: 0 }) }, { time: 1_000_000 });
+  assert.deepEqual(env.lifecycle.rows().map((row) => [row.progress, row.elapsed]), [[null, "0 秒"]]);
+  await env.clock.advance(2000);
+  env.routes[QUERY("t1")] = status("running", { progress: 37 });
+  await env.clock.advance(63000);
+  assert.deepEqual(env.lifecycle.rows().map((row) => [row.progress, row.percent, row.elapsed]), [[37, "37%", "1 分 5 秒"]]);
+});
+
+test("after Zotero restarts, elapsed time goes on from the submission, never from 0", async () => {
+  const before = await submitted({ [QUERY("t1")]: status("running", { progress: 40 }) }, { time: 1_000_000 });
+  await before.clock.advance(5 * MINUTE);
+  assert.deepEqual(elapsedOf(before), ["5 分 0 秒"]);
+  before.lifecycle.stop();
+  assert.equal(savedOf(before)[0].submittedAt, 1_000_000);
+
+  // Zotero was closed for 10 minutes.
+  const after = environment({ saved: before.saved, time: before.clock.now() + 10 * MINUTE, routes: { [QUERY("t1")]: status("running") } });
+  after.lifecycle.start();
+  assert.deepEqual(elapsedOf(after), ["15 分 0 秒"]);
+  await after.clock.advance(MINUTE);
+  assert.deepEqual(elapsedOf(after), ["16 分 0 秒"]);
+});
+
+test("an ended task's elapsed time stops at its end; 重试 counts again from the new submission", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(90000);
+  env.routes[QUERY("t1")] = status("failed", { error: "x" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["失败：x"]);
+  assert.deepEqual(elapsedOf(env), ["1 分 32 秒"]);
+  await env.clock.advance(10 * MINUTE);
+  assert.deepEqual(elapsedOf(env), ["1 分 32 秒"]);
+
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("queued");
+  await env.lifecycle.retry(rowOf(env).key);
+  assert.deepEqual(elapsedOf(env), ["0 秒"]);
+  await env.clock.advance(2000);
+  assert.deepEqual(elapsedOf(env), ["2 秒"]);
+});
+
+/** Elapsed time at the end and 10 minutes later: the two are the same once the task has ended. */
+async function elapsedStops(env) {
+  const atEnd = elapsedOf(env);
+  await env.clock.advance(10 * MINUTE);
+  return [atEnd, elapsedOf(env)];
+}
+
+test("every way into an ended state stops the elapsed time there, the restart's included", async (t) => {
+  const SUBMITTED_AT = 1_000_000;
+  const savedTask = (fields) => JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", submittedAt: SUBMITTED_AT, ...fields }]);
+
+  await t.test("an upload under way when Zotero quit fails at the restart", async () => {
+    const env = environment({ saved: savedTask({ taskId: null, state: "submitting" }), time: SUBMITTED_AT + 3 * MINUTE });
+    env.lifecycle.start();
+    assert.deepEqual(env.status(), ["失败：提交未完成，请重试"]);
+    assert.deepEqual(await elapsedStops(env), [["3 分 0 秒"], ["3 分 0 秒"]]);
+  });
+
+  await t.test("a pre-upgrade attaching task becomes attach_failed at the restart, then 取消 ends it here", async () => {
+    const env = environment({ saved: savedTask({ state: "attaching" }), time: SUBMITTED_AT + MINUTE });
+    env.lifecycle.start();
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["1 分 0 秒"], ["1 分 0 秒"]]);
+  });
+
+  await t.test("an upload the service refuses", async () => {
+    const env = environment({ routes: { [UPLOAD]: json(413, {}) } });
+    env.lifecycle.start();
+    await env.lifecycle.submit(SOURCE);
+    assert.match(env.status()[0], /^失败：/);
+    assert.deepEqual(await elapsedStops(env), [["0 秒"], ["0 秒"]]);
+  });
+
+  for (const [name, answer, shown] of [
+    ["the service says failed", status("failed", { error: "x" }), "失败：x"],
+    ["the service says cancelled", status("cancelled"), "已取消"],
+    ["the service no longer knows the task", json(404, {}), "失败：翻译服务中找不到该任务，请重试"],
+  ]) {
+    await t.test(name, async () => {
+      const env = await submitted({ [QUERY("t1")]: answer });
+      await env.clock.advance(2000);
+      assert.deepEqual(env.status(), [shown]);
+      assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+    });
+  }
+
+  await t.test("a cancel the service confirms", async () => {
+    const env = await submitted({ [QUERY("t1")]: status("queued"), [CANCEL("t1")]: cancelledAnswer("t1") });
+    await env.clock.advance(5000);
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["5 秒"], ["5 秒"]]);
+  });
+
+  await t.test("both PDFs attached", async () => {
+    const env = await submitted(succeededRoutes("t1"));
+    await env.clock.advance(2000);
+    assert.deepEqual(env.status(), ["已挂回"]);
+    assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+  });
+});
+
+test("a task's end time is taken when it changes into the ended state, before anything else is awaited", async () => {
+  // Removing the temporary directory after both PDFs are attached takes 30 seconds.
+  const env = await submitted(succeededRoutes("t1"));
+  let removing = null;
+  env.removeHold = () => new Promise((resolve) => (removing = resolve));
+  await env.clock.advance(2000);
+  assert.ok(removing, "the removal is under way");
+  await env.clock.advance(30000);
+  removing();
+  await env.clock.advance(0);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(elapsedOf(env), ["2 秒"]);
+});
+
+test("a task saved by a plugin from before the submission time has no elapsed time", () => {
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running", disconnectedSince: null, generation: 0, attached: {}, importIntents: {} }]);
+  const env = environment({ saved, routes: { [QUERY("t1")]: status("running") } });
+  env.lifecycle.start();
+  assert.deepEqual(elapsedOf(env), [""]);
 });

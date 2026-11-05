@@ -349,7 +349,7 @@ var ZoteroTranslate = {
     } else {
       line.setError();
     }
-    notice.addDescription(row.status);
+    notice.addDescription(ZoteroTranslateCore.statusText(row));
     notice.show();
     const actions = done ? this._resultActions(row.results) : [];
     let closed = false;
