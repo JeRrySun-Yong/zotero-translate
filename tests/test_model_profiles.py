@@ -512,6 +512,26 @@ def test_a_connection_test_with_a_malformed_stream_is_unparseable(start_service)
     assert KEY not in response.text
 
 
+@pytest.mark.parametrize(
+    "event",
+    ['event: error\ndata: {"message": "failed"}', "event: error\ndata: this is not json"],
+    ids=["json-without-error-field", "data-not-json"],
+)
+def test_a_connection_test_with_an_error_event_is_unparseable(start_service, event):
+    """An error event fails the stream, also after a finished answer: the test did not pass."""
+    answer = json.dumps({"choices": [{"index": 0, "delta": {"content": '{"ok": true}'}, "finish_reason": "stop"}]})
+    with FakeModel() as model:
+        service = start_service(model)
+        profile = _create(service, model, stream=True)
+        model.stream_body = f"data: {answer}\n\n{event}\n\ndata: [DONE]\n\n".encode()
+        response = _write(service, "POST", f"/profiles/{profile['id']}/test")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "unparseable", response.text
+    assert "管线模型在流式回答中出错" in response.json()["message"]
+    assert KEY not in response.text
+
+
 def test_a_test_passed_before_ticket_12_still_counts_for_a_profile_with_stream_off():
     """The fingerprint of a profile with streaming off is the one ticket 02 saved."""
     import hashlib

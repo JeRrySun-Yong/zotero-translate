@@ -94,8 +94,9 @@ request bodies and cache keys stay as they were), the body asks for
 (``_streamed_content``); thinking deltas are not read. The endpoint reads
 the whole stream as it reads a plain body, so the request timeout, a
 cancel, a hedge's winner and closing the client end a stream in flight as
-they end any send. A stream that ends without a ``finish_reason`` broke off
-and is retried like an unparseable answer (recorded ``invalid_answer``).
+they end any send. A stream that ends without a ``finish_reason`` broke off,
+and one with an ``event: error`` failed on the way; both are retried like
+an unparseable answer (recorded ``invalid_answer``).
 Why: Command Code's DeepSeek Fast answers a plain request that thinks
 longer than about 125 seconds with HTTP 524 (ticket 03).
 
@@ -500,32 +501,42 @@ class ModelClient:
         ``delta.content`` of the first choice counts: thinking deltas
         (``reasoning``, ``reasoning_content``, ``reasoning_details``) are not
         read. A stream with no ``finish_reason`` broke off before the answer
-        ended, and one whose ``finish_reason`` is ``error``, or with an
-        ``error`` chunk, failed on the way: both are retried. So is a chunk
-        whose shape is not that of a chat completion chunk (choices that are
-        not a list of objects, a delta that is not an object, a content that
-        is not text): it cannot be read, like an answer that does not parse,
-        rather than end the request with a ``TypeError``.
+        ended, and one whose ``finish_reason`` is ``error``, with an
+        ``error`` chunk, or with an ``event: error`` (whatever its data
+        holds, also after the answer finished) failed on the way: all are
+        retried. So is a chunk whose shape is not that of a chat completion
+        chunk (choices that are not a list of objects, a delta that is not an
+        object, a content that is not text): it cannot be read, like an
+        answer that does not parse, rather than end the request with a
+        ``TypeError``.
         """
         parts: list[str] = []
         finish = None
+        done = False
         unreadable = "无法解析管线模型的流式响应"
+        error_in_stream = "管线模型在流式回答中出错"
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as e:
             raise _RetryableError(unreadable) from e
-        for event in _sse_data(text):
+        for name, event in _sse_events(text):
+            if name == "error":
+                excerpt = self._body_excerpt(event.encode()) if event else ""
+                raise _RetryableError(error_in_stream + excerpt)
+            if done or event is None:
+                continue
             if event == "[DONE]":
-                break
+                done = True
+                continue
             try:
                 chunk = json.loads(event)
             except ValueError as e:
                 raise _RetryableError(unreadable) from e
             if not isinstance(chunk, dict):
                 raise _RetryableError(unreadable)
-            if chunk.get("error"):
+            if "error" in chunk:
                 excerpt = self._body_excerpt(json.dumps(chunk["error"], ensure_ascii=False).encode())
-                raise _RetryableError("管线模型在流式回答中出错" + excerpt)
+                raise _RetryableError(error_in_stream + excerpt)
             choices = chunk.get("choices")
             if choices is None:
                 choices = []
@@ -641,17 +652,25 @@ class ModelClient:
 _SSE_LINE_END = re.compile(r"\r\n|\r|\n")  # not str.splitlines: a JSON string may hold U+2028
 
 
-def _sse_data(text: str):
-    """The ``data`` of each server-sent event in ``text``, its ``data:`` lines joined by newlines."""
+def _sse_events(text: str):
+    """The name and ``data`` of each server-sent event in ``text``, its ``data:`` lines joined.
+
+    ``data`` is None for an event without a ``data:`` line; ``name`` is ""
+    for an event without an ``event:`` field.
+    """
+    name = ""
     lines: list[str] = []
     for line in [*_SSE_LINE_END.split(text), ""]:  # the end of the body ends an event too
         if not line:
-            if lines:
-                yield "\n".join(lines)
+            if name or lines:
+                yield name, ("\n".join(lines) if lines else None)
+                name = ""
                 lines = []
             continue
-        name, _, value = line.partition(":")
-        if name == "data":
+        field, _, value = line.partition(":")
+        if field == "event":
+            name = value[1:] if value.startswith(" ") else value
+        elif field == "data":
             lines.append(value[1:] if value.startswith(" ") else value)
 
 

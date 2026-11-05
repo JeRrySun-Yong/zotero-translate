@@ -308,6 +308,53 @@ def test_an_error_event_in_a_stream_is_retryable_and_redacts_the_key(tmp_path, e
     assert not (tmp_path / "cache").exists()
 
 
+# An "event: error" is a failure whatever its data holds, also when the answer
+# was finished already: the endpoint said the stream failed.
+ERROR_EVENTS = [
+    ('event: error\ndata: {"message": "failed"}', "json-without-error-field"),
+    ("event: error\ndata: this is not json", "data-not-json"),
+    ("event: error", "no-data"),
+]
+
+
+@pytest.mark.parametrize("event", [e for e, _ in ERROR_EVENTS], ids=[n for _, n in ERROR_EVENTS])
+def test_an_error_event_after_a_finished_answer_fails_the_request_and_is_not_cached(tmp_path, event):
+    with FakeModel() as fake:
+        fake.stream_body = (
+            b'data: {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": null}]}\n\n'
+            b'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n\n'
+            + event.encode()
+            + b'\n\ndata: [DONE]\n\n'
+        )
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                client.complete(MESSAGES)
+        finally:
+            client.close()
+
+    assert "管线模型在流式回答中出错" in str(failure.value)
+    assert failure.value.category == "retryable"
+    assert len(fake.requests) == 4  # 1 + max_retries
+    assert not (tmp_path / "cache").exists()
+
+
+def test_a_stream_event_whose_data_is_not_json_is_retried(tmp_path):
+    with FakeModel() as fake:
+        fake.stream_body = b'data: this is not json\n\ndata: [DONE]\n\n'
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                client.complete(MESSAGES)
+        finally:
+            client.close()
+
+    assert "无法解析管线模型的流式响应" in str(failure.value)
+    assert failure.value.category == "retryable"
+    assert len(fake.requests) == 4
+    assert not (tmp_path / "cache").exists()
+
+
 def test_one_event_may_be_split_across_several_data_lines(tmp_path):
     with FakeModel() as fake:
         fake.stream_body = (
