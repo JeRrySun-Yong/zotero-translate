@@ -4,7 +4,14 @@ HTTP interface (the contract with the translation plugin):
 
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
-  ``filename`` part with the original file name) -> ``201 {"task_id": ...}``
+  ``filename`` part with the original file name; an optional ``profile``
+  part with a model profile id) -> ``201 {"task_id": ...}``. The task
+  records the profile named, else (no part, or an empty one) the current
+  profile. A named profile must exist (else 422) and, unless it is
+  ``gemini``, which always can be named, have passed its connection test
+  (else 409); a refused submission leaves no task. The plugin's retry,
+  which submits the paper again, names the failed task's profile, so a
+  retry keeps it whatever profile is current by then.
 - ``GET /tasks/{task_id}`` -> state (queued, running, waiting_rerun,
   succeeded, failed, cancelled), stage, progress, attempt (attempts started,
   interrupted ones included; 0 until the first starts), reruns_used and
@@ -72,7 +79,15 @@ A task records the current profile when it is submitted (``task.json``:
 ``profile_id``, ``profile_name``) and every attempt uses it, a requeue and
 an automatic rerun included: Gemini's attempts get the start options, a
 user profile's the profile's file (``--profile-file``), as it is when the
-attempt starts. Both roles of a user profile share its one endpoint and
+attempt starts. So an edit of a profile (e.g. a new key or model) reaches
+the later attempts of tasks that recorded it, queued ones included, though
+the task report of each attempt names the model it used. When a profile's
+file is gone (deleted outside the service; the service refuses to delete a
+profile an unfinished task recorded), the next attempt of a task that
+recorded it fails at once with a settings error (``permanent``, reason
+找不到模型配置的文件…): no automatic rerun, and no fallback to another
+profile; an attempt already running goes on with the settings it read.
+Both roles of a user profile share its one endpoint and
 budget, with no hedging (``model_client.PipelineModels``). The current
 profile survives a restart (``<data_dir>/model-profiles.json``); when its
 file is gone, the current profile is Gemini again, with a log line. Profile
@@ -667,14 +682,16 @@ class TaskQueue:
 
     # -- HTTP side -----------------------------------------------------------
 
-    def submit(self, pdf: bytes, filename: str) -> str:
-        """Queue a new task; it records the current model profile, for all its attempts."""
+    def submit(self, pdf: bytes, filename: str, profile: str | None = None) -> str:
+        """Queue a new task; it records the model profile ``profile``, or else
+        the current one, for all its attempts. Raise ``ProfileError`` for a
+        profile it cannot use (``ProfileStore.for_submission``), leaving no task."""
+        profile_id, profile_name = self.profiles.for_submission(profile)
         task_id = uuid.uuid4().hex
         directory = self.tasks_dir / task_id
         directory.mkdir()
         (directory / td.SOURCE_PDF).write_bytes(pdf)
         submitted_at = time.time()
-        profile_id, profile_name = self.profiles.current()
         (directory / "task.json").write_text(
             json.dumps(
                 {
@@ -1346,7 +1363,12 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             filename = (fields.get("filename") or (b"", None))[0].decode("utf-8") or (
                 part_filename or "paper.pdf"
             )
-            return self._json(201, {"task_id": queue.submit(pdf, filename)})
+            profile = (fields.get("profile") or (b"", None))[0].decode("utf-8", errors="replace")
+            try:
+                task_id = queue.submit(pdf, filename, profile or None)  # empty: the current one
+            except ProfileError as e:
+                return self._json(e.status, {"error": str(e)})
+            return self._json(201, {"task_id": task_id})
 
         def _send_file(self, task_id: str, name: str):
             directory = queue.task_dir(task_id)

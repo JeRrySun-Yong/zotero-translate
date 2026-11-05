@@ -45,6 +45,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from zotero_translate import task_dir as td
+from zotero_translate.model_client import REDACTED
 from zotero_translate.settings import DEFAULT_PROFILE_CONCURRENCY
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import SettingsError
@@ -143,6 +144,24 @@ class ProfileStore:
                 profile = None
             return (profile.id, profile.name) if profile else (BUILTIN_ID, BUILTIN_NAME)
 
+    def for_submission(self, profile_id: str | None) -> tuple[str, str]:
+        """``(id, name)`` of the profile a new task records: the one named, else the current one.
+
+        A named profile must exist (else 422) and, unless it is Gemini, be
+        tested (else 409): e.g. the plugin's retry names the failed task's.
+        """
+        if profile_id is None:
+            return self.current()
+        if profile_id == BUILTIN_ID:
+            return BUILTIN_ID, BUILTIN_NAME
+        with self._lock:
+            profile = self._read(profile_id)
+            if profile is None:
+                raise ProfileError(422, "找不到这份模型配置")
+            if not self._usable(self._state(), profile):
+                raise ProfileError(409, "这份配置还没有通过测试连接，不能用来提交")
+            return profile.id, profile.name
+
     def listing(self) -> dict:
         """``{"current": id, "profiles": [the built-in one, then the user profiles by name]}``."""
         with self._lock:
@@ -206,21 +225,24 @@ class ProfileStore:
         an edit while the test ran leaves the profile untested."""
         with self._lock:
             profile = self._existing(profile_id)
+            # check_connection redacts the key; so does this, for whatever
+            # else goes into the answer, the state file and the log.
+            message = check.message.replace(profile.api_key, REDACTED) if profile.api_key else check.message
             state = self._state()
             state["tests"][profile_id] = {
                 "result": check.result,
-                "message": check.message,
+                "message": message,
                 "seconds": check.seconds,
                 "http_status": check.http_status,
                 "tested_at": time.time(),
                 "fingerprint": fingerprint,
             }
             self._save(state)
-            self._log(profile_id, "tested", profile.name, check.message)
+            self._log(profile_id, "tested", profile.name, message)
             return {
                 "ok": check.ok,
                 "result": check.result,
-                "message": check.message,
+                "message": message,
                 "seconds": check.seconds,
                 "http_status": check.http_status,
             }

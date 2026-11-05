@@ -906,7 +906,8 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
     a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
     is not read. One send: no retry, no cache, a timeout of at most
     ``CONNECTION_TEST_TIMEOUT_SECONDS``. A 404, or a 400 or 422 whose body
-    names the model, means the model does not exist.
+    names the model, means the model does not exist. The message never holds
+    the API key: where the endpoint's text echoes it, it reads ``REDACTED``.
     """
     settings = replace(
         settings,
@@ -920,6 +921,10 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
     started = time.monotonic()
 
     def outcome(result: str, detail: str = "") -> ConnectionCheck:
+        # The detail is the endpoint's text (an answer's start, an error
+        # body, an exception): an echoed key, bare or after "Bearer ", goes.
+        if settings.api_key:
+            detail = detail.replace(settings.api_key, REDACTED)
         message = _CONNECTION_TEST_MESSAGES[result] + (f"：{detail}" if detail else "")
         return ConnectionCheck(result, message, round(time.monotonic() - started, 3), timing.http_status)
 
@@ -945,7 +950,9 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
         except ValueError:
             answer = None
         if not isinstance(answer, dict) or answer.get("ok") is not True:
-            return outcome("unparseable", f"回答不是 {{\"ok\": true}}：{' '.join(content.split())[:80]}")
+            # Redacted before it is cut, so no part of an echoed key is left.
+            shown = content.replace(settings.api_key, REDACTED) if settings.api_key else content
+            return outcome("unparseable", f"回答不是 {{\"ok\": true}}：{' '.join(shown.split())[:80]}")
         return outcome("succeeded")
     finally:
         client.close()
