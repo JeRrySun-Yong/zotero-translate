@@ -34,6 +34,10 @@ from zotero_translate.request_log import RequestLog
 from zotero_translate.request_log import load_records
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import PipelineSettings
+from zotero_translate.settings import SettingsError
+from zotero_translate.settings import load_model_settings
+from zotero_translate.settings import load_pipeline_settings
+from zotero_translate.settings import load_profile_settings
 
 MESSAGES = [{"role": "user", "content": "hello"}]
 ANSWER = '{"terms": ["meta-harness", "代码智能体"], "note": "一段足够长、要分成好几块发送的回答。"}'
@@ -137,6 +141,31 @@ def test_with_streaming_off_the_request_body_and_its_cache_key_are_as_before(tmp
     assert request.raw_body == json.dumps(before, ensure_ascii=False, separators=(",", ":")).encode()
     assert ResponseCache.key(body) == GEMINI_KEY_BEFORE
     assert ResponseCache.key({**body, "stream": True}) != GEMINI_KEY_BEFORE
+
+
+def _env_file(tmp_path: Path, name: str, extra: str = "") -> Path:
+    path = tmp_path / name
+    path.write_text(f"OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\nAI_DEFAULT_MODEL=m\n{extra}")
+    return path
+
+
+@pytest.mark.parametrize(
+    "line, stream",
+    [("", False), ("ZT_STREAM=1\n", True), ("ZT_STREAM=0\n", False), ('ZT_STREAM="1"\n', True)],
+    ids=["absent", "on", "off", "quoted"],
+)
+def test_an_endpoint_file_turns_streaming_on_with_zt_stream(tmp_path, line, stream):
+    path = _env_file(tmp_path, "endpoint.env", line)
+    pipeline = load_pipeline_settings(path, path)
+    assert pipeline.flash.stream is stream and pipeline.argon.stream is stream
+    profile = load_profile_settings(path)
+    assert profile.flash.stream is stream and profile.argon.stream is stream
+
+
+def test_an_endpoint_file_with_another_zt_stream_value_is_refused(tmp_path):
+    path = _env_file(tmp_path, "endpoint.env", "ZT_STREAM=yes please\n")
+    with pytest.raises(SettingsError, match="ZT_STREAM"):
+        load_model_settings(path)
 
 
 def _wait_until(condition, timeout: float = 10.0) -> bool:
