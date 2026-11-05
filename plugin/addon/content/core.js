@@ -89,7 +89,6 @@ var ZoteroTranslateCore = (() => {
       }));
   }
 
-
   // Task states: the service's queued/running/waiting_rerun/failed/cancelled,
   // plus the plugin's own submitting (upload under way), attaching (service
   // succeeded, PDFs being added to the item), attach_failed (a local error

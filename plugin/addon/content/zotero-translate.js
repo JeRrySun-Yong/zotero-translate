@@ -47,6 +47,10 @@ var ZoteroTranslate = {
   // or "翻译服务版本太旧" ("" while there is a listing).
   profilesProblem: "正在连接翻译服务…",
   profileClient: null,
+  // Appended to the item menu's label after the profile's name ("" normally;
+  // for the states of the selected items, e.g. "（没有 PDF）"). Set it, then
+  // _drawModelMenu(window) redraws the label.
+  itemMenuSuffix: "",
 
   startup({ id }) {
     Zotero.ZoteroTranslate = this;
@@ -189,7 +193,7 @@ var ZoteroTranslate = {
     const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
     menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
     ZoteroTranslate._drawModelMenu(window);
-    ZoteroTranslate._readProfiles(window);
+    ZoteroTranslate._readProfiles(window).catch((e) => Zotero.logError(e));
   },
 
   /** Ask the service for its model profiles and draw the menu with the answer. */
@@ -221,7 +225,7 @@ var ZoteroTranslate = {
     }
     const Core = ZoteroTranslateCore;
     const current = this.profiles && this.profiles.profiles.find((profile) => profile.id === this.profiles.current);
-    itemMenu.setAttribute("label", Core.itemMenuLabel(current ? current.name : ""));
+    itemMenu.setAttribute("label", Core.itemMenuLabel(current ? current.name : "", this.itemMenuSuffix));
     const items = Core.modelMenuItems(this.profiles, this.profilesProblem || undefined);
     const signature = JSON.stringify(items);
     if (popup.dataset.items === signature) {
