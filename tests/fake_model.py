@@ -4,7 +4,7 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, 400, 401, 403, timeout, slow, empty content, invalid
+- inject errors (500, 429, 400, 401, 403, 404, timeout, slow, empty content, invalid
   JSON) on the N-th request of a kind, or on the first request of a kind and then on
   each resend of that same request (``fail_same_request``; a resend may
   name another model, as a request forwarded to argon does). "timeout" sends
@@ -49,6 +49,9 @@ Request kinds are recognised from the message content:
   ``ALGORITHM_REVIEW_MARKER``. The default answer returns every draft.
 - ``single_paragraph``: the engine's one-paragraph prompts, which it uses to
   redo a paragraph after a failed or rejected batch.
+- ``connection_test``: a model profile's connection test (M4 ticket 02),
+  recognised by ``CONNECTION_TEST_MARKER`` in its instructions. The default
+  answer is ``{"ok": true}``.
 - ``other``: anything else.
 """
 
@@ -118,6 +121,9 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
+# A phrase of the connection test's instructions (zotero_translate.model_client).
+CONNECTION_TEST_MARKER = "This is a connection test"
+
 _ERRORS = {
     "500",
     "429",
@@ -125,6 +131,7 @@ _ERRORS = {
     "400_echo",
     "401",
     "403",
+    "404",
     "timeout",
     "hang_after_headers",
     "slow",
@@ -205,6 +212,7 @@ class FakeModel:
             "algorithm": pseudo_translate_algorithm,
             "algorithm_review": keep_algorithm_drafts,
             "single_paragraph": pseudo_translate_single,
+            "connection_test": lambda body: '{"ok": true}',
             "other": lambda body: "ok",
         }
         self._server: ThreadingHTTPServer | None = None
@@ -218,7 +226,7 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "timeout",
+        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "404", "timeout",
         "hang_after_headers", "slow", "empty", "invalid_json".
         """
         assert error in _ERRORS, error
@@ -306,7 +314,7 @@ class FakeModel:
             if fault == "400_echo":
                 echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
                 return _send_json(handler, 400, {"error": echo})
-            if fault in ("401", "403"):
+            if fault in ("401", "403", "404"):
                 return _send_json(handler, int(fault), {"error": {"message": f"injected {fault}"}})
             if fault in ("timeout", "hang_after_headers"):
                 if fault == "hang_after_headers":
@@ -378,6 +386,8 @@ def classify(body: dict) -> str:
         return "gloss_rewrite"
     if any(DOSSIER_MARKER in text for text in instructions):
         return "dossier"
+    if any(CONNECTION_TEST_MARKER in text for text in instructions):
+        return "connection_test"
     return "other"
 
 
