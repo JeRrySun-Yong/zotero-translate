@@ -1642,6 +1642,33 @@ test("an attaching task from before attach records becomes 挂回失败 at resto
   assert.deepEqual(again.announced, []);
 });
 
+test("after stop (the plugin is shut down), a request under way that comes back brings no notice", async () => {
+  for (const [name, answer] of [
+    ["failed", () => status("failed", { error: "管线模型拒绝了请求" })],
+    ["succeeded", () => status("succeeded")],
+  ]) {
+    const query = held();
+    const env = await submitted({ [QUERY("t1")]: query.route, [MONO("t1")]: pdfBytes("mono pdf"), [DUAL("t1")]: pdfBytes("dual pdf") });
+    await env.clock.advance(2000);
+    assert.equal(query.count, 1, name);
+    env.lifecycle.stop();
+    query.answer(answer());
+    await env.clock.advance(60000);
+    assert.deepEqual(env.announced, [], name);
+  }
+
+  // A failed upload after stop: no notice either.
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const submitting = env.lifecycle.submit(SOURCE);
+  await settle();
+  env.lifecycle.stop();
+  upload.answer(json(413, {}));
+  await submitting;
+  assert.deepEqual(env.announced, []);
+});
+
 test("a notice that throws is logged; the task goes on", async () => {
   const logged = [];
   const env = await submitted(succeededRoutes("t1"), {

@@ -74,7 +74,7 @@
  *   change is saved: a state restored after a restart is no change, so no
  *   notice comes again (done and failed tasks are not even saved). A state
  *   that restoring itself changes (an upload under way at quit fails) is
- *   one, measured from the saved state;
+ *   one, measured from the saved state. Never after stop();
  * - debug(message), logError(error): logging.
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript after
@@ -737,8 +737,13 @@ var ZoteroTranslateLifecycle = (() => {
     }
 
     /** Announce each task whose state has changed into done, failed or
-     *  attach_failed since it was last looked at; called after saving. */
+     *  attach_failed since it was last looked at; called after saving.
+     *  Nothing after stop(): a request that comes back once the plugin is
+     *  shut down brings no notice. */
     function announceEnded() {
+      if (!started) {
+        return;
+      }
       const now = clock.now();
       for (const task of lifecycle.tasks) {
         const before = announcedStates.get(task.key);
