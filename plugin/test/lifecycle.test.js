@@ -2025,6 +2025,25 @@ test("取消 while 挂回中 or 挂回失败 cancels at once: nothing is lost bu
   assert.deepEqual(env.requests, []);
 });
 
+test("取消 on a waiting-rerun row asks first too; only the second press sends the cancel", async () => {
+  const env = await submitted({
+    [QUERY("t1")]: status("waiting_rerun", { reruns_used: 1, reruns_max: 2, next_attempt_in_seconds: 300, error: "HTTP 500" }),
+    [CANCEL("t1")]: cancelledAnswer("t1"),
+  });
+  await env.clock.advance(2000);
+  assert.equal(rowOf(env).status, "等待自动重跑");
+  const key = rowOf(env).key;
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.equal(rowOf(env).status, "等待自动重跑");
+  assert.equal(env.requests.at(-1), QUERY("t1")); // no cancel request yet
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(env.requests.at(-1), CANCEL("t1"));
+  assert.deepEqual(env.status(), ["已取消"]);
+});
+
 const RESUBMIT_ASK = (title) => `${title}：已有译文，等待确认`;
 
 test("a paper that already has translations is asked about, and only 再翻译一次 uploads it", async () => {

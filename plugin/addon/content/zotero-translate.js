@@ -90,6 +90,10 @@ var ZoteroTranslate = {
       debug: (message) => Zotero.debug(message),
       logError: (e) => Zotero.logError(e),
     });
+    this.menu = ZoteroTranslateItemMenu.createItemMenu({
+      sourcePdf: (item) => this.sourcePdf(item),
+      logError: (e) => Zotero.logError(e),
+    });
     this.lifecycle.start();
     for (const window of Zotero.getMainWindows()) {
       this.addToWindow(window);
@@ -120,6 +124,7 @@ var ZoteroTranslate = {
     itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
     itemPopup.append(itemMenu, itemTasksMenu);
     itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
+    itemPopup.addEventListener("popuphidden", this._onItemMenuHidden);
 
     const toolsMenu = doc.createXULElement("menuitem");
     toolsMenu.id = this.TOOLS_MENU_ID;
@@ -140,6 +145,7 @@ var ZoteroTranslate = {
     this.notices.windowClosed(window);
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
+    doc.getElementById("zotero-itemmenu")?.removeEventListener("popuphidden", this._onItemMenuHidden);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
     doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
@@ -147,60 +153,23 @@ var ZoteroTranslate = {
 
   // The entry shows for regular items and for attachments (with or without
   // a parent item). A selection without a source PDF shows it greyed, saying
-  // so, instead of failing after the click. Whether a regular item has one
-  // takes Zotero's item lists, which may not be loaded yet: the cache
-  // `_pdfCache` (item ID -> true/false) answers when it can, and the check
-  // is made again for the open menu.
-  _pdfCache: new Map(),
-  _menuChecks: 0,
+  // so, instead of failing after the click (itemmenu.js).
+  menu: null,
 
   _onItemMenuShowing(event) {
-    const window = event.target.ownerGlobal;
-    const items = window.ZoteroPane.getSelectedItems();
-    const menu = window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID);
-    const selection = () => items.map((item) => ZoteroTranslate._menuState(item));
-    ZoteroTranslate._applyMenuItem(menu, ZoteroTranslateCore.translateMenuItem(selection()));
-    const check = ++ZoteroTranslate._menuChecks;
-    Promise.all(
-      items.map(async (item) => {
-        const state = ZoteroTranslate._menuState(item);
-        if (!state.candidate || state.known) {
-          return;
-        }
-        try {
-          ZoteroTranslate._pdfCache.set(item.id, !!(await ZoteroTranslate.sourcePdf(item)));
-        } catch (e) {
-          Zotero.logError(e);
-        }
-      }),
-    )
-      .then(() => {
-        // A later menu, or this one closed: the answer belongs to neither.
-        if (check !== ZoteroTranslate._menuChecks || !["open", "showing"].includes(menu.state)) {
-          return;
-        }
-        ZoteroTranslate._applyMenuItem(menu, ZoteroTranslateCore.translateMenuItem(selection()));
+    const popup = event.target;
+    const window = popup.ownerGlobal;
+    ZoteroTranslate.menu
+      .showing({
+        popup,
+        menu: window.document.getElementById(ZoteroTranslate.ITEM_MENU_ID),
+        items: window.ZoteroPane.getSelectedItems(),
       })
       .catch((e) => Zotero.logError(e));
   },
 
-  /** A selected item for the menu's decision: {candidate, hasPdf, known}. */
-  _menuState(item) {
-    if (!item.isRegularItem() && !item.isAttachment()) {
-      return { candidate: false, hasPdf: false, known: true };
-    }
-    if (item.isAttachment()) {
-      const pdf = ZoteroTranslateCore.pickSourcePdf([{ isPDF: item.isPDFAttachment(), title: item.getField("title") }]);
-      return { candidate: true, hasPdf: !!pdf, known: true };
-    }
-    const known = this._pdfCache.has(item.id);
-    return { candidate: true, hasPdf: this._pdfCache.get(item.id) ?? true, known };
-  },
-
-  _applyMenuItem(menu, { hidden, disabled, label }) {
-    menu.hidden = hidden;
-    menu.disabled = disabled;
-    menu.setAttribute("label", label);
+  _onItemMenuHidden(event) {
+    ZoteroTranslate.menu.hidden({ popup: event.target });
   },
 
   /** Submit every selected item, one after another; the service runs them in
