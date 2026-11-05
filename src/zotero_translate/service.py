@@ -55,7 +55,9 @@ has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
 - ``POST /profiles/{id}/test`` ``{}`` -> ``200 {"ok", "result", "message",
   "seconds", "http_status"}`` once the test has run (it takes up to 60
   seconds), whatever its outcome; ``result`` is one of succeeded,
-  unreachable, unauthorized (HTTP 401, 403), model_not_found (HTTP 404, or a
+  invalid_address (an address in the file, edited outside the service,
+  that cannot be one; the service refuses such an address with 400 when a
+  profile is saved), unreachable, unauthorized (HTTP 401, 403), model_not_found (HTTP 404, or a
   400 or 422 that names the model), timeout, unparseable, http_error (e.g.
   429, 5xx). One request with the paper task's model, reasoning effort and
   temperature, which must answer the JSON object ``{"ok": true}``

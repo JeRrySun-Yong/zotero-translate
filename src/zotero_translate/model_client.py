@@ -10,7 +10,8 @@ Reliability (ADR 0002):
 - The request timeout bounds the whole request, from sending it to reading
   the last byte of the response (see ``_post``). A send that runs past it
   is cancelled; its slot comes back once its connection has closed.
-- Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
+- Network errors, timeouts, HTTP 400, 429 and 5xx, empty content, a
+  content that is not a string and
   answers the caller's ``validate`` rejects are retried, at most
   ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
   When the attempts are used up, ``complete`` raises ``ModelCallError`` with
@@ -124,6 +125,7 @@ from zotero_translate.request_log import KIND_STAGES
 from zotero_translate.request_log import RequestLog
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import PipelineSettings
+from zotero_translate.settings import base_url_problem
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +468,8 @@ class ModelClient:
             content = json.loads(data)["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise _RetryableError("无法解析管线模型的响应") from e
+        if content is not None and not isinstance(content, str):  # e.g. an array or an object
+            raise _RetryableError(f"管线模型回答的 content 不是文本（{type(content).__name__}）")
         if not content or not content.strip():
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
@@ -865,6 +869,7 @@ CONNECTION_TEST_TIMEOUT_SECONDS = 60.0  # at most; a profile's shorter request t
 # The outcomes of a connection test; "http_error" is any other HTTP error (429, 5xx).
 CONNECTION_TEST_RESULTS = (
     "succeeded",
+    "invalid_address",
     "unreachable",
     "unauthorized",
     "model_not_found",
@@ -874,6 +879,7 @@ CONNECTION_TEST_RESULTS = (
 )
 _CONNECTION_TEST_MESSAGES = {
     "succeeded": "连接成功",
+    "invalid_address": "地址无效",
     "unreachable": "地址连不上",
     "unauthorized": "密钥无效",
     "model_not_found": "模型不存在",
@@ -906,8 +912,11 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
     a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
     is not read. One send: no retry, no cache, a timeout of at most
     ``CONNECTION_TEST_TIMEOUT_SECONDS``. A 404, or a 400 or 422 whose body
-    names the model, means the model does not exist. The message never holds
-    the API key: where the endpoint's text echoes it, it reads ``REDACTED``.
+    names the model, means the model does not exist. An address that cannot
+    be one (``settings.base_url_problem``), or an error building the client,
+    is ``invalid_address``; a content that is not a string, ``unparseable``.
+    The message never holds the API key: where the endpoint's text or an
+    exception's echoes it, it reads ``REDACTED``.
     """
     settings = replace(
         settings,
@@ -916,7 +925,6 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
         concurrency=1,
         cache_dir=None,
     )
-    client = ModelClient(settings)
     timing = _SendTiming()
     started = time.monotonic()
 
@@ -928,9 +936,18 @@ def check_connection(settings: ModelSettings) -> ConnectionCheck:
         message = _CONNECTION_TEST_MESSAGES[result] + (f"：{detail}" if detail else "")
         return ConnectionCheck(result, message, round(time.monotonic() - started, 3), timing.http_status)
 
+    problem = base_url_problem(settings.base_url)
+    if problem:
+        return outcome("invalid_address", problem)
+    try:
+        client = ModelClient(settings)
+    except Exception as e:  # noqa: BLE001 - its text goes through the redaction too
+        return outcome("invalid_address", f"{type(e).__name__}: {e}")
     try:
         try:
             content = client._send(client._body(CONNECTION_TEST_MESSAGES), timing)
+        except httpx.InvalidURL as e:
+            return outcome("invalid_address", f"{type(e).__name__}: {e}")
         except _Timeout as e:
             return outcome("timeout", str(e))
         except _NetworkError as e:

@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DEFAULT_MODEL = "gemini-3.8-flash-high"
 DEFAULT_CONCURRENCY = 40
@@ -248,6 +249,26 @@ def _endpoint_settings(
         timeout_seconds=timeout_seconds,
         cache_dir=Path(cache_dir) if cache_dir else None,
     )
+
+
+def base_url_problem(base_url: str) -> str | None:
+    """Why ``base_url`` cannot be an endpoint address, or None if it can.
+
+    It must be ``http://`` or ``https://`` with a host name and, if it
+    names one, a port from 1 to 65535.
+    """
+    try:
+        url = urlsplit(base_url)
+        port = url.port  # raises ValueError for a port out of range or not a number
+    except ValueError as e:
+        return f"地址格式不对（{e}）"
+    if url.scheme not in ("http", "https"):
+        return "地址要以 http:// 或 https:// 开头"
+    if not url.hostname:
+        return "地址缺少主机名"
+    if port == 0:
+        return "地址的端口要在 1 到 65535 之间"
+    return None
 
 
 def _positive_seconds(text: str) -> float | None:

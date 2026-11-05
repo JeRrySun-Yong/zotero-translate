@@ -42,13 +42,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from zotero_translate import task_dir as td
 from zotero_translate.model_client import REDACTED
 from zotero_translate.settings import DEFAULT_PROFILE_CONCURRENCY
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import SettingsError
+from zotero_translate.settings import base_url_problem
 from zotero_translate.settings import load_pipeline_settings
 from zotero_translate.settings import read_env_file
 
@@ -432,9 +432,9 @@ def _validate(body: dict, required: tuple[str, ...]) -> dict:
             raise ProfileError(400, f"{name} 不能含空白")
         fields[name] = value
     if "base_url" in fields:
-        url = urlsplit(fields["base_url"])
-        if url.scheme not in ("http", "https") or not url.hostname:
-            raise ProfileError(400, "base_url 要以 http:// 或 https:// 开头，并带主机名")
+        problem = base_url_problem(fields["base_url"])
+        if problem:
+            raise ProfileError(400, f"base_url 无效：{problem}")
         fields["base_url"] = fields["base_url"].rstrip("/")
     if "concurrency" in body:
         value = body["concurrency"]
