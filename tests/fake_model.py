@@ -14,7 +14,9 @@ Test fixture only. It can:
   answers with ``REJECTION_BODY``, a JSON error spread over several lines
   and longer than 200 characters; "400_echo" answers with an error that
   echoes the request's Authorization header, key included; "200_echo"
-  answers 200 with content (not JSON) that echoes it too;
+  answers 200 with content (not JSON) that echoes it too; "null_content",
+  "list_content" and "object_content" answer 200 with a message content
+  that is not a string;
 - inject a delay and count the maximum number of requests in flight;
 - keep connections open between requests (``keep_alive``, HTTP/1.1), so
   that a client reuses them; each request records its client's port;
@@ -139,7 +141,12 @@ _ERRORS = {
     "empty",
     "invalid_json",
     "200_echo",
+    "null_content",
+    "list_content",
+    "object_content",
 }
+# The message content of the faults whose answer is 200 with content that is not text.
+_NOT_TEXT_CONTENT = {"null_content": None, "list_content": ["ok"], "object_content": {"ok": True}}
 HANG_SECONDS = 3600.0  # how long "timeout" and "hang_after_headers" hold a connection open
 
 # The body of an injected HTTP 400: several lines, the message first, then
@@ -336,6 +343,8 @@ class FakeModel:
             else:
                 content = self._responders[kind](body)
             payload = _completion(body.get("model", ""), content)
+            if fault in _NOT_TEXT_CONTENT:
+                payload["choices"][0]["message"]["content"] = _NOT_TEXT_CONTENT[fault]
             if fault == "slow":
                 request.disconnected = not _send_json_slowly(handler, payload, self.slow_body_seconds)
                 return None

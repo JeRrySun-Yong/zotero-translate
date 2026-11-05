@@ -414,3 +414,65 @@ def test_a_submission_may_name_its_profile(start_service, tmp_path):
     }
     assert all(r.json()["error"] for r in refused.values())
     assert len(tasks) == 3  # a refused submission leaves no task behind
+
+
+BAD_ADDRESSES = ["not a url", "ftp://x", "http://", "http:///v1", "http://[::1", "http://host:99999/v1"]
+
+
+def test_an_invalid_address_is_refused_when_saved(start_service):
+    with FakeModel() as model:
+        service = start_service(model)
+        profile = _create(service, model)
+        body = {"name": "DeepSeek", "api_key": KEY, "model": PROFILE_MODEL}
+        created = [_write(service, "POST", "/profiles", {**body, "base_url": url}) for url in BAD_ADDRESSES]
+        edited = [_write(service, "PUT", f"/profiles/{profile['id']}", {"base_url": url}) for url in BAD_ADDRESSES]
+        listed = _listed(service, profile["id"])
+
+    assert [r.status_code for r in created + edited] == [400] * (2 * len(BAD_ADDRESSES))
+    assert all("base_url" in r.json()["error"] for r in created + edited)
+    assert listed["base_url"] == model.base_url
+
+
+@pytest.mark.parametrize("url", ["not a url", "ftp://x", "http://[::1"])
+def test_the_connection_test_of_an_invalid_address_in_the_file_answers(start_service, url):
+    """A profile file edited outside the service: the test still answers, "地址无效"."""
+    with FakeModel() as model:
+        service = start_service(model)
+        profile = _create(service, model)
+        path = service.profiles_dir / f"{profile['id']}.env"
+        path.write_text(path.read_text("utf-8").replace(model.base_url, url), encoding="utf-8")
+        response = _write(service, "POST", f"/profiles/{profile['id']}/test")
+        assert model.requests == []
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "invalid_address"
+    assert response.json()["message"].startswith("地址无效")
+    assert KEY not in response.text
+
+
+@pytest.mark.parametrize("fault", ["null_content", "list_content", "object_content"])
+def test_an_answer_whose_content_is_not_text_is_unparseable(start_service, fault):
+    with FakeModel() as model:
+        model.inject_error(fault, kind="connection_test")
+        service = start_service(model)
+        profile = _create(service, model)
+        response = _write(service, "POST", f"/profiles/{profile['id']}/test")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "unparseable"
+
+
+def test_an_error_building_the_client_is_redacted(monkeypatch):
+    """The text of an exception raised while the client is built goes through the same redaction."""
+    from zotero_translate import model_client
+    from zotero_translate.settings import ModelSettings
+
+    def broken_endpoint(settings):
+        raise ValueError(f"cannot use Authorization: Bearer {settings.api_key}")
+
+    monkeypatch.setattr(model_client, "Endpoint", broken_endpoint)
+    check = model_client.check_connection(
+        ModelSettings(base_url="http://127.0.0.1:9/v1", api_key=KEY, model=PROFILE_MODEL)
+    )
+    assert check.result == "invalid_address"
+    assert KEY not in check.message and model_client.REDACTED in check.message
