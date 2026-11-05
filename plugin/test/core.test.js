@@ -286,6 +286,50 @@ test("the 翻译为中文 menu item: greyed with （没有 PDF） when no select
   assert.deepEqual(core.translateMenuItem([item(true, true)]), { hidden: false, disabled: false, label: "翻译为中文" });
 });
 
+test("a standalone PDF's related translation output counts as already translated, also one from an earlier session", () => {
+  const source = (extra) => ({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf", ...extra });
+  // Only the relation, no task record of this session: after a restart, or
+  // after "清除已结束" removed the record.
+  assert.equal(
+    core.lifecycleSource(source({ taskRecord: false, related: [{ title: "中文译文", deleted: false }] })).translated,
+    true,
+  );
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "双语对照", deleted: false }] })).translated, true);
+  // One of them is enough; the other one's presence does not matter.
+  assert.equal(
+    core.lifecycleSource(source({ related: [{ title: "中文译文", deleted: true }, { title: "双语对照", deleted: false }] }))
+      .translated,
+    true,
+  );
+  // An output in the trash, and any other related item, do not count.
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "中文译文", deleted: true }] })).translated, false);
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "Full Text PDF", deleted: false }] })).translated, false);
+  // This session's task record still counts without a relation.
+  assert.equal(core.lifecycleSource(source({ taskRecord: true })).translated, true);
+  assert.equal(core.lifecycleSource(source()).translated, false);
+});
+
+test("a paper with a parent item is judged by its attachments only, as before", () => {
+  const paper = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "AutoDesign.pdf" };
+  assert.equal(core.lifecycleSource({ ...paper, parentTranslated: true }).translated, true);
+  assert.equal(core.lifecycleSource({ ...paper, parentTranslated: false }).translated, false);
+  // Neither this session's records nor related items are consulted for a regular item.
+  assert.equal(
+    core.lifecycleSource({ ...paper, taskRecord: true, related: [{ title: "中文译文", deleted: false }] }).translated,
+    false,
+  );
+});
+
+test("the lifecycle's source keeps the PDF's fields", () => {
+  assert.deepEqual(core.lifecycleSource({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "s.pdf" }), {
+    sourceItemID: 30,
+    itemID: null,
+    title: "Standalone",
+    sourceFileName: "s.pdf",
+    translated: false,
+  });
+});
+
 test("the menu's label keeps the current profile's name, and adds （没有 PDF） after it", () => {
   const item = (candidate, hasPdf) => ({ candidate, hasPdf });
   assert.deepEqual(core.translateMenuItem([item(true, true)], "翻译为中文（Gemini）"), {

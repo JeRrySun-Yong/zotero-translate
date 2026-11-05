@@ -40,6 +40,41 @@ var ZoteroTranslateCore = (() => {
     return OUTPUT_TITLES.has(title);
   }
 
+  /** Whether any of `related` ({title, deleted}) is an undeleted translation
+   *  output: for a standalone PDF, whose outputs are standalone attachments
+   *  with no link back, the plugin links them to it as related items when it
+   *  attaches them (both ways), and this is what says the paper was
+   *  translated after a Zotero restart or "清除已结束". */
+  function relatedTranslation(related) {
+    return related.some((item) => !item.deleted && isTranslationOutput(item.title));
+  }
+
+  /** The source the lifecycle translates, for one source PDF:
+   *  {sourceItemID, itemID, title, sourceFileName, translated}. `translated`
+   *  says the paper already has a translation output, so submitting it again
+   *  asks first: `parentTranslated` for a paper with a parent item (an
+   *  output among its attachments); for a standalone PDF (`itemID` null),
+   *  this session's task record (`taskRecord`: both outputs attached) or one
+   *  of its `related` items (see relatedTranslation). The relation is the one
+   *  that outlives the record. */
+  function lifecycleSource({
+    sourceItemID,
+    itemID,
+    title,
+    sourceFileName,
+    parentTranslated = false,
+    taskRecord = false,
+    related = [],
+  }) {
+    return {
+      sourceItemID,
+      itemID,
+      title,
+      sourceFileName,
+      translated: Boolean(parentTranslated) || (itemID == null && (Boolean(taskRecord) || relatedTranslation(related))),
+    };
+  }
+
   /** The item menu's "翻译为中文" for the selection, {hidden, disabled, label}:
    *  hidden when no selected item could be a source (a regular item or an
    *  attachment); greyed, saying why, when none of them has a source PDF;
@@ -250,6 +285,8 @@ var ZoteroTranslateCore = (() => {
     UNFINISHED_STATES,
     pickSourcePdf,
     isTranslationOutput,
+    relatedTranslation,
+    lifecycleSource,
     translateMenuItem,
     NO_PDF_SUFFIX,
     outputFileName,

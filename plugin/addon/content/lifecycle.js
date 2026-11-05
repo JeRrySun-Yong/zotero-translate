@@ -36,7 +36,10 @@
  * translation output (the source's `translated`, set by the plugin: a
  * translation output among a regular item's attachments, or for a standalone
  * PDF, whose outputs have no link back, a task of this session with both
- * outputs attached, wasTranslated()): the paper is not submitted; the batch's
+ * outputs attached, wasTranslated(), or one of the PDF's related items being
+ * an undeleted translation output: attaching a standalone PDF's outputs
+ * links each of them to it as a related item, both ways, and that outlives
+ * the task records): the paper is not submitted; the batch's
  * submission notice counts it among the skipped, with the reason, and a
  * second notice (outcome "resubmit", with `keys`) asks "再翻译一次？".
  * resubmit(keys) submits the papers that notice listed, then announces their
@@ -83,6 +86,11 @@
  *   the attachment with that identity that the user has not deleted, or
  *   null; write the identity on an attachment; the attachment at the target
  *   with no identity, that title, added at or after the clock time `since`, or null;
+ * - relate(sourceItemID, outputID): link a standalone PDF and one of its
+ *   outputs as related items, both ways (zotero-translate.js): the sign that
+ *   the paper was translated, kept in Zotero and through restarts. A failure
+ *   is logged (logError) and attaching goes on; the outputs are attached
+ *   either way, and a later attaching tries the links again;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
  * - announce({outcome, row}): tell the user, outside the task window, that a
  *   task has just ended: outcome "done" (both PDFs attached; the row's
@@ -177,6 +185,7 @@ var ZoteroTranslateLifecycle = (() => {
     tempFiles,
     importAttachment,
     attachments,
+    relate,
     store,
     announce,
     debug,
@@ -481,10 +490,10 @@ var ZoteroTranslateLifecycle = (() => {
       /** Whether a task of this source PDF has already attached both
        *  outputs: for a regular item that shows in its attachments, but a
        *  standalone PDF's outputs are standalone attachments with no link
-       *  back, so its task record is the sign that it was translated. The
+       *  back, so its task record is one sign that it was translated. The
        *  records last for the Zotero session only: ended tasks are not
-       *  saved, and "清除已结束" removes them; after that a standalone PDF
-       *  is submitted again without the ask. */
+       *  saved, and "清除已结束" removes them; the related items attaching
+       *  makes (the `relate` dependency) stay. */
       wasTranslated(sourceItemID) {
         return lifecycle.tasks.some(
           (task) =>
@@ -826,10 +835,28 @@ var ZoteroTranslateLifecycle = (() => {
         const { [output.file]: _done, ...otherIntents } = task.importIntents;
         task.importIntents = otherIntents; // the other PDF's intent stays until that one is handled
         changed();
+        if (task.itemID == null) {
+          // The output is recorded already: a link that cannot be saved does
+          // not hold the attaching back, and the next one tries it again.
+          await relateOutput(task, attachment);
+        }
       }
       if (isCurrent(task, operation)) {
         setState(task, "done");
         task.disconnectedSince = null;
+      }
+    }
+
+    /** Link a standalone PDF and one of its outputs as related items (both
+     *  ways, by the `relate` dependency): a standalone PDF's outputs are
+     *  standalone attachments with no link back, and this is what says the
+     *  paper was translated after the task record is gone (a Zotero restart,
+     *  "清除已结束"). A failure is logged; attaching goes on. */
+    async function relateOutput(task, attachmentID) {
+      try {
+        await relate(task.sourceItemID, attachmentID);
+      } catch (e) {
+        logError(e);
       }
     }
 

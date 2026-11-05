@@ -20,6 +20,9 @@
  * sync server accepts only its own relation predicates (dc:relation,
  * owl:sameAs, dc:replaces with Zotero item URIs; Mendeley's), so an
  * attachment with any other relation could never sync (M3 ticket 10).
+ * A standalone PDF and each of its outputs are related items
+ * (addRelatedItem, dc:relation, both ways), which does sync, and which is
+ * what tells that the paper was translated: see _sourceOf.
  *
  * The plugin sends the service only the PDF and its file name; model
  * credentials and translation parameters live in the service.
@@ -110,6 +113,7 @@ var ZoteroTranslate = {
       importAttachment: async (target, { path, title }) =>
         (await Zotero.Attachments.importFromFile({ file: path, title, ...target })).id,
       attachments: this.attachmentIdentities,
+      relate: (sourceItemID, outputID) => this._relateWithSource(sourceItemID, outputID),
       store: {
         load: () => Zotero.Prefs.get(this.TASKS_PREF, true),
         // Ask for prefs.js to be written now (Firefox writes it off the main
@@ -316,32 +320,61 @@ var ZoteroTranslate = {
 
   /** The item's source for the lifecycle, or why it has none (a string).
    *  `translated` tells the lifecycle that a translation output is already
-   *  there, so it asks before translating the paper again: one among a
-   *  regular item's attachments, or for a standalone PDF (whose outputs have
-   *  no link back to it) a task of this Zotero session that attached both
-   *  outputs. A task record removed by "清除已结束", and one of an earlier
-   *  session (ended tasks are not saved), are gone: such a standalone PDF is
-   *  translated again without the ask. */
+   *  there, so it asks before translating the paper again: for a paper with
+   *  a parent item, one among the parent's attachments; for a standalone PDF
+   *  (whose outputs have no link back to it), a task of this Zotero session
+   *  that attached both outputs, or one of its related items being an
+   *  undeleted translation output — the plugin links the outputs to the
+   *  source both ways when it attaches them, and the relations stay after a
+   *  restart or "清除已结束" remove the task records (core.lifecycleSource). */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
       return `${item.getDisplayTitle()}：该条目没有 PDF 附件`;
     }
     const parent = source.parentItem; // null for a standalone PDF
-    return {
+    return ZoteroTranslateCore.lifecycleSource({
       sourceItemID: source.id,
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
       sourceFileName: source.attachmentFilename,
-      translated: parent ? await this._hasTranslation(parent) : this.lifecycle.wasTranslated(source.id),
-    };
+      ...(parent
+        ? { parentTranslated: await this._hasTranslation(parent) }
+        : { taskRecord: this.lifecycle.wasTranslated(source.id), related: await this._relatedItems(source) }),
+    });
+  },
+
+  /** A standalone PDF's related items, as {title, deleted}, for the "already
+   *  translated" check (core.lifecycleSource): `relatedItems` are item keys
+   *  in the same library. */
+  async _relatedItems(source) {
+    const items = await Promise.all(
+      source.relatedItems.map((key) => Zotero.Items.getByLibraryAndKeyAsync(source.libraryID, key)),
+    );
+    return items.filter(Boolean).map((item) => ({ title: item.getField("title"), deleted: item.deleted }));
+  },
+
+  /** Link a standalone PDF and one of its outputs as related items, both
+   *  ways, and save both; a separate save is what Zotero needs for a
+   *  relation (item.js addRelatedItem). A failure makes the lifecycle log it
+   *  and go on with the attaching: the outputs are attached either way. */
+  async _relateWithSource(sourceItemID, outputID) {
+    const source = await Zotero.Items.getAsync(sourceItemID);
+    const output = await Zotero.Items.getAsync(outputID);
+    if (!source || !output) {
+      throw new Error("找不到原 PDF 附件或译文附件，未能建立关联");
+    }
+    source.addRelatedItem(output);
+    await source.saveTx();
+    output.addRelatedItem(source);
+    await output.saveTx();
   },
 
   /** Whether the item already has one of the plugin's translation outputs
    *  among its attachments: the plugin's way of telling that the paper was
    *  translated, also by an earlier Zotero session. A standalone PDF has no
-   *  such parent item: `_sourceOf` asks the lifecycle's task records
-   *  (`wasTranslated`) for it instead. */
+   *  such parent item: `_sourceOf` asks for its related items and the
+   *  lifecycle's task records instead. */
   async _hasTranslation(item) {
     const attachments = await Zotero.Items.getAsync(item.getAttachments());
     return attachments.some(

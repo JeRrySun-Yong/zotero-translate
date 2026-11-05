@@ -5,7 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTaskLifecycle } = require("../addon/content/lifecycle.js");
 const { createModelMenu } = require("../addon/content/model-menu.js");
-const { statusText } = require("../addon/content/core.js");
+const { statusText, lifecycleSource } = require("../addon/content/core.js");
 
 const SERVICE = "http://127.0.0.1:8920";
 const SOURCE = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "AutoDesign.pdf" };
@@ -81,6 +81,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
     requests: [],
     requestTimes: [],
     imports: [],
+    relates: [],
     saved,
     routes,
     missingSources: [],
@@ -90,6 +91,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
     failRemove: false,
     failImport: null,
     failMark: null,
+    failRelate: null,
     quitAfterImport: false,
     quitAfterMark: false,
     findHold: null, // a held() whose route each look-up waits for
@@ -193,6 +195,12 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
         );
         return found ? found.id : null;
       },
+    },
+    relate: async (sourceItemID, outputID) => {
+      env.relates.push([sourceItemID, outputID]);
+      if (env.failRelate) {
+        throw new Error(env.failRelate);
+      }
     },
     store: {
       load: () => env.saved,
@@ -2305,4 +2313,93 @@ test("a standalone PDF whose task attached both outputs counts as translated: su
   // is submitted again without the ask.
   env.lifecycle.clearEnded();
   assert.equal(env.lifecycle.wasTranslated(30), false);
+});
+
+// ---- 独立 PDF 跨重启也先询问 (ticket M4-13) ----
+
+test("attaching a standalone PDF's outputs makes the source and each output related items, both ways", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  await env.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.relates, [
+    [30, 100],
+    [30, 101],
+  ]);
+});
+
+test("a paper with a parent item gets no related-item links: its attachments say it was translated", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.relates, []);
+});
+
+test("outputs attached earlier, with no relations, are related when they are found: nothing is imported again", async () => {
+  // A task saved before the relations existed: both outputs attached already.
+  const saved = JSON.stringify([
+    {
+      sourceItemID: 30,
+      itemID: null,
+      title: "Standalone",
+      sourceFileName: "standalone.pdf",
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "attaching",
+      generation: 0,
+      attached: {},
+      importIntents: {},
+    },
+  ]);
+  const library = [
+    { id: 7, target: { libraryID: 1, collections: [] }, title: "中文译文", text: "mono pdf", addedAt: 0, identity: "t1/mono", deleted: false },
+    { id: 8, target: { libraryID: 1, collections: [] }, title: "双语对照", text: "dual pdf", addedAt: 0, identity: "t1/dual", deleted: false },
+  ];
+  const env = environment({ saved, library });
+  env.lifecycle.start();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.imports, []);
+  assert.deepEqual(env.relates, [
+    [30, 7],
+    [30, 8],
+  ]);
+});
+
+test("a relation that cannot be saved is logged; the task is done with both PDFs attached", async () => {
+  const errors = [];
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") },
+    logError: (e) => errors.push(e.message),
+  });
+  env.failRelate = "关联没有保存";
+  env.lifecycle.start();
+  await env.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(
+    env.attached().map(([title]) => title),
+    ["中文译文", "双语对照"],
+  );
+  assert.deepEqual(errors, ["关联没有保存", "关联没有保存"]);
+});
+
+test("a standalone PDF with no task record but a related translation output is asked about", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  // After a restart or "清除已结束" the record is gone: the relation is all
+  // that is left (the relations were made when the outputs were attached).
+  const translated = lifecycleSource({
+    ...standalone,
+    taskRecord: env.lifecycle.wasTranslated(30),
+    related: [{ title: "中文译文", deleted: false }],
+  }).translated;
+  await env.lifecycle.submitBatch([{ ...standalone, translated }], asSource);
+  assert.deepEqual(env.requests, []); // nothing uploaded
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "没有提交", titles: [], reasons: [RESUBMIT_ASK("Standalone")] },
+    { outcome: "resubmit", titles: ["Standalone"], keys: [1] },
+  ]);
 });
