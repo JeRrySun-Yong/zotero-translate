@@ -5,7 +5,9 @@ HTTP interface (the contract with the translation plugin):
 - ``GET /health`` -> ``{"service": "zotero-translate", "version": ...}``
 - ``POST /tasks`` (multipart: a ``file`` part with the PDF; an optional
   ``filename`` part with the original file name; an optional ``profile``
-  part with a model profile id) -> ``201 {"task_id": ...}``. The task
+  part with a model profile id) -> ``201 {"task_id": ..., "profile":
+  {"id", "name"}}``, the profile the task records (so the plugin keeps it
+  even when it never queries the task, e.g. a cancel at once). The task
   records the profile named, else (no part, or an empty one) the current
   profile. A named profile must exist (else 422) and, unless it is
   ``gemini``, which always can be named, have passed its connection test
@@ -687,10 +689,11 @@ class TaskQueue:
 
     # -- HTTP side -----------------------------------------------------------
 
-    def submit(self, pdf: bytes, filename: str, profile: str | None = None) -> str:
+    def submit(self, pdf: bytes, filename: str, profile: str | None = None) -> tuple[str, dict[str, str]]:
         """Queue a new task; it records the model profile ``profile``, or else
-        the current one, for all its attempts. Raise ``ProfileError`` for a
-        profile it cannot use (``ProfileStore.for_submission``), leaving no task."""
+        the current one, for all its attempts. Raises ``ProfileError`` for a
+        profile it cannot use (``ProfileStore.for_submission``), leaving no task.
+        Returns the task ID and the recorded profile, ``{"id", "name"}``."""
         profile_id, profile_name = self.profiles.for_submission(profile)
         task_id = uuid.uuid4().hex
         directory = self.tasks_dir / task_id
@@ -723,7 +726,7 @@ class TaskQueue:
             )
             self._log(task_id, "submitted", 0, None)
             self._enqueue(task_id, FIRST_QUEUE_CLASS, submitted_at)
-        return task_id
+        return task_id, {"id": profile_id, "name": profile_name}
 
     def task_dir(self, task_id: str) -> Path | None:
         if not _TASK_ID.match(task_id):
@@ -1370,10 +1373,10 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
             )
             profile = (fields.get("profile") or (b"", None))[0].decode("utf-8", errors="replace")
             try:
-                task_id = queue.submit(pdf, filename, profile or None)  # empty: the current one
+                task_id, recorded = queue.submit(pdf, filename, profile or None)  # empty: the current one
             except ProfileError as e:
                 return self._json(e.status, {"error": str(e)})
-            return self._json(201, {"task_id": task_id})
+            return self._json(201, {"task_id": task_id, "profile": recorded})
 
         def _send_file(self, task_id: str, name: str):
             directory = queue.task_dir(task_id)

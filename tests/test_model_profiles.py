@@ -392,12 +392,17 @@ def test_a_submission_may_name_its_profile(start_service, tmp_path):
 
         named = _submit(service, tested["id"])  # Gemini is current
         assert named.status_code == 201, named.text
+        # The answer names the profile the task records, so the plugin can
+        # keep it even when it never gets to query the task (cancel at once).
+        assert named.json()["profile"] == {"id": tested["id"], "name": "DeepSeek"}
         assert service.status(named.json()["task_id"])["profile"] == {"id": tested["id"], "name": "DeepSeek"}
 
         assert _write(service, "POST", f"/profiles/{tested['id']}/apply").status_code == 200
         gemini_named = _submit(service, "gemini")
+        assert gemini_named.json()["profile"] == {"id": "gemini", "name": "Gemini"}
         assert service.status(gemini_named.json()["task_id"])["profile"] == {"id": "gemini", "name": "Gemini"}
         current = _submit(service)
+        assert current.json()["profile"] == {"id": tested["id"], "name": "DeepSeek"}
         assert service.status(current.json()["task_id"])["profile"]["id"] == tested["id"]
 
         refused = {
