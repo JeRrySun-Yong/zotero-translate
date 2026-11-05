@@ -131,9 +131,13 @@ test("a cancelling row says so, with the service's reason or the disconnection; 
 
 test("the submission notice says how many PDFs the service took, and why the others were skipped", () => {
   const skipped = ["B：该条目没有 PDF 附件", "C：已有未结束的翻译任务，本次提交已忽略"];
-  assert.deepEqual(core.submissionNotice({ submitted: 3, skipped: [] }), { headline: "已提交 3 篇", lines: [] });
-  assert.deepEqual(core.submissionNotice({ submitted: 1, skipped }), { headline: "已提交 1 篇", lines: skipped });
-  assert.deepEqual(core.submissionNotice({ submitted: 0, skipped }), { headline: "没有提交", lines: skipped });
+  assert.deepEqual(core.submissionNotice({ submitted: ["A", "D", "E"], skipped: [] }), {
+    headline: "已提交 3 篇",
+    titles: ["A", "D", "E"],
+    reasons: [],
+  });
+  assert.deepEqual(core.submissionNotice({ submitted: ["A"], skipped }), { headline: "已提交 1 篇", titles: ["A"], reasons: skipped });
+  assert.deepEqual(core.submissionNotice({ submitted: [], skipped }), { headline: "没有提交", titles: [], reasons: skipped });
   // Uploads that failed have their own failure notices: nothing more to say.
-  assert.equal(core.submissionNotice({ submitted: 0, skipped: [] }), null);
+  assert.equal(core.submissionNotice({ submitted: [], skipped: [] }), null);
 });

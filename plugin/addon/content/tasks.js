@@ -2,12 +2,13 @@
  * "取消" button on rows that can be cancelled (no confirmation), a "重试"
  * button on failed and cancelled rows, a "继续挂回" button on rows whose
  * attaching failed, "打开译文", "打开双语" and "在库中显示" on rows whose
- * PDFs are attached, and the notices of the latest
+ * PDFs are attached, "清除已结束" (removes the done, failed and cancelled
+ * rows; enabled while there are any), and the notices of the latest
  * submission. Zotero's include.js, loaded before this script, defines `Zotero`. */
 var { lifecycle } = Zotero.ZoteroTranslate;
 const XHTML = "http://www.w3.org/1999/xhtml";
-// Task key -> <tr>. Tasks are only ever appended, so rows are updated in
-// place; a redraw never replaces a button while it is being clicked.
+// Task key -> <tr>. Tasks are only ever appended or removed ("清除已结束"),
+// so rows are updated in place; a redraw never replaces a button while it is being clicked.
 const shownRows = new Map();
 // Task key -> the row's results ({mono, dual} attachment IDs) at the last redraw.
 const shownResults = new Map();
@@ -52,6 +53,15 @@ function rowElement(key) {
 
 function render() {
   const rows = lifecycle.rows();
+  const keys = new Set(rows.map((row) => row.key));
+  for (const [key, tr] of shownRows) {
+    if (!keys.has(key)) {
+      tr.remove();
+      shownRows.delete(key);
+      shownResults.delete(key);
+    }
+  }
+  document.getElementById("zotero-translate-clear-ended").disabled = !rows.some((row) => row.ended);
   for (const row of rows) {
     const tr = rowElement(row.key);
     [row.title, row.stage, row.percent, row.status].forEach((text, i) => {
@@ -80,6 +90,7 @@ function render() {
 }
 
 window.addEventListener("load", () => {
+  document.getElementById("zotero-translate-clear-ended").addEventListener("click", () => lifecycle.clearEnded());
   lifecycle.listeners.add(render);
   render();
 });

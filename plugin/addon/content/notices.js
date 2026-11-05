@@ -1,5 +1,5 @@
-/* The notices of ended tasks still to be seen (the bottom-right notices of
- * zotero-translate.js), without Zotero.
+/* The notices still to be seen (the bottom-right notices of
+ * zotero-translate.js: of ended tasks, and of a submission), without Zotero.
  *
  * On macOS a notice window goes behind the main window when it opens while
  * Zotero is in the background, and again whenever Zotero comes back to the
@@ -17,7 +17,8 @@
  * - isActive(): whether a main window is open and Zotero is the active application;
  * - open(payload, dismissed): open the notice's window in the main window;
  *   returns {parent (that main window), raise(), close()}; the window calls
- *   dismissed() when the user clicks it.
+ *   dismissed() when the user clicks it, or when it closes by itself (the
+ *   submission notice).
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript, which
  * defines ZoteroTranslateNotices in the plugin scope; Node loads it with

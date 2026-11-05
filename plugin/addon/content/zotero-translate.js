@@ -1,5 +1,7 @@
 /* The translation plugin inside Zotero: the "翻译为中文" item menu entry,
- * the "翻译任务" window, the notice when a task is done or fails (with
+ * the "翻译任务" window (from the item menu and the Tools menu), the notice
+ * "已提交 N 篇" after a submission (a click opens the task window), the
+ * notice when a task is done or fails (with
  * "打开译文", "打开双语" and "在库中显示", also on done rows of the task
  * window), and the Zotero side of the task lifecycle
  * (lifecycle.js): reading the source PDF, temporary files for the downloaded
@@ -24,7 +26,10 @@ var ZoteroTranslate = {
   TASK_WINDOW_URL: "chrome://zotero-translate/content/tasks.xhtml",
   TASK_WINDOW_TYPE: "zotero-translate:tasks",
   ITEM_MENU_ID: "zotero-translate-itemmenu",
+  ITEM_TASKS_MENU_ID: "zotero-translate-itemmenu-tasks",
   TOOLS_MENU_ID: "zotero-translate-toolsmenu",
+  // The submission notice closes by itself after this long (not while the pointer is over it).
+  SUBMISSION_NOTICE_MS: 8000,
 
   // The task lifecycle; the task window reads its rows, notices and listeners.
   lifecycle: null,
@@ -99,12 +104,17 @@ var ZoteroTranslate = {
 
   addToWindow(window) {
     const doc = window.document;
+    const itemPopup = doc.getElementById("zotero-itemmenu");
     const itemMenu = doc.createXULElement("menuitem");
     itemMenu.id = this.ITEM_MENU_ID;
     itemMenu.setAttribute("label", "翻译为中文");
     itemMenu.addEventListener("command", () => this.translateSelected(window));
-    const itemPopup = doc.getElementById("zotero-itemmenu");
-    itemPopup.append(itemMenu);
+    // "翻译任务" in the item menu too, always shown, so the task window is one right-click away.
+    const itemTasksMenu = doc.createXULElement("menuitem");
+    itemTasksMenu.id = this.ITEM_TASKS_MENU_ID;
+    itemTasksMenu.setAttribute("label", "翻译任务");
+    itemTasksMenu.addEventListener("command", () => this.openTaskWindow(window));
+    itemPopup.append(itemMenu, itemTasksMenu);
     itemPopup.addEventListener("popupshowing", this._onItemMenuShowing);
 
     const toolsMenu = doc.createXULElement("menuitem");
@@ -127,6 +137,7 @@ var ZoteroTranslate = {
     const doc = window.document;
     doc.getElementById("zotero-itemmenu")?.removeEventListener("popupshowing", this._onItemMenuShowing);
     doc.getElementById(this.ITEM_MENU_ID)?.remove();
+    doc.getElementById(this.ITEM_TASKS_MENU_ID)?.remove();
     doc.getElementById(this.TOOLS_MENU_ID)?.remove();
   },
 
@@ -139,25 +150,35 @@ var ZoteroTranslate = {
     menu.hidden = !items.some((item) => item.isRegularItem() || ZoteroTranslate._asSource(item));
   },
 
-  /** Submit every selected item, one after another; the service runs them in turn. */
+  /** Submit every selected item, one after another; the service runs them in
+   *  turn. The task window does not open (the main window keeps the focus):
+   *  once all are uploaded, the submission notice says "已提交 N 篇" (and why
+   *  any were skipped); a click on it opens the task window. */
   async translateSelected(window) {
     this.lifecycle.clearNotices();
-    this.openTaskWindow(window);
+    const submitted = [];
     for (const item of window.ZoteroPane.getSelectedItems()) {
-      await this.submit(item);
+      const task = await this.submit(item);
+      if (task && task.taskId) {
+        submitted.push(task.title);
+      }
+    }
+    const notice = ZoteroTranslateCore.submissionNotice({ submitted, skipped: this.lifecycle.notices });
+    if (notice) {
+      this.notices.announce({ outcome: "submitted", ...notice });
     }
   },
 
   /** Submit the item's source PDF, unless the item has no PDF; the lifecycle
-   *  skips a PDF that already has an unfinished task. */
+   *  skips a PDF that already has an unfinished task. Returns the new task, or null. */
   async submit(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
       this.lifecycle.notice(`${item.getDisplayTitle()}：该条目没有 PDF 附件`);
-      return;
+      return null;
     }
     const parent = source.parentItem; // null for a standalone PDF
-    await this.lifecycle.submit({
+    return this.lifecycle.submit({
       sourceItemID: source.id,
       itemID: parent ? parent.id : null,
       title: (parent || source).getDisplayTitle(),
@@ -312,7 +333,11 @@ var ZoteroTranslate = {
 
   /** Open a notice's window in the main window (for notices.js): {parent,
    *  raise(), close()}. A click on it calls `dismissed` and closes it. */
-  _openNotice({ outcome, row }, dismissed) {
+  _openNotice(payload, dismissed) {
+    if (payload.outcome === "submitted") {
+      return this._openSubmissionNotice(payload, dismissed);
+    }
+    const { outcome, row } = payload;
     const done = outcome === "done";
     const parent = Zotero.getMainWindow();
     const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
@@ -358,6 +383,69 @@ var ZoteroTranslate = {
       doc.addEventListener("click", () => {
         dismissed();
         notice.close();
+      });
+    });
+    return {
+      parent,
+      raise: () => window?.focus(),
+      close: () => {
+        closed = true;
+        notice.close();
+      },
+    };
+  },
+
+  /** The submission notice (core.js submissionNotice): the headline
+   *  ("已提交 N 篇"), the titles taken, why others were skipped, and
+   *  "查看翻译任务". A click anywhere on it opens the task window. Unlike
+   *  the notices of ended tasks it closes by itself after
+   *  SUBMISSION_NOTICE_MS (Zotero keeps it open while the pointer is over
+   *  it), and is then forgotten (`dismissed`). */
+  _openSubmissionNotice({ headline, titles, reasons }, dismissed) {
+    const parent = Zotero.getMainWindow();
+    const notice = new Zotero.ProgressWindow({ window: parent, closeOnClick: false });
+    let window = null; // once loaded
+    let closed = false;
+    notice.changeHeadline(headline);
+    const lines = [
+      ...titles.map((title) => new notice.ItemProgress("attachmentPDF", title)),
+      ...reasons.map((reason) => new notice.ItemProgress(null, reason)),
+    ];
+    for (const line of lines) {
+      line.setProgress(100);
+    }
+    notice.show();
+    notice.startCloseTimer(this.SUBMISSION_NOTICE_MS);
+    this._noticeDocument(lines[0]).then((doc) => {
+      if (!doc || closed) {
+        return;
+      }
+      window = doc.defaultView;
+      const link = doc.createXULElement("label");
+      link.setAttribute("value", "查看翻译任务");
+      link.setAttribute("class", "zotero-text-link");
+      link.setAttribute("role", "link");
+      link.dataset.action = "openTaskWindow";
+      Object.assign(link.style, { color: "LinkText", textDecoration: "underline", cursor: "pointer" });
+      const box = doc.createXULElement("hbox");
+      box.setAttribute("class", "zotero-progress-item-hbox");
+      box.append(link);
+      doc.getElementById("zotero-progress-text-box").append(box);
+      window.sizeToContent();
+      Zotero.ProgressWindowSet.tile(window);
+      window.addEventListener("unload", () => {
+        if (!closed) {
+          dismissed(); // closed by its timer, or by Zotero with the main window
+        }
+      });
+      doc.addEventListener("click", () => {
+        dismissed();
+        closed = true;
+        notice.close();
+        const main = parent && !parent.closed ? parent : Zotero.getMainWindow();
+        if (main) {
+          this.openTaskWindow(main);
+        }
       });
     });
     return {
