@@ -33,12 +33,14 @@
  * generation and task ID; so an old task's answers never change the new one.
  *
  * submitBatch() asks before translating a paper that already has a
- * translation output (the source's `translated`, set by the plugin from the
- * item's attachments): the paper is not submitted; the batch's submission
- * notice counts it among the skipped, with the reason, and a second notice
- * (outcome "resubmit", with `keys`) asks "再翻译一次？". resubmit(keys)
- * submits the papers that notice listed, then announces their own
- * submission notice. The ask is never repeated automatically: without a
+ * translation output (the source's `translated`, set by the plugin: a
+ * translation output among a regular item's attachments, or for a standalone
+ * PDF, whose outputs have no link back, a task of this session with both
+ * outputs attached, wasTranslated()): the paper is not submitted; the batch's
+ * submission notice counts it among the skipped, with the reason, and a
+ * second notice (outcome "resubmit", with `keys`) asks "再翻译一次？".
+ * resubmit(keys) submits the papers that notice listed, then announces their
+ * own submission notice. The ask is never repeated automatically: without a
  * click nothing is submitted.
  *
  * Attaching handles the two PDFs one after the other, each in this order:
@@ -471,6 +473,20 @@ var ZoteroTranslateLifecycle = (() => {
       rows() {
         const now = clock.now();
         return lifecycle.tasks.map((task) => rowOf(task, now));
+      },
+
+      /** Whether a task of this source PDF has already attached both
+       *  outputs: for a regular item that shows in its attachments, but a
+       *  standalone PDF's outputs are standalone attachments with no link
+       *  back, so its task record is the sign that it was translated. The
+       *  records last for the Zotero session only: ended tasks are not
+       *  saved, and "清除已结束" removes them; after that a standalone PDF
+       *  is submitted again without the ask. */
+      wasTranslated(sourceItemID) {
+        return lifecycle.tasks.some(
+          (task) =>
+            task.sourceItemID === sourceItemID && Core.OUTPUTS.every((output) => task.attached?.[output.file] != null),
+        );
       },
     };
 

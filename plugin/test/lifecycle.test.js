@@ -2104,3 +2104,30 @@ test("再翻译一次 does nothing after the plugin stopped or for a key never a
   await env.lifecycle.resubmit([1]); // already used: no key left
   assert.equal(env.requests.length, before);
 });
+
+test("a standalone PDF whose task attached both outputs counts as translated: submitting it again asks first", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+
+  await env.lifecycle.submit(standalone);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.equal(env.lifecycle.wasTranslated(30), true);
+  assert.equal(env.lifecycle.wasTranslated(31), false);
+
+  // The next submission carries what the plugin tells about the source: the
+  // task record, its outputs having no link back to a standalone PDF.
+  const again = { ...standalone, translated: env.lifecycle.wasTranslated(30) };
+  await env.lifecycle.submitBatch([again], asSource);
+  assert.deepEqual(env.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+  assert.equal(env.requests.filter((request) => request === UPLOAD).length, 1); // no second upload
+  assert.equal(env.lifecycle.tasks.length, 1);
+
+  // The record lasts for this Zotero session only: 清除已结束 removes it (and
+  // ended tasks are not saved for restarts), so after that a standalone PDF
+  // is submitted again without the ask.
+  env.lifecycle.clearEnded();
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+});
