@@ -18,16 +18,20 @@ writes that concept's English spelling; a basic term whose spelling
 contains a key concept's spelling keeps that spelling in its Chinese
 rendering.
 
-After the source check, a basic term with a spelling that at least
-``PROMOTION_THRESHOLD`` key concepts contain becomes a key concept
-(promotion), in its place in the list, before the limit; spellings that
-end with "." (abbreviations such as "Ref.") take no part. A promoted key
-concept has no gloss: when promoted terms remain after the limit, one more
-request, with the dossier and the term list but not the full text, writes
-their glosses and rewrites the glosses and renderings that mention them.
-When that request fails for good, the promoted terms stay without a gloss
-and the task goes on; a key concept without a gloss gets no first-mention
-gloss and no gloss check.
+After the source check, a basic term whose spelling is the head (the final
+words) of the spelling of at least ``PROMOTION_THRESHOLD`` key concepts
+becomes a key concept (promotion), in its place in the list, before the
+limit; spellings that end with "." (abbreviations such as "Ref.") take no
+part. A basic term that only appears inside longer key concept names, not
+as their head, is not promoted: "harness" heads "meta-harness" and
+"DesignHarness", while "reference" only appears inside
+"multi-reference image generation" and heads one name (M4 ticket 15,
+from ticket 14). A promoted key concept has no gloss: when promoted terms
+remain after the limit, one more request, with the dossier and the term
+list but not the full text, writes their glosses and rewrites the glosses
+and renderings that mention them. When that request fails for good, the
+promoted terms stay without a gloss and the task goes on; a key concept
+without a gloss gets no first-mention gloss and no gloss check.
 
 "Contains" always means as whole words: both spellings are split into
 lower-cased tokens at non-alphanumeric characters and at camel-case
@@ -389,11 +393,13 @@ def check_against_source(entries: list[dict], full_text: str) -> TermList:
 
 
 def promote_basic_terms(term_list: TermList) -> TermList:
-    """Make a basic term a key concept when ``PROMOTION_THRESHOLD`` key concepts contain it.
+    """Make a basic term a key concept when it heads ``PROMOTION_THRESHOLD`` key concepts.
 
-    A key concept contains the basic term when one of its spellings contains
-    one of the basic term's spellings as whole words; spellings that end
-    with "." take no part. The promoted entry keeps its place, stays in
+    A key concept contains the basic term when one of its spellings ends
+    with one of the basic term's spellings as whole words; spellings that
+    end with "." take no part. A term that only appears inside longer names
+    (``reference`` in ``multi-reference image generation``) is not the head
+    and is not promoted. The promoted entry keeps its place, stays in
     English and has no gloss; its former Chinese rendering is only reported.
     """
     key_concepts = [t for t in term_list.terms if t["category"] == KEY_CONCEPT]
@@ -403,7 +409,7 @@ def promote_basic_terms(term_list: TermList) -> TermList:
             containing = [
                 concept["english"]
                 for concept in key_concepts
-                if contains_words(_matching(concept["english"]), _matching(entry["english"]))
+                if is_head(_matching(concept["english"]), _matching(entry["english"]))
             ]
             if len(containing) >= PROMOTION_THRESHOLD:
                 promoted.append(
@@ -778,6 +784,22 @@ def contains_words(outer: list[str], inner: list[str]) -> bool:
             if n and any(
                 outer_tokens[k : k + n] == inner_tokens for k in range(len(outer_tokens) - n + 1)
             ):
+                return True
+    return False
+
+
+def is_head(outer: list[str], inner: list[str]) -> bool:
+    """Whether a spelling of ``inner`` ends a spelling of ``outer``: its head.
+
+    In "meta-harness" and "DesignHarness" the head is harness; in
+    "multi-reference image generation" it is generation.
+    """
+    for o in outer:
+        outer_tokens = word_tokens(o)
+        for i in inner:
+            inner_tokens = word_tokens(i)
+            n = len(inner_tokens)
+            if n and outer_tokens[-n:] == inner_tokens:
                 return True
     return False
 

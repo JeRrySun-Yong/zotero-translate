@@ -2,11 +2,13 @@
 
 Ticket 20 (spec 5 "基础术语升级" and "释义补写请求"):
 
-- After the source check and before the 20 limit, a basic term with a
-  spelling that the spellings of at least 2 key concepts contain as whole
-  words becomes a key concept, in its place; a spelling that ends with "."
-  takes no part. The task report lists each promotion with the key concepts
-  that contain it.
+- After the source check and before the 20 limit, a basic term that is the
+  head (the final words) of the spelling of at least 2 key concepts becomes
+  a key concept, in its place; a spelling that ends with "." takes no part.
+  A basic term that only appears inside longer key concept names is not
+  promoted (M4 ticket 15, from ticket 14: ``reference`` in
+  ``multi-reference image generation``). The task report lists each
+  promotion with the key concepts it heads.
 - When promoted terms remain, one more request with the dossier and the term
   list, but not the full text, writes their glosses and rewrites the glosses
   and basic term renderings that mention them.
@@ -19,6 +21,7 @@ import json
 
 import pytest
 
+from tests.conftest import FIXTURES
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FAKE_DOSSIER
@@ -26,6 +29,8 @@ from tests.fake_model import FakeModel
 from tests.fake_model import promoted_glosses_request
 from tests.test_term_list import glossary_rows
 from tests.test_term_list import term
+from zotero_translate.terms import TermList
+from zotero_translate.terms import promote_basic_terms
 
 META_GLOSS = "跨任务改进外围程序的优化系统"
 REWRITTEN_META_GLOSS = "跨任务改进 harness 的优化系统"
@@ -37,7 +42,7 @@ MODEL_TERMS = {
         term(["AutoDesign"], "key_concept", gloss_zh="自动设计海报的系统"),
         term(["meta-harness", "Meta-Harness"], "key_concept", gloss_zh=META_GLOSS),
         term(["DesignHarness"], "key_concept", gloss_zh="面向设计任务的外围程序"),
-        # Contained in exactly 2 key concepts, meta-harness and DesignHarness (camel case): promoted.
+        # Head of exactly 2 key concepts, meta-harness and DesignHarness (camel case): promoted.
         term(["harness"], "basic_term", chinese="测试支架"),
         # Contains harness: its rendering is rewritten.
         term(["harness system"], "basic_term", chinese="外围程序系统"),
@@ -114,6 +119,77 @@ def test_a_basic_term_contained_in_one_key_concept_is_not_promoted(rewritten):
 
 def test_a_spelling_that_ends_with_a_full_stop_takes_no_part(rewritten):
     assert rewritten["terms"]["system."]["category"] == "basic_term"
+
+
+def checked(english, category, target=None):
+    """A term list entry after the source check."""
+    return {"english": english, "category": category, "target": target or english[0], "gloss_zh": None}
+
+
+def promoted_spellings(entries) -> list[str]:
+    promoted = promote_basic_terms(TermList(terms=entries, discarded=[]))
+    return [p["english"][0] for p in promoted.promoted]
+
+
+def test_a_basic_term_that_heads_two_key_concepts_is_promoted():
+    entries = [
+        checked(["meta-harness"], "key_concept"),
+        checked(["DesignHarness"], "key_concept"),
+        checked(["harness"], "basic_term", "测试支架"),
+    ]
+    assert promoted_spellings(entries) == ["harness"]
+
+
+# AutoRef page 1 (ticket 14): ``reference`` is contained in both key concepts
+# but heads only ``multi-reference``; in ``multi-reference image generation``
+# the head is ``generation``.
+REFERENCE_ENTRIES = [
+    checked(["multi-reference image generation"], "key_concept"),
+    checked(["multi-reference"], "key_concept"),
+    checked(["reference", "references", "reference images"], "basic_term", "参考图像"),
+]
+
+
+def test_a_basic_term_inside_longer_key_concept_names_is_not_promoted():
+    assert promoted_spellings(REFERENCE_ENTRIES) == []
+
+
+def test_a_basic_term_that_heads_one_key_concept_and_sits_inside_another_is_not_promoted():
+    entries = [
+        checked(["reference-grounded prompting"], "key_concept"),
+        checked(["multi-reference"], "key_concept"),
+        checked(["reference"], "basic_term", "参考图像"),
+    ]
+    assert promoted_spellings(entries) == []
+
+
+REFERENCE_TERMS = {
+    "terms": [
+        term(["multi-reference image generation"], "key_concept", gloss_zh="用多个参考图合成图像的任务"),
+        term(["multi-reference"], "key_concept", gloss_zh="含有多个参考图像的生成设置"),
+        term(["reference", "references", "reference images"], "basic_term", chinese="参考图像"),
+    ]
+}
+
+
+def test_a_basic_term_that_is_not_the_head_of_two_key_concepts_stays_basic_in_a_task(
+    tmp_path_factory,
+):
+    with FakeModel() as model:
+        model.respond("term_list", lambda body: json.dumps(REFERENCE_TERMS, ensure_ascii=False))
+        service = launch_service(model, tmp_path_factory.mktemp("reference"))
+        try:
+            task_id = service.submit(FIXTURES / "autoref-p1.pdf")
+            final = service.wait(task_id)
+            saved = service.http.get(f"/tasks/{task_id}/files/terms").json()["terms"]
+            report = service.report(task_id)
+        finally:
+            stop_service(service)
+    assert final["state"] == "succeeded", final["error"]
+    reference = next(t for t in saved if t["english"][0] == "reference")
+    assert reference["category"] == "basic_term"
+    assert reference["target"] == "参考图像"
+    assert report["terms"]["promoted"] == []
 
 
 def test_the_promoted_glosses_request_has_the_dossier_and_the_term_list_but_not_the_full_text(
