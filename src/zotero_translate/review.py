@@ -13,6 +13,10 @@ answer has the same JSON structure as the draft. Each paragraph then gets:
 4. when the retries are used up, the paragraph keeps its source text and is
    recorded in ``KeptSource`` with its page and reason.
 
+A blank review text fails the checks (译文为空) and gives way to the draft;
+a blank or non-text draft is not sent to the review at all: the engine
+redoes it alone with its simple one-paragraph prompt (M4 ticket 15).
+
 A review answer from the response cache is judged the same way. A review
 request that gets no answer at all (network errors, HTTP errors, timeouts)
 fails like a translation request: it is raised to the engine as

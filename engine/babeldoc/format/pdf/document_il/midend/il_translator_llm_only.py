@@ -911,6 +911,15 @@ class ILTranslatorLLMOnly:
                     # Clean up any excessive punctuation in the translated text
                     translated_text = re.sub(r"[. 。…，]{20,}", ".", output)
 
+                    # A blank answer would clear the paragraph, and a short
+                    # input's blank answer can pass the length check: it
+                    # fails here and is redone alone (M4 ticket 15).
+                    if not translated_text.strip():
+                        inputs[id_][4].set_error_message("Translation result is empty.")
+                        logger.warning("Translation result is empty, fallback.")
+                        inputs[id_][4].set_placeholder_full_match()
+                        continue
+
                     # Get the original input for this translation
                     translate_input = inputs[id_][1]
                     llm_translate_tracker = inputs[id_][4]
@@ -1062,14 +1071,14 @@ class ILTranslatorLLMOnly:
     ) -> dict:
         """Review the batch's drafts; return {id: final text, or None to keep the source}.
 
-        Drafts that are not strings are left to the checks below, which
-        redo them one by one.
+        Drafts that are not strings, or are blank, are left to the checks
+        below, which redo them one by one.
         """
         items = []
         for obj in json_format_input:
             id_ = obj["id"]
             draft = translation_results.get(id_)
-            if not isinstance(draft, str):
+            if not isinstance(draft, str) or not draft.strip():
                 continue
             page = batch_paragraph.pages[should_translate_paragraph[id_]]
             item = {
