@@ -75,3 +75,13 @@ def test_a_blank_batch_translation_is_redone_alone_with_the_simple_prompt(tmp_pa
     for request in run["model"].requests_of("review"):
         assert '"draft": "   "' not in request.prompt
 
+
+def test_a_null_draft_is_redone_alone_not_taken_for_a_kept_source(tmp_path_factory):
+    # The review has no draft to judge, so it keeps nothing: the null is the
+    # batch's failure, and the paragraph is redone alone like any other.
+    run = run_excerpt(tmp_path_factory, "null-draft", answer_short_label_with(None))
+
+    assert run["final"]["state"] == "succeeded", run["final"]["error"]
+    assert short_label_redos(run["model"]), "the null draft was not redone alone"
+    assert PSEUDO_PREFIX + SHORT_LABEL.replace(" ", "") in run["mono"]
+    assert run["report"]["kept_source_paragraphs"] == []

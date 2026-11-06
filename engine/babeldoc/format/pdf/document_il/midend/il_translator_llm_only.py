@@ -875,10 +875,11 @@ class ILTranslatorLLMOnly:
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_output(llm_output)
             translation_results = self._parse_llm_output(llm_output, len(inputs))
+            review_kept: set = set()
             if self.translation_config.batch_reviewer is not None:
                 if self.il_translator.has_request_error:
                     return
-                translation_results = self._review(
+                translation_results, review_kept = self._review(
                     translation_results,
                     inputs,
                     json_format_input,
@@ -889,8 +890,10 @@ class ILTranslatorLLMOnly:
 
             for id_, output in translation_results.items():
                 should_fallback = True
-                if output is None:
-                    # The review kept this paragraph's source text.
+                if output is None and id_ in review_kept:
+                    # The review kept this paragraph's source text and
+                    # recorded it. Any other null is a null draft: it is
+                    # redone alone below (M4 ticket 15).
                     should_fallback = False
                     self.total_count += 1
                     if pbar:
@@ -1068,11 +1071,13 @@ class ILTranslatorLLMOnly:
         batch_paragraph: BatchParagraph,
         should_translate_paragraph: list[int],
         batch_text: str,
-    ) -> dict:
-        """Review the batch's drafts; return {id: final text, or None to keep the source}.
+    ) -> tuple[dict, set]:
+        """Review the batch's drafts.
 
-        Drafts that are not strings, or are blank, are left to the checks
-        below, which redo them one by one.
+        Return {id: final text, or None to keep the source} and the ids whose
+        source the review kept (and recorded). Drafts that are not strings,
+        null included, or are blank, are left to the checks below, which
+        redo them one by one (M4 ticket 15).
         """
         items = []
         for obj in json_format_input:
@@ -1092,11 +1097,12 @@ class ILTranslatorLLMOnly:
                     item[field] = obj[field]
             items.append(item)
         if not items:
-            return translation_results
+            return translation_results, set()
         final = self.translation_config.batch_reviewer(
             items, self._active_glossary_entries(batch_text)
         )
-        return {**translation_results, **final}
+        kept = {id_ for id_, text in final.items() if text is None}
+        return {**translation_results, **final}, kept
 
     def _active_glossary_entries(self, text: str) -> list[tuple[str, str]]:
         entries: list[tuple[str, str]] = []
