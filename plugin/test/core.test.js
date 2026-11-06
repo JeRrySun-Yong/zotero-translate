@@ -223,6 +223,24 @@ test("the switch-model submenu lists the tested profiles as radio items, the cur
   assert.deepEqual(core.modelMenuItems({ ...listing, current: "gemini" }).map((item) => item.checked), [true, false]);
 });
 
+// M5 ticket 02: the built-in profile's name is the service's (ZT_PROFILE_NAME in
+// model.env, default Gemini); the plugin takes every name from the listing.
+test("the menus show the name the service gives the built-in profile, whatever it is", () => {
+  const listing = {
+    current: "gemini",
+    profiles: [
+      { id: "gemini", name: "GPT-5 Mini", builtin: true, tested: true },
+      { id: "0123456789ab", name: "DeepSeek", builtin: false, tested: true },
+    ],
+  };
+  assert.deepEqual(core.modelMenuItems(listing), [
+    { id: "gemini", label: "GPT-5 Mini", checked: true, disabled: false },
+    { id: "0123456789ab", label: "DeepSeek", checked: false, disabled: false },
+  ]);
+  const current = listing.profiles.find((profile) => profile.id === listing.current);
+  assert.equal(core.itemMenuLabel(current.name), "翻译为中文（GPT-5 Mini）");
+});
+
 test("with the service unreachable the switch-model submenu has only a grey item saying so", () => {
   assert.deepEqual(core.modelMenuItems(null), [
     { id: null, label: "翻译服务连不上", checked: false, disabled: true },
