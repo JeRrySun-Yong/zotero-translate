@@ -68,26 +68,67 @@ def test_the_only_zotero_setting_is_the_service_address(xpi):
 SETTINGS_PAGE = {"content/profiles.js", "content/preferences.js", "content/preferences.xhtml"}
 
 
+FORBIDDEN = re.compile(
+    r"OPENAI_|AI_DEFAULT_MODEL|ZT_CONCURRENCY|Bearer|sk-[A-Za-z0-9]|gemini|temperature|reasoning",
+    re.IGNORECASE,
+)
+
 # The one place the package may name Gemini: the settings page's example
 # profile name says DeepSeek Fast's quality is below Gemini's (user decision
 # 2026-11-05, M4 tickets 06 and 14). It is a note for the user, not a model
-# name or a translation parameter; only this exact phrase is let through.
+# name or a translation parameter.
 QUALITY_NOTE = "（质量低于 Gemini）"
 
 
+# Where it is let through: the placeholder of the name input, bound to the
+# input by its id, in the settings page, once. Anywhere else (another file,
+# element or attribute, or a second copy) the scan still sees it.
+QUALITY_NOTE_FILE = "content/preferences.xhtml"
+QUALITY_NOTE_PLACE = f'id="zotero-translate-name" type="text" placeholder="例如 DeepSeek Fast{QUALITY_NOTE}"'
+
+
+def scannable(name: str, text: str) -> str:
+    """The text of package file ``name`` that the forbidden-word scan reads:
+    the file as it is, but for the quality note in its one allowed place."""
+    if name != QUALITY_NOTE_FILE:
+        return text
+    return text.replace(QUALITY_NOTE_PLACE, QUALITY_NOTE_PLACE.replace(QUALITY_NOTE, ""), 1)
+
+
 def test_package_holds_no_credentials_or_translation_parameters(xpi):
-    forbidden = re.compile(
-        r"OPENAI_|AI_DEFAULT_MODEL|ZT_CONCURRENCY|Bearer|sk-[A-Za-z0-9]|gemini|temperature|reasoning",
-        re.IGNORECASE,
-    )
-    assert forbidden.search(QUALITY_NOTE.replace("（质量低于 ", "")), "Gemini outside the note must still fail"
     profile_fields = re.compile(r"api[_-]?key|concurrency", re.IGNORECASE)
     assert SETTINGS_PAGE <= set(xpi.namelist())
     for name in xpi.namelist():
-        text = xpi.read(name).decode("utf-8", "replace").replace(QUALITY_NOTE, "")
-        assert not forbidden.search(text), name
+        text = xpi.read(name).decode("utf-8", "replace")
+        assert not FORBIDDEN.search(scannable(name, text)), name
         if name not in SETTINGS_PAGE:
             assert not profile_fields.search(text), name
+
+
+NAME_INPUT = '<html:input id="zotero-translate-name" type="text" placeholder="例如 DeepSeek Fast（质量低于 Gemini）"/>'
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("content/core.js", 'const label = "DeepSeek Fast（质量低于 Gemini）";'),
+        ("content/preferences.js", 'input.placeholder = "例如 DeepSeek Fast（质量低于 Gemini）";'),
+        ("content/preferences.xhtml",
+         '<html:input id="zotero-translate-model" type="text" placeholder="例如 DeepSeek Fast（质量低于 Gemini）"/>'),
+        ("content/preferences.xhtml",
+         '<html:input id="zotero-translate-name" type="text" title="（质量低于 Gemini）" placeholder="例如 DeepSeek Fast"/>'),
+        ("content/preferences.xhtml", "<html:p class=\"zt-note\">DeepSeek Fast（质量低于 Gemini）</html:p>"),
+        ("content/preferences.xhtml", NAME_INPUT + "\n" + NAME_INPUT),  # a second copy is not the one input
+    ],
+    ids=["other-js-file", "settings-script", "other-input", "other-attribute", "text-content", "second-copy"],
+)
+def test_quality_note_is_let_through_nowhere_else(name, text):
+    assert FORBIDDEN.search(scannable(name, text))
+
+
+def test_quality_note_is_let_through_in_the_name_inputs_placeholder():
+    page = f"<html:div>\n  {NAME_INPUT}\n</html:div>"
+    assert not FORBIDDEN.search(scannable("content/preferences.xhtml", page))
 
 
 def test_package_leaves_out_tests_and_dev_tools(xpi):
