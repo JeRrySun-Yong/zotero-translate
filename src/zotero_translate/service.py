@@ -201,7 +201,10 @@ pauses a submission after it took its model profile, before its task is
 saved (the file is ``<task_id>-0.paused``), and
 ``ZT_TEST_PAUSE_AFTER_PROFILE_COUNT`` pauses a profile's delete after it
 counted the unfinished tasks that use the profile, before it removes it
-(``<profile_id>-0.paused``). ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
+(``<profile_id>-0.paused``). ``ZT_TEST_SIGNAL_WAITING_FOR_PROFILE_LOCK`` names
+a directory where a submission or a delete that finds the profile lock taken
+creates ``<task_id or profile_id>-0.waiting`` before it waits (it is not
+paused by it), so that a test knows the request has reached the lock. ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
 while it exists, scanning for a task's processes fails, so reaping fails
 (``zotero_translate.processes``). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
@@ -276,6 +279,7 @@ PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
 PAUSE_AFTER_PROFILE_CHOSEN = "ZT_TEST_PAUSE_AFTER_PROFILE_CHOSEN"
 PAUSE_AFTER_PROFILE_COUNT = "ZT_TEST_PAUSE_AFTER_PROFILE_COUNT"
+SIGNAL_WAITING_FOR_PROFILE_LOCK = "ZT_TEST_SIGNAL_WAITING_FOR_PROFILE_LOCK"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 DOWNLOAD_DELAY_SETTING = "ZT_TEST_DOWNLOAD_DELAY_SECONDS"  # "<file>=<seconds>[,...]"
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -710,7 +714,7 @@ class TaskQueue:
         # One lock from taking the profile to the task being saved, so that a
         # delete of that profile either counts the task or finds the profile
         # taken by nobody (``ProfileStore``, module docstring; ticket 16).
-        with self.profiles.exclusive():
+        with self.profiles.exclusive(on_wait=lambda: _test_signal(SIGNAL_WAITING_FOR_PROFILE_LOCK, task_id)):
             profile_id, profile_name = self.profiles.for_submission(profile)
             _test_pause(PAUSE_AFTER_PROFILE_CHOSEN, task_id, 0)
             directory = self.tasks_dir / task_id
@@ -1271,6 +1275,13 @@ def _test_pause(setting: str, task_id: str, attempt: int) -> None:
         time.sleep(0.05)
 
 
+def _test_signal(setting: str, name: str) -> None:
+    """Test only: note that ``name`` is waiting, as ``<dir>/<name>-0.waiting`` (nothing waits for it to go)."""
+    directory = os.environ.get(setting)
+    if directory:
+        (Path(directory) / f"{name}-0.waiting").write_text(setting, encoding="utf-8")
+
+
 def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1332,7 +1343,8 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
                 if len(rest) == 1 and method == "PUT":
                     return self._json(200, store.update(rest[0], body))
                 if len(rest) == 1 and method == "DELETE":
-                    with store.exclusive():  # the count and the removal, ticket 16
+                    # The count and the removal, ticket 16.
+                    with store.exclusive(on_wait=lambda: _test_signal(SIGNAL_WAITING_FOR_PROFILE_LOCK, rest[0])):
                         users = queue.profile_users(rest[0])
                         _test_pause(PAUSE_AFTER_PROFILE_COUNT, rest[0], 0)
                         answer = store.delete(rest[0], users)

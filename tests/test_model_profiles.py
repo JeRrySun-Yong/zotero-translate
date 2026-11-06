@@ -587,6 +587,7 @@ def test_an_error_building_the_client_is_redacted(monkeypatch):
 
 PAUSE_AFTER_PROFILE_CHOSEN = "ZT_TEST_PAUSE_AFTER_PROFILE_CHOSEN"
 PAUSE_AFTER_PROFILE_COUNT = "ZT_TEST_PAUSE_AFTER_PROFILE_COUNT"
+SIGNAL_WAITING = "ZT_TEST_SIGNAL_WAITING_FOR_PROFILE_LOCK"
 PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"  # keeps a started task's worker from running the paper
 
 
@@ -610,14 +611,30 @@ def _in_thread(results: dict, name: str, call) -> threading.Thread:
 
 def _the_flag(directory, timeout: float = 60.0):
     """The one ``.paused`` file the service creates in ``directory`` at a pause point."""
+    return _first_of([directory], "*.paused", timeout)[1]
+
+
+def _first_of(directories, pattern: str, timeout: float = 60.0):
+    """``(directory, file)`` of the first file matching ``pattern`` to appear in any of ``directories``.
+
+    Nothing is guessed from timing: the wait ends when the service has written
+    the file, whichever way the race goes, or fails after ``timeout``.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        flags = list(directory.glob("*.paused"))
-        if flags:
-            [flag] = flags
-            return flag
+        for directory in directories:
+            files = list(directory.glob(pattern))
+            if files:
+                return directory, files[0]
         time.sleep(0.02)
-    raise AssertionError(f"no pause in {directory} after {timeout}s")
+    raise AssertionError(f"no {pattern} in {[d.name for d in directories]} after {timeout}s")
+
+
+def _release(*directories) -> None:
+    """End every pause in ``directories``: the requests held there go on."""
+    for directory in directories:
+        for flag in directory.glob("*.paused"):
+            flag.unlink(missing_ok=True)
 
 
 def _tested_and_applied(service, model) -> dict:
@@ -627,23 +644,47 @@ def _tested_and_applied(service, model) -> dict:
     return profile
 
 
+def _race(service, directories, first, second):
+    """Run ``first`` until it is held at its pause in ``directories['held']``, then ``second``
+    until it either waits for the profile lock (it has reached it: ``waiting``) or gets past
+    the contested point (its own pause in ``directories['passed']``: the lock is not there);
+    then let both go. Returns ``(results, where)``, ``where`` being "waiting" or "passed"."""
+    results = {}
+    holder = _in_thread(results, "first", first)
+    _the_flag(directories["held"])
+    contender = _in_thread(results, "second", second)
+    directory, _ = _first_of([directories["waiting"], directories["passed"]], "*.[wp]*")
+    where = "waiting" if directory == directories["waiting"] else "passed"
+    # Let both go; a pause a request meets later (the contender, once it has the lock, meets the
+    # same one) is ended as it appears.
+    deadline = time.monotonic() + 60
+    while (holder.is_alive() or contender.is_alive()) and time.monotonic() < deadline:
+        _release(directories["held"], directories["passed"])
+        time.sleep(0.02)
+    return results, where
+
+
 def test_a_delete_during_a_submission_that_holds_the_profile_is_refused(start_service, tmp_path):
-    chosen, held = tmp_path / "chosen", tmp_path / "held"
-    chosen.mkdir()
-    held.mkdir()
+    dirs = {name: tmp_path / name for name in ("held", "passed", "waiting", "worker")}
+    for directory in dirs.values():
+        directory.mkdir()
+    env = {
+        PAUSE_AFTER_PROFILE_CHOSEN: str(dirs["held"]),  # the submission has the profile; its task is not saved
+        PAUSE_AFTER_PROFILE_COUNT: str(dirs["passed"]),  # a delete that is not kept out counts and stops here
+        SIGNAL_WAITING: str(dirs["waiting"]),  # a delete kept out by the lock says so
+        PAUSE_AFTER_MARKER: str(dirs["worker"]),  # the worker never runs the paper
+    }
     with FakeModel() as model:
-        service = start_service(model, env={PAUSE_AFTER_PROFILE_CHOSEN: str(chosen), PAUSE_AFTER_MARKER: str(held)})
+        service = start_service(model, env=env)
         profile = _tested_and_applied(service, model)
-        results = {}
-        submit = _in_thread(results, "submit", lambda: _post_task(service))
-        flag = _the_flag(chosen)  # the submission has the profile; its task is not saved yet
-        delete = _in_thread(results, "delete", lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"))
-        # Without the lock the delete answers at once, with the task unseen; with it, it waits.
-        delete.join(timeout=2)
-        flag.unlink()
-        submit.join(timeout=30)
-        delete.join(timeout=30)
-        submitted, deleted = results["submit"], results["delete"]
+        results, where = _race(
+            service,
+            dirs,
+            lambda: _post_task(service),
+            lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"),
+        )
+        submitted, deleted = results["first"], results["second"]
+        assert where == "waiting", "the delete counted the tasks while the submission held the profile"
         assert not (submitted.status_code == 201 and deleted.status_code == 200), (submitted.text, deleted.text)
         assert (submitted.status_code, deleted.status_code) == (201, 409), (submitted.text, deleted.text)
         # The profile is still there for the task that recorded it.
@@ -652,22 +693,27 @@ def test_a_delete_during_a_submission_that_holds_the_profile_is_refused(start_se
 
 
 def test_a_submission_naming_a_profile_during_its_delete_is_refused(start_service, tmp_path):
-    counted, held = tmp_path / "counted", tmp_path / "held"
-    counted.mkdir()
-    held.mkdir()
+    dirs = {name: tmp_path / name for name in ("held", "passed", "waiting", "worker")}
+    for directory in dirs.values():
+        directory.mkdir()
+    env = {
+        PAUSE_AFTER_PROFILE_COUNT: str(dirs["held"]),  # the delete counted no task; the file is still there
+        PAUSE_AFTER_PROFILE_CHOSEN: str(dirs["passed"]),  # a submission that is not kept out has the profile and stops
+        SIGNAL_WAITING: str(dirs["waiting"]),  # a submission kept out by the lock says so
+        PAUSE_AFTER_MARKER: str(dirs["worker"]),
+    }
     with FakeModel() as model:
-        service = start_service(model, env={PAUSE_AFTER_PROFILE_COUNT: str(counted), PAUSE_AFTER_MARKER: str(held)})
+        service = start_service(model, env=env)
         profile = _create(service, model)
         assert _write(service, "POST", f"/profiles/{profile['id']}/test").json()["ok"]
-        results = {}
-        delete = _in_thread(results, "delete", lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"))
-        flag = _the_flag(counted)  # no task uses it, as the delete counted; the file is still there
-        submit = _in_thread(results, "submit", lambda: _post_task(service, profile["id"]))  # a retry names it
-        submit.join(timeout=2)
-        flag.unlink()
-        delete.join(timeout=30)
-        submit.join(timeout=30)
-        submitted, deleted = results["submit"], results["delete"]
+        results, where = _race(
+            service,
+            dirs,
+            lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"),
+            lambda: _post_task(service, profile["id"]),  # a retry names it
+        )
+        deleted, submitted = results["first"], results["second"]
+        assert where == "waiting", "the submission took the profile while the delete held it"
         assert not (submitted.status_code == 201 and deleted.status_code == 200), (submitted.text, deleted.text)
         assert (submitted.status_code, deleted.status_code) == (422, 200), (submitted.text, deleted.text)
         assert not (service.profiles_dir / f"{profile['id']}.env").exists()

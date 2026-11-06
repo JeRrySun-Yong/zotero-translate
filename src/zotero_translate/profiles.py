@@ -41,6 +41,7 @@ profile id, name and a reason, never a key.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -137,10 +138,20 @@ class ProfileStore:
         self._log = log
         self._lock = threading.RLock()
 
-    def exclusive(self):
-        """The store's lock, as a context manager (re-entrant: the store's own
-        methods take it too): see the module docstring."""
-        return self._lock
+    @contextlib.contextmanager
+    def exclusive(self, on_wait: Callable[[], None] | None = None):
+        """Hold the store's lock (re-entrant: the store's own methods take it
+        too); see the module docstring. ``on_wait`` runs, if given, when the
+        lock is taken by someone else, before waiting for it: a test's way to
+        see that a request has reached the lock."""
+        if not self._lock.acquire(blocking=False):
+            if on_wait is not None:
+                on_wait()
+            self._lock.acquire()
+        try:
+            yield
+        finally:
+            self._lock.release()
 
     # -- reading -------------------------------------------------------------
 
