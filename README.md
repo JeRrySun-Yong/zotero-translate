@@ -91,12 +91,10 @@ uv sync --frozen
 
 ```sh
 mkdir -p ~/.config/zotero-translate
-cd ~/.config/zotero-translate
-touch model.env argon.env
-chmod 600 model.env argon.env
-nano model.env      # 任何编辑器都行
-nano argon.env
-cd ~/zotero-translate
+touch ~/.config/zotero-translate/model.env ~/.config/zotero-translate/argon.env
+chmod 600 ~/.config/zotero-translate/model.env ~/.config/zotero-translate/argon.env
+nano ~/.config/zotero-translate/model.env      # 任何编辑器都行
+nano ~/.config/zotero-translate/argon.env
 ```
 
 文件每行写 `键=值`，两个文件格式相同。`#` 开头的整行是注释；值后面不能跟行内注释。
@@ -122,9 +120,9 @@ ZT_PROFILE_NAME=我的模型
 
 #### 配置模型
 
-**只有一个端点（最常见）。** 两个文件填同样的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`。程序把它们当作同一个端点：两个角色共用一份并发额度，大小取 `--concurrency`（`argon.env` 里的 `ZT_CONCURRENCY` 被忽略），也不会对冲。两个文件的 `AI_DEFAULT_MODEL` 可以相同，也可以让副模型用更强的那个。端点限流时，给 `serve` 加 `--concurrency 8` 这样的选项（写法见[开机自动启动](#35-开机自动启动)）。
+**只有一个端点（最常见）。** 两个文件填同样的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`。程序把它们当作同一个端点：两个角色共用一份并发额度，大小取 `--concurrency`（`argon.env` 里的 `ZT_CONCURRENCY` 被忽略），也不会对冲。两个文件的 `AI_DEFAULT_MODEL` 可以相同；副模型负责论文档案和术语清单，也可以让它用更强的模型。端点限流时，给 `serve` 加 `--concurrency 8` 这样的选项（写法见[开机自动启动](#35-开机自动启动)）。
 
-**两个端点。** 主模型用便宜快速的端点，副模型用更强的端点。此时开启“对冲”：主模型的一个翻译批次或审校请求发出 400 秒还没结束，就多发一份给副模型，用先通过校验的回答。`serve` 加 `--no-hedging` 关闭对冲，关闭后改为主模型连续 2 次超时才转发给副模型。
+**两个端点。** 两个文件填不同的地址或密钥，例如主模型用速度快的端点，副模型用另一个端点。此时开启“对冲”：主模型的一个翻译批次或审校请求发出 400 秒还没结束，就多发一份给副模型，用先通过校验的回答。`serve` 加 `--no-hedging` 关闭对冲，关闭后改为主模型连续 2 次超时才转发给副模型。
 
 **检查端点能不能用。** 内置配置没有“测试连接”按钮。拿不准端点或模型 ID 对不对，可以先在 Zotero 设置页（装好插件之后，见[使用](#44-设置页中文翻译)）新建一份同样地址的配置，点“测试连接”。
 
@@ -199,7 +197,7 @@ EOF
 plutil -lint ~/Library/LaunchAgents/local.zotero-translate.service.plist
 ```
 
-最后一行应打印 `…plist: OK`。要加选项（例如 `--concurrency 8`、`--no-hedging`、`--port 8921`），在 `ProgramArguments` 里 `argon.env` 那一行之后加 `<string>--concurrency</string>` 和 `<string>8</string>` 这样的成对条目，然后重新生成并重新载入。
+最后一行应打印 `…plist: OK`。要给 `serve` 加选项（例如 `--concurrency 8`、`--no-hedging`、`--port 8921`），用编辑器打开这个 plist，在 `ProgramArguments` 里 `argon.env` 那一行之后，每个词一行加成 `<string>--concurrency</string>`、`<string>8</string>` 这样的条目；改完再 `plutil -lint`，并按下面的说明先 `bootout` 再 `bootstrap`。
 
 安装、查看、重启、停用：
 
@@ -342,7 +340,7 @@ Zotero 设置里的“中文翻译”页，从上到下：
 **先看哪里。** 服务日志是 `~/Library/Logs/zotero-translate/service.log`（用 LaunchAgent 启动时）。它记录每次启动的 `{"url": …}`、启动错误、未处理的异常，和每个任务的事件：提交、开始、中断、重新排队、等待自动重跑、接受取消、已取消、成功、失败等，每个一行：
 
 ```
-2026-11-03T02:40:00-08:00 task=<任务号> attempt=1 event=失败 file="paper.pdf" reason="…"
+<时间> task=<任务号> attempt=1 event=失败 file="paper.pdf" reason="…"
 ```
 
 按原文件名找任务：`grep 'file="paper.pdf"' ~/Library/Logs/zotero-translate/service.log`。
@@ -410,7 +408,7 @@ curl -s http://127.0.0.1:8920/health
    rm ~/Library/LaunchAgents/local.zotero-translate.service.plist
    rm -r ~/Library/Logs/zotero-translate
    ```
-3. 删除数据：`rm -r ~/zotero-translate`（仓库和 `.venv`）、`rm -r "$HOME/Library/Application Support/zotero-translate"`（任务和缓存）、`rm -r ~/.config/zotero-translate`（环境文件和用户配置）、`rm -r ~/.cache/babeldoc`（运行资源）。
+3. 删除数据：`rm -r ~/zotero-translate`（你克隆仓库的目录，连同 `.venv`）、`rm -r "$HOME/Library/Application Support/zotero-translate"`（任务和缓存）、`rm -r ~/.config/zotero-translate`（环境文件和用户配置）、`rm -r ~/.cache/babeldoc`（运行资源）。
 
 插件还在 Zotero 的数据目录里留下 `zotero-translate/attachments.json`（记录哪些附件是译文），不删也没关系。
 
