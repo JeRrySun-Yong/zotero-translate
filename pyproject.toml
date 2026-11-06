@@ -6,6 +6,8 @@
 [project]
 name = "zotero-translate"
 version = "0.1.0"
+description = "Translate a paper from Zotero into a Chinese-only PDF and a bilingual side-by-side PDF."
+license = "AGPL-3.0-only"
 requires-python = "==3.12.*"
 dependencies = ["babeldoc", "httpx", "psutil", "pymupdf"]
 
