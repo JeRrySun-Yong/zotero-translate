@@ -84,6 +84,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
     relates: [],
     saved,
     routes,
+    serviceUrl: SERVICE, // the service address currently set; a test changes it
     missingSources: [],
     files: new Map(),
     steps: [],
@@ -112,7 +113,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
       return typeof route === "function" ? route(options) : route.clone();
     },
     clock: env.clock,
-    serviceUrl: () => SERVICE,
+    serviceUrl: () => env.serviceUrl,
     readSource: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
     attachTarget: async (task) => {
       if (task.itemID) {
@@ -355,6 +356,75 @@ test("a saved task's recorded profile survives a restart, and its 重试 names i
   assert.equal(env.lifecycle.rows()[0].profile, "DeepSeek");
   await env.lifecycle.retry(env.lifecycle.rows()[0].key);
   assert.equal(forms[0].get("profile"), PROFILE.id);
+});
+
+// ---- item 6 of ticket M4-16: 重试 goes to the service the task was submitted to ----
+
+const SERVICE_B = "http://127.0.0.1:8921";
+const UPLOAD_B = `POST ${SERVICE_B}/tasks`;
+
+test("重试 after the service address was changed goes to the original service, with the original profile", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2" });
+      },
+      [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+      [UPLOAD_B]: json(201, { task_id: "elsewhere" }), // must stay unused
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["失败：管线模型拒绝了请求（HTTP 400）"]);
+
+  env.serviceUrl = SERVICE_B; // the setting changes to another service
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.requests.filter((r) => r.startsWith("POST")), [UPLOAD, UPLOAD]);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+  assert.equal(env.lifecycle.tasks[0].serviceUrl, SERVICE);
+  assert.equal(env.lifecycle.tasks[0].taskId, "t2");
+
+  // The new task's queries go to the original service too (as before).
+  env.routes[QUERY("t2")] = status("running");
+  await env.clock.advance(2000);
+  assert.equal(env.requests.at(-1), QUERY("t2"));
+  assert.ok(!env.requests.some((r) => r.includes(SERVICE_B)));
+});
+
+test("a new submission goes to the service address currently set", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), [UPLOAD_B]: json(201, { task_id: "tb" }) } });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  env.serviceUrl = SERVICE_B;
+  await env.lifecycle.submit(sourceNamed("B", 21));
+  assert.deepEqual(env.lifecycle.tasks.map((t) => [t.serviceUrl, t.taskId]), [[SERVICE, "t1"], [SERVICE_B, "tb"]]);
+});
+
+test("重试 of a task saved without a service address (an older plugin) uses the address currently set", async () => {
+  const saved = JSON.stringify([{ ...SOURCE, taskId: "t1", state: "failed", submittedAt: 0, generation: 0, error: "x", profile: PROFILE }]);
+  const env = environment({ saved, routes: { [UPLOAD_B]: json(201, { task_id: "tb" }) } });
+  env.serviceUrl = SERVICE_B;
+  env.lifecycle.start();
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.requests, [UPLOAD_B]);
+  assert.equal(env.lifecycle.tasks[0].serviceUrl, SERVICE_B);
+});
+
+test("重试 when the original service cannot be reached fails naming that service, not the one set now", async () => {
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), [QUERY("t1")]: status("failed", { error: "x", profile: PROFILE }), [UPLOAD_B]: json(201, { task_id: "tb" }) },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.clock.advance(2000);
+  env.serviceUrl = SERVICE_B;
+  delete env.routes[UPLOAD]; // the original service is down
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.status(), [`失败：无法连接翻译服务（服务地址：${SERVICE}）`]);
+  assert.ok(!env.requests.includes(UPLOAD_B));
 });
 
 test("a running task's profile is saved with it", async () => {

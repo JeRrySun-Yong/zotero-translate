@@ -80,7 +80,8 @@
  * - fetch(url, options): the network request (the global fetch in Zotero);
  *   options carry an AbortSignal that is aborted when the time limit passes;
  * - clock: {now(), setTimeout(fn, ms), clearTimeout(id)}: current time and timers;
- * - serviceUrl(): the service address currently set;
+ * - serviceUrl(): the service address currently set (a new task goes there; a
+ *   retry goes to the address its task recorded, M4 ticket 16);
  * - readSource(task): the source PDF's bytes; throws with the reason when unreadable;
  * - attachTarget(task): where the task's PDFs go (the original item, or the
  *   standalone source PDF's library and collections), resolved once before
@@ -401,7 +402,8 @@ var ZoteroTranslateLifecycle = (() => {
       },
 
       /** The "重试" button of a failed or cancelled row: submit the same
-       *  source PDF again, as a new task of a new generation. */
+       *  source PDF again, as a new task of a new generation, to the service
+       *  the task was submitted to (see upload). */
       async retry(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (!task || !RETRYABLE_STATES.includes(task.state)) {
@@ -616,15 +618,22 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    /** Send the task's source PDF to the service address currently set. A
-     *  retry names the profile its task recorded (`profile`), so it keeps
-     *  that profile whatever is current by then; a new task names none. The
-     *  service's answer names the profile the task recorded, which is kept
-     *  from then on (also if the task is cancelled before its first query);
-     *  a refusal's reason is what the row shows. */
+    /** Send the task's source PDF to the service: for a new task, the
+     *  address currently set; for a retry, the address the task recorded
+     *  (`serviceUrl`), because the profile it names (below) is the one of
+     *  that service, and another service may know it under the same ID with
+     *  other settings; a task saved without an address (by an older plugin)
+     *  takes the one currently set. When the original service cannot be
+     *  reached, the row says so (naming it) and the paper is submitted
+     *  again, as a new task, to the current one. A retry names the profile
+     *  its task recorded (`profile`), so it keeps that profile whatever is
+     *  current by then; a new task names none. The service's answer names
+     *  the profile the task recorded, which is kept from then on (also if
+     *  the task is cancelled before its first query); a refusal's reason is
+     *  what the row shows. */
     async function upload(task) {
       Object.assign(task, {
-        serviceUrl: serviceUrl(),
+        serviceUrl: task.serviceUrl || serviceUrl(),
         taskId: null,
         state: "submitting",
         submittedAt: clock.now(),
