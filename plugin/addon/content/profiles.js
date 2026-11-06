@@ -257,15 +257,26 @@ var ZoteroTranslateProfiles = (() => {
 
   /** The service's profile interface, through `fetch` at `serviceUrl()`.
    *  Every method resolves (never rejects); a failure is {error: text}.
-   *  While the address is not this computer (`addressProblem`), no method
-   *  calls `fetch`: each answers {error} with the reason. */
+   *
+   *  The address is read once per operation (a save-and-test is one: its
+   *  two requests go to one service), and checked, with the address set at
+   *  that moment, when each request is about to go out (`send`), not only
+   *  when the operation starts: an address changed while the save is
+   *  pending, or in `onSaved`, stops the test request. While an address is
+   *  not this computer (`addressProblem`), `fetch` is not called: the
+   *  method answers {error} with the reason. */
   function createClient({ fetch, serviceUrl, timeoutSignal: makeSignal = timeoutSignal }) {
     const Core = typeof ZoteroTranslateCore !== "undefined" ? ZoteroTranslateCore : require("./core.js");
-    const unreachable = () => `连不上翻译服务（${serviceUrl().trim()}）`;
-    const notLocal = () => addressProblem(serviceUrl());
+    const unreachable = (address) => `连不上翻译服务（${address}）`;
 
-    /** {status, body} of one request, or null when the service cannot be reached. */
-    async function send(method, path, body, limitMs = REQUEST_LIMIT_MS) {
+    /** {status, body} of one request to `address`, null when the service
+     *  cannot be reached, or {blocked: reason} without calling `fetch` when
+     *  `address` or the address set now is not this computer. */
+    async function send(address, method, path, body, limitMs = REQUEST_LIMIT_MS) {
+      const problem = addressProblem(address) || addressProblem(serviceUrl());
+      if (problem) {
+        return { blocked: problem };
+      }
       const options = { method };
       const signal = makeSignal(limitMs);
       if (signal) {
@@ -276,7 +287,7 @@ var ZoteroTranslateProfiles = (() => {
         options.body = JSON.stringify(body ?? {});
       }
       try {
-        const response = await fetch(Core.serviceUrl(serviceUrl(), ...path), options);
+        const response = await fetch(Core.serviceUrl(address, ...path), options);
         let answer = null;
         try {
           answer = await response.json();
@@ -293,39 +304,41 @@ var ZoteroTranslateProfiles = (() => {
 
     return {
       /** {listing} (GET /profiles), {noProfiles, serviceUrl} for a service
-       *  without profiles, or {unreachable, serviceUrl}. */
+       *  without profiles, {unreachable, serviceUrl}, or {error, serviceUrl}
+       *  when the address is not this computer. */
       async status() {
-        const problem = notLocal();
-        if (problem) {
-          return { error: problem, serviceUrl: serviceUrl().trim() };
+        const where = serviceUrl().trim();
+        const answer = await send(where, "GET", ["profiles"]);
+        if (answer && answer.blocked) {
+          return { error: answer.blocked, serviceUrl: where };
         }
-        const answer = await send("GET", ["profiles"]);
         if (answer && answer.status === 200 && answer.body && Array.isArray(answer.body.profiles)) {
           return { listing: answer.body };
         }
-        const where = serviceUrl().trim();
         return answer && answer.status === 404 ? { noProfiles: true, serviceUrl: where } : { unreachable: true, serviceUrl: where };
       },
 
       /** Save the form when it differs from `saved` (or is new), then test the
-       *  saved profile: {profile, view} with the profile as saved, or {error}.
+       *  saved profile: {profile, view} with the profile as saved, or {error}
+       *  (with the `profile` as saved when the save went through).
        *  After a save, `onSaved(profile)` is awaited before the test starts:
        *  a save can already have changed the service's current profile (a new
        *  model makes the built-in one current again), and the test takes up
-       *  to a minute. */
+       *  to a minute. Both requests go to the address set when this starts. */
       async saveAndTest(form, saved, { onSaved = () => {} } = {}) {
         const request = profileRequest(form, saved);
         if (request && request.error) {
           return { error: request.error };
         }
-        if (notLocal()) {
-          return { error: notLocal() };
-        }
+        const where = serviceUrl().trim();
         let profile = saved;
         if (request) {
-          const answer = await send(request.method, request.path, request.body);
+          const answer = await send(where, request.method, request.path, request.body);
+          if (answer && answer.blocked) {
+            return { error: answer.blocked };
+          }
           if (!answer) {
-            return { error: unreachable() };
+            return { error: unreachable(where) };
           }
           if (answer.status !== 200 && answer.status !== 201) {
             return { error: refusal("没有保存", answer) };
@@ -333,9 +346,13 @@ var ZoteroTranslateProfiles = (() => {
           profile = answer.body;
           await onSaved(profile);
         }
-        const answer = await send("POST", ["profiles", profile.id, "test"], {}, TEST_LIMIT_MS);
+        const answer = await send(where, "POST", ["profiles", profile.id, "test"], {}, TEST_LIMIT_MS);
+        if (answer && answer.blocked) {
+          // After a save the page needs the saved profile; with nothing sent, there is none.
+          return request ? { profile, error: answer.blocked } : { error: answer.blocked };
+        }
         if (!answer) {
-          return { profile, error: unreachable() };
+          return { profile, error: unreachable(where) };
         }
         if (answer.status !== 200) {
           return { profile, error: refusal("没有测试", answer) };
@@ -345,24 +362,26 @@ var ZoteroTranslateProfiles = (() => {
 
       /** Make the profile current: {ok} or {error}. */
       async apply(id) {
-        if (notLocal()) {
-          return { error: notLocal() };
+        const where = serviceUrl().trim();
+        const answer = await send(where, "POST", ["profiles", id, "apply"], {});
+        if (answer && answer.blocked) {
+          return { error: answer.blocked };
         }
-        const answer = await send("POST", ["profiles", id, "apply"], {});
         if (!answer) {
-          return { error: unreachable() };
+          return { error: unreachable(where) };
         }
         return answer.status === 200 ? { ok: true } : { error: refusal("没有应用", answer) };
       },
 
       /** Delete the profile: {ok} or {error}. */
       async remove(id) {
-        if (notLocal()) {
-          return { error: notLocal() };
+        const where = serviceUrl().trim();
+        const answer = await send(where, "DELETE", ["profiles", id], {});
+        if (answer && answer.blocked) {
+          return { error: answer.blocked };
         }
-        const answer = await send("DELETE", ["profiles", id], {});
         if (!answer) {
-          return { error: unreachable() };
+          return { error: unreachable(where) };
         }
         return answer.status === 200 ? { ok: true } : { error: refusal("没有删除", answer) };
       },
