@@ -5,7 +5,10 @@
  *
  * The API key goes from the form to the service once, in the request that
  * saves the profile; it is never kept in a Zotero setting. The service
- * gives back only whether a key is set and its last 4 characters. The
+ * gives back only whether a key is set and its last 4 characters. It goes
+ * only to a service on this computer (M4 ticket 16): when the service
+ * address (an advanced setting) names another host than 127.0.0.1 or
+ * localhost, the client sends no profile request at all and says so. The
  * service's interface is in src/zotero_translate/service.py (its file
  * header): every write carries the header X-Zotero-Translate: 1 and a JSON
  * body, so a web page cannot send it across origins.
@@ -203,6 +206,9 @@ var ZoteroTranslateProfiles = (() => {
 
   /** The status line: {running, text, help}, from what status() found. */
   function statusView(found) {
+    if (found.error) {
+      return { running: false, text: found.error, help: "" };
+    }
     if (found.listing) {
       const current = found.listing.profiles.find((profile) => profile.id === found.listing.current);
       const name = current ? `${current.name}（${current.model}）` : found.listing.current;
@@ -230,11 +236,33 @@ var ZoteroTranslateProfiles = (() => {
     }
   }
 
+  // The hosts the service's profile interface accepts (service.py, _local_host).
+  const LOCAL_HOSTS = ["127.0.0.1", "localhost"];
+
+  /** Why a request with a key must not go to `address`, or "" when its host
+   *  is this computer: only the host counts (so 127.0.0.1.example.com, a
+   *  name that merely starts with it, and user@host forms are not local), and
+   *  an address that cannot be read is not taken for local. */
+  function addressProblem(address) {
+    const shown = String(address ?? "").trim();
+    let host = null;
+    try {
+      const url = new URL(shown);
+      host = ["http:", "https:"].includes(url.protocol) ? url.hostname : null;
+    } catch {
+      // not an address: no host
+    }
+    return LOCAL_HOSTS.includes(host) ? "" : `翻译服务地址不是本机（${shown}），不发送配置和密钥`;
+  }
+
   /** The service's profile interface, through `fetch` at `serviceUrl()`.
-   *  Every method resolves (never rejects); a failure is {error: text}. */
+   *  Every method resolves (never rejects); a failure is {error: text}.
+   *  While the address is not this computer (`addressProblem`), no method
+   *  calls `fetch`: each answers {error} with the reason. */
   function createClient({ fetch, serviceUrl, timeoutSignal: makeSignal = timeoutSignal }) {
     const Core = typeof ZoteroTranslateCore !== "undefined" ? ZoteroTranslateCore : require("./core.js");
     const unreachable = () => `连不上翻译服务（${serviceUrl().trim()}）`;
+    const notLocal = () => addressProblem(serviceUrl());
 
     /** {status, body} of one request, or null when the service cannot be reached. */
     async function send(method, path, body, limitMs = REQUEST_LIMIT_MS) {
@@ -267,6 +295,10 @@ var ZoteroTranslateProfiles = (() => {
       /** {listing} (GET /profiles), {noProfiles, serviceUrl} for a service
        *  without profiles, or {unreachable, serviceUrl}. */
       async status() {
+        const problem = notLocal();
+        if (problem) {
+          return { error: problem, serviceUrl: serviceUrl().trim() };
+        }
         const answer = await send("GET", ["profiles"]);
         if (answer && answer.status === 200 && answer.body && Array.isArray(answer.body.profiles)) {
           return { listing: answer.body };
@@ -285,6 +317,9 @@ var ZoteroTranslateProfiles = (() => {
         const request = profileRequest(form, saved);
         if (request && request.error) {
           return { error: request.error };
+        }
+        if (notLocal()) {
+          return { error: notLocal() };
         }
         let profile = saved;
         if (request) {
@@ -310,6 +345,9 @@ var ZoteroTranslateProfiles = (() => {
 
       /** Make the profile current: {ok} or {error}. */
       async apply(id) {
+        if (notLocal()) {
+          return { error: notLocal() };
+        }
         const answer = await send("POST", ["profiles", id, "apply"], {});
         if (!answer) {
           return { error: unreachable() };
@@ -319,6 +357,9 @@ var ZoteroTranslateProfiles = (() => {
 
       /** Delete the profile: {ok} or {error}. */
       async remove(id) {
+        if (notLocal()) {
+          return { error: notLocal() };
+        }
         const answer = await send("DELETE", ["profiles", id], {});
         if (!answer) {
           return { error: unreachable() };
@@ -328,7 +369,7 @@ var ZoteroTranslateProfiles = (() => {
     };
   }
 
-  return { formFromProfile, profileRequest, testResultView, buttons, keyText, profileRows, builtinDetail, statusView, createClient };
+  return { formFromProfile, profileRequest, testResultView, buttons, keyText, profileRows, builtinDetail, statusView, addressProblem, createClient };
 })();
 
 if (typeof module !== "undefined") {

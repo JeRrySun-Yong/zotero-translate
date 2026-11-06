@@ -389,3 +389,58 @@ test("apply refused by the service says why", async () => {
     error: "没有应用：这份配置还没有通过测试连接",
   });
 });
+
+// M4 ticket 16 item 2: the key goes only to a translation service on this
+// computer. The service accepts a Host of 127.0.0.1:<port> or localhost:<port>
+// only (service.py, _local_host); a real service is not affected.
+test("an address that is not this computer gets no profile request at all", async () => {
+  for (const address of [
+    "http://192.168.1.5:8920",
+    "https://example.com",
+    "http://127.0.0.1.example.com:8920",
+    "http://localhost.example.com:8920",
+    "http://127.0.0.1@example.com:8920",
+    "http://example.com/127.0.0.1",
+    "http://[::1]:8920",
+    "http://0.0.0.0:8920",
+    "http://127.0.0.2:8920",
+    "not a url",
+    "",
+  ]) {
+    const { fetch, calls } = fakeFetch(() => json(200, LISTING));
+    const client = profiles.createClient({ fetch, serviceUrl: () => `  ${address}  ` });
+    const error = `翻译服务地址不是本机（${address}），不发送配置和密钥`;
+    assert.deepEqual(await client.saveAndTest(NEW_FORM, null), { error }, `new: ${address}`);
+    assert.deepEqual(await client.saveAndTest({ ...profiles.formFromProfile(SAVED), model: "vendor/model-b" }, SAVED), { error }, `edit: ${address}`);
+    assert.deepEqual(await client.saveAndTest(profiles.formFromProfile(SAVED), SAVED), { error }, `test: ${address}`);
+    assert.deepEqual(await client.apply(SAVED.id), { error }, `apply: ${address}`);
+    assert.deepEqual(await client.remove(SAVED.id), { error }, `remove: ${address}`);
+    assert.deepEqual(await client.status(), { error, serviceUrl: address }, `list: ${address}`);
+    assert.deepEqual(calls, [], address);
+  }
+});
+
+test("this computer's addresses (127.0.0.1, localhost, any port, either case) are used as before", async () => {
+  for (const address of [SERVICE, "http://localhost:8920/", "http://LocalHost:9000", "http://127.0.0.1:8941"]) {
+    const { fetch, calls } = fakeFetch(
+      () => json(201, SAVED),
+      () => json(200, answer("succeeded", "连接成功", 1)),
+      () => json(200, LISTING),
+      () => json(200, {}),
+      () => json(200, {}),
+    );
+    const client = profiles.createClient({ fetch, serviceUrl: () => address });
+    assert.equal((await client.saveAndTest(NEW_FORM, null)).profile.id, SAVED.id, address);
+    assert.deepEqual(await client.status(), { listing: LISTING }, address);
+    assert.deepEqual(await client.apply(SAVED.id), { ok: true }, address);
+    assert.deepEqual(await client.remove(SAVED.id), { ok: true }, address);
+    assert.equal(calls.length, 5, address);
+    const base = address.trim().replace(/\/+$/, "");
+    assert.deepEqual(calls.map((c) => c.url.startsWith(base)), [true, true, true, true, true], address);
+  }
+});
+
+test("the status line says the address is not this computer, with no restart help", () => {
+  const error = "翻译服务地址不是本机（https://example.com），不发送配置和密钥";
+  assert.deepEqual(profiles.statusView({ error, serviceUrl: "https://example.com" }), { running: false, text: error, help: "" });
+});

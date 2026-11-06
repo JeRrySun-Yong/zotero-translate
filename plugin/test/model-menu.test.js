@@ -130,3 +130,15 @@ test("a refused switch reports the reason, draws no change, and keeps the new an
   assert.equal(await again, true); // a refused switch does not make later answers stale
   assert.equal(menu.state().listing.current, DEEPSEEK.id);
 });
+
+test("a service address that is not this computer shows as that, not as an unreachable service (ticket 16)", async () => {
+  const client = heldClient();
+  const menu = createModelMenu({ client });
+  const asking = menu.refresh();
+  client.answer(0, { error: "翻译服务地址不是本机（https://example.com），不发送配置和密钥", serviceUrl: "https://example.com" });
+  await asking;
+  const { listing, problem } = menu.state();
+  assert.equal(listing, null);
+  assert.equal(problem, "翻译服务地址不是本机");
+  assert.deepEqual(modelMenuItems(listing, problem), [{ id: null, label: "翻译服务地址不是本机", checked: false, disabled: true }]);
+});
