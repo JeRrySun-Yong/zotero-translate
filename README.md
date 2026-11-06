@@ -51,15 +51,25 @@
 ### 对模型端点的要求
 
 - **接口。** 程序向 `<OPENAI_BASE_URL>/chat/completions` 发 POST，带 `Authorization: Bearer <密钥>`，请求体含 `model`、`messages`、`temperature`（1.0）和 `reasoning_effort`（`"high"`），从 `choices[0].message.content` 读回答。思考时间很长的模型可以打开流式（`ZT_STREAM=1`，见下）。不认识 `reasoning_effort` 的端点可能返回 HTTP 400。
-- **模型。** 要能严格按指令输出 JSON 和保持格式的强推理模型。论文档案那一步会把整篇论文的文字放进一个请求，约每页 1000–1500 token，所以上下文窗口建议不小于 128K token。开发时按 Gemini 系列的模型调出来；试过一个 DeepSeek 的快速版本，关键概念、首次出现释义和翻译质量都明显不如 Gemini。模型越弱，译文越差。
+- **模型。** 要能严格按指令输出 JSON 和保持格式的强推理模型。论文档案那一步会把整篇论文的文字放进一个请求，约每页 1000–1500 token，所以上下文窗口建议不小于 128K token。模型越弱，译文越差。
 - **请求量和用时。** 一篇 22–31 页的论文约 270–450 次请求，端点正常时约 5–9 分钟（3 篇测试论文：299–511 秒，273–441 次请求）。端点响应慢的时候，同样的论文曾经用到十几、二十几分钟。费用按你的端点计价，建议先拿一两篇试。
-- **并发。** 默认同时发出的请求最多 40 个。端点限流时调小，见[配置模型](#配置模型)。
+- **并发。** 主模型默认同时最多发 40 个请求，独立的副模型默认 16 个；两个角色填同一个端点时共用一份额度，合计 40 个（见[配置模型](#配置模型)）。端点限流时调小。
 
 ## 3. 安装
 
 下面的命令在终端里运行。`~/zotero-translate` 只是建议的位置，不要放在“文稿”“桌面”“下载”或 iCloud 云盘里：macOS 可能不让登录时由系统启动的后台服务读取这些位置。
 
 ### 3.1 取得代码，建环境
+
+先确认有 uv：
+
+```sh
+uv --version
+```
+
+没有的话先装（二选一）：`brew install uv`，或 `curl -LsSf https://astral.sh/uv/install.sh | sh`。用脚本安装时，uv 装在 `~/.local/bin`，当前终端还找不到它：重开终端，或运行 `export PATH="$HOME/.local/bin:$PATH"`，再运行一次 `uv --version`，确认打印了版本号。
+
+然后克隆仓库，建环境：
 
 ```sh
 cd ~
@@ -68,7 +78,7 @@ cd zotero-translate
 uv sync --frozen
 ```
 
-`--frozen` 让 uv 照 `uv.lock` 原样安装，不重新解析版本。成功时最后几行列出安装的包，`.venv/bin/zotero-translate` 存在。还没有 uv 的话先装：`curl -LsSf https://astral.sh/uv/install.sh | sh`，或 `brew install uv`。
+`--frozen` 让 uv 照 `uv.lock` 原样安装，不重新解析版本。成功时最后几行列出安装的包，`.venv/bin/zotero-translate` 存在。
 
 ### 3.2 下载运行资源
 
@@ -110,7 +120,7 @@ ZT_PROFILE_NAME=我的模型
 |---|---|---|
 | `OPENAI_BASE_URL` | 是 | 端点地址，程序在它后面加 `/chat/completions`。例如 `https://api.openai.com/v1` |
 | `OPENAI_API_KEY` | 是 | 密钥 |
-| `AI_DEFAULT_MODEL` | 建议总是写 | 模型 ID。不写时用程序里的默认值（`model.env` 是 `gemini-3.8-flash-high`，`argon.env` 是 `gemini-4-argon-high`），这是开发时所用端点上的名字，别的端点上多半没有 |
+| `AI_DEFAULT_MODEL` | 建议总是写 | 模型 ID，填端点提供方给出的那个。不写时用程序里的默认值（`model.env` 是 `gemini-3.8-flash-high`，`argon.env` 是 `gemini-4-argon-high`），只有端点提供这个 ID 时才能用 |
 | `ZT_PROFILE_NAME` | 否 | 只写在 `model.env` 里。这份“内置配置”在右键菜单、设置页、任务窗口里显示的名字，最长 60 个字符；不写就叫 Gemini |
 | `ZT_REQUEST_TIMEOUT_SECONDS` | 否 | 单个请求的超时秒数，默认 480。回答特别慢的模型可以写 900 |
 | `ZT_STREAM` | 否 | 写 `1` 则用流式请求。思考很久的模型，有的端点会在请求等了约两分钟还没有回答时断开连接（HTTP 524），这时打开 |
@@ -122,7 +132,7 @@ ZT_PROFILE_NAME=我的模型
 
 **只有一个端点（最常见）。** 两个文件填同样的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`。程序把它们当作同一个端点：两个角色共用一份并发额度，大小取 `--concurrency`（`argon.env` 里的 `ZT_CONCURRENCY` 被忽略），也不会对冲。两个文件的 `AI_DEFAULT_MODEL` 可以相同；副模型负责论文档案和术语清单，也可以让它用更强的模型。端点限流时，给 `serve` 加 `--concurrency 8` 这样的选项（写法见[开机自动启动](#35-开机自动启动)）。
 
-**两个端点。** 两个文件填不同的地址或密钥，例如主模型用速度快的端点，副模型用另一个端点。此时开启“对冲”：主模型的一个翻译批次或审校请求发出 400 秒还没结束，就多发一份给副模型，用先通过校验的回答。`serve` 加 `--no-hedging` 关闭对冲，关闭后改为主模型连续 2 次超时才转发给副模型。
+**两个端点。** 两个文件填不同的地址或密钥，例如主模型用速度快的端点，副模型用另一个端点。此时开启“对冲”：主模型的一个翻译批次或审校请求发出 400 秒还没结束，就多发一份给副模型，用先通过校验的回答。`serve` 加 `--no-hedging` 关闭对冲，关闭后改为主模型连续 2 次超时才转发给副模型。两个端点各有各的并发上限：主模型 `--concurrency`，副模型 `argon.env` 里的 `ZT_CONCURRENCY`。
 
 **检查端点能不能用。** 内置配置没有“测试连接”按钮。拿不准端点或模型 ID 对不对，可以先在 Zotero 设置页（装好插件之后，见[使用](#44-设置页中文翻译)）新建一份同样地址的配置，点“测试连接”。
 
@@ -130,19 +140,20 @@ ZT_PROFILE_NAME=我的模型
 
 ### 3.4 手动试启动
 
-先确认服务能起来。在仓库根目录运行：
+先确认服务能起来。试启动用一个空的临时数据目录和另一个端口（8921），不碰以后正式服务的数据，也不会去恢复别的任务。在仓库根目录运行：
 
 ```sh
-.venv/bin/zotero-translate serve
+TRIAL_DIR=$(mktemp -d)
+.venv/bin/zotero-translate serve --port 8921 --data-dir "$TRIAL_DIR" --profiles-dir "$TRIAL_DIR/profiles"
 ```
 
-成功时终端打印 `{"url": "http://127.0.0.1:8920"}` 并一直运行。另开一个终端：
+成功时终端打印 `{"url": "http://127.0.0.1:8921"}` 并一直运行。另开一个终端：
 
 ```sh
-curl -s http://127.0.0.1:8920/health
+curl -s http://127.0.0.1:8921/health
 ```
 
-应返回 `{"service": "zotero-translate", "version": "0.1.0"}`（版本号以后会变）。回到第一个终端按 Ctrl-C 结束服务。
+应返回 `{"service": "zotero-translate", "version": "0.1.0"}`（版本号以后会变）。回到第一个终端按 Ctrl-C 结束服务。临时目录里只有试启动留下的几个空文件，可以不管（系统会清理），也可以在原来的终端里 `rm -r "$TRIAL_DIR"`。
 
 启动即退出时，终端里就是原因：
 
@@ -150,8 +161,7 @@ curl -s http://127.0.0.1:8920/health
 |---|---|---|
 | `找不到管线模型的环境文件：<路径>` 或 `找不到 argon（…）的环境文件：<路径>` | 2 | 补上那个文件（3.3） |
 | `环境文件 <路径> 缺少：OPENAI_BASE_URL, OPENAI_API_KEY`（列出缺的键） | 2 | 补上缺的键 |
-| `端口 8920 已被占用，本服务退出` | 1 | 见[排错](#6-排错) |
-| `已有翻译服务在使用数据目录 …` | 1 | 已经有一个服务在跑了，不用再启动 |
+| `端口 8921 已被占用，本服务退出` | 1 | 换一个端口再试：`--port 8922` |
 
 ### 3.5 开机自动启动
 
@@ -199,24 +209,34 @@ plutil -lint ~/Library/LaunchAgents/local.zotero-translate.service.plist
 
 最后一行应打印 `…plist: OK`。要给 `serve` 加选项（例如 `--concurrency 8`、`--no-hedging`、`--port 8921`），用编辑器打开这个 plist，在 `ProgramArguments` 里 `argon.env` 那一行之后，每个词一行加成 `<string>--concurrency</string>`、`<string>8</string>` 这样的条目；改完再 `plutil -lint`，并按下面的说明先 `bootout` 再 `bootstrap`。
 
-安装、查看、重启、停用：
+安装、查看、重启、停用，每条命令单独运行。
+
+安装并立即启动（以后每次登录自动启动）：
 
 ```sh
-# 安装并立即启动（以后每次登录自动启动）
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.zotero-translate.service.plist
+```
 
-# 查看状态：应有 state = running 和一个 pid
+查看状态，应有 `state = running` 和一个 `pid`：
+
+```sh
 launchctl print gui/$(id -u)/local.zotero-translate.service | grep -E 'state|pid|last exit'
 curl -s http://127.0.0.1:8920/health
-
-# 重启（更新代码之后用）
-launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service
-
-# 停用：立即停止并卸载；下次登录也不要载入的话再执行 disable
-launchctl bootout gui/$(id -u)/local.zotero-translate.service
-launchctl disable gui/$(id -u)/local.zotero-translate.service
-# 恢复：launchctl enable gui/$(id -u)/local.zotero-translate.service，再 bootstrap
 ```
+
+重启（更新代码之后用）：
+
+```sh
+launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service
+```
+
+停用，立即停止并卸载：
+
+```sh
+launchctl bootout gui/$(id -u)/local.zotero-translate.service
+```
+
+下次登录也不要载入的话，再运行 `launchctl disable gui/$(id -u)/local.zotero-translate.service`；要恢复，运行 `launchctl enable gui/$(id -u)/local.zotero-translate.service`，再重新 `bootstrap`。
 
 - 改了 plist 之后，`kickstart` 不会重新读取它：先 `bootout` 再 `bootstrap`。
 - 要停服务，用 `bootout`。只结束进程（`kill`、活动监视器）没用，`KeepAlive` 会立刻把它拉起来。
@@ -313,7 +333,7 @@ Zotero 设置里的“中文翻译”页，从上到下：
   - `model-profiles.json`：当前配置和各配置最近一次测试连接的结果；`service.lock`：防止同一个数据目录被两个服务同时使用。
 - **清理旧任务。** 插件挂回附件时，会把 PDF 复制进 Zotero 自己的存储，所以挂回之后任务目录可以删。只删已经结束的任务（`succeeded`、`failed`、`cancelled`），不要删排队中、翻译中、等待自动重跑的。删之前打开任务窗口，确认其中没有“挂回中”“挂回失败”“等待服务”“取消中”的行，否则“继续挂回”会失败。
 
-  下面在仓库根目录运行：先列出 30 天以前的已结束任务，看过再删。
+  下面在仓库根目录运行。**第一步只列出**符合条件的任务目录（30 天以前、已结束），不删除任何东西：
 
   ```sh
   D="$HOME/Library/Application Support/zotero-translate/tasks"
@@ -329,7 +349,11 @@ Zotero 设置里的“中文翻译”页，从上到下：
           print(d)
   ' > "$HOME/old-tasks.txt"
   cat "$HOME/old-tasks.txt"
-  # 确认无误后删除：
+  ```
+
+  看过列表，确认任务窗口里没有上面说的那几种行之后，**第二步**才删除列表里的目录：
+
+  ```sh
   tr '\n' '\0' < "$HOME/old-tasks.txt" | xargs -0 rm -rf
   ```
 
@@ -358,7 +382,7 @@ Zotero 设置里的“中文翻译”页，从上到下：
 | 设置页是红底“连不上翻译服务”；提交时提示“无法连接翻译服务（服务地址：…）” | 服务没在运行。`launchctl print gui/$(id -u)/local.zotero-translate.service` 看 `state` 和 `last exit code`，`service.log` 看启动错误；`launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service` 重启。服务地址不对时，在设置页底部“高级”里改 |
 | `service.log` 每 10 秒出现同一条启动错误 | 环境文件缺失或缺键（3.4 的表）；或端口被占用；或数据目录被另一个服务锁定（例如手动试启动的服务还没结束）。launchd 在启动失败时约每 10 秒重试一次 |
 | 启动时报“端口 8920 已被占用” | `lsof -nP -iTCP:8920 -sTCP:LISTEN` 看是谁。是旧的 zotero-translate 进程就结束它；是别的程序，就给 `serve` 加 `--port 8921`（改 plist），并在设置页“高级”里把服务地址改成 `http://127.0.0.1:8921` |
-| 任务失败，原因含 `HTTP 429`（“管线模型限流”）或额度用完 | 端点限流或账户额度用完。服务已经按 60 秒、300 秒的间隔自动重跑过两次才报失败。等限流恢复或充值后，在任务窗口点“重试”（做完的模型回答有缓存，不重复收费）。经常限流时调小并发：`serve --concurrency 8`（内置配置），或设置页里该配置的“并发上限” |
+| 任务失败，原因含 `HTTP 429`（“管线模型限流”）或额度用完 | 端点限流或账户额度用完。服务已经按 60 秒、300 秒的间隔自动重跑过两次才报失败。等限流恢复或充值后，在任务窗口点“重试”（做完的模型回答有缓存，不重复收费）。经常限流时调小并发：内置配置用 `serve --concurrency 8`（两个端点时，副模型在 `argon.env` 里写 `ZT_CONCURRENCY`），设置页的配置用该配置的“并发上限” |
 | 任务失败，原因含 `HTTP 401` 或 `403` | 密钥错误或无权限。这类失败不自动重跑。改对环境文件里的密钥（改完重启服务：`kickstart`），或在设置页改配置的密钥，再点“重试” |
 | 任务失败，原因含“超时” | 端点回答太慢。内置配置在环境文件里加大 `ZT_REQUEST_TIMEOUT_SECONDS`（例如 900），设置页配置填“请求超时”；思考很久的模型再打开流式 |
 | 任务窗口写着“等待自动重跑（约 N 分钟后，第 k 次自动重跑，共 2 次），上次失败：…” | 不用处理。两次自动重跑都失败才显示“失败” |
@@ -384,19 +408,23 @@ Zotero 设置里的“中文翻译”页，从上到下：
 
 ### 更新
 
-在仓库根目录运行：
+在仓库根目录运行。命令用 `&&` 连着，前一条失败，后面的就不会运行：
 
 ```sh
-git pull --ff-only
-uv sync --frozen
-.venv/bin/babeldoc --warmup        # 资源已齐时很快结束
-launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service
+OLD=$(git rev-parse HEAD) &&
+git pull --ff-only &&
+uv sync --frozen &&
+.venv/bin/babeldoc --warmup &&
+launchctl kickstart -k gui/$(id -u)/local.zotero-translate.service &&
+sleep 3 &&
 curl -s http://127.0.0.1:8920/health
 ```
 
+`--warmup` 在资源已齐时很快结束。最后应返回 `/health` 的回答。
+
 - 更新前确认任务窗口里没有进行中的任务；有也不会丢，重启后会接着做。
-- `git pull --ff-only` 失败，说明本地仓库被改过，需要自己处理。
-- 如果这次更新改了插件（`git diff --stat <更新前的提交> HEAD -- plugin/addon` 有输出），要重新装插件：到 Releases 下载新的 xpi，或自己构建，再按 3.6 安装。从 Releases 安装的插件，Zotero 也会按插件里登记的更新地址自动检查更新。
+- 某一条失败时，按它的报错处理。`git pull --ff-only` 的报错最常见的有：连不上远端或认证失败（先解决网络或认证）；提示本地有未提交的改动，或分支已经分叉（说明你改过本地仓库，先 `git status` 看清楚，再自己决定怎么合并）。
+- 如果这次更新改了插件（同一个终端里运行 `git diff --stat "$OLD" HEAD -- plugin/addon`，有输出），要重新装插件：到 Releases 下载新的 xpi，或自己构建，再按 3.6 安装。从 Releases 安装的插件，Zotero 也会按插件里登记的更新地址自动检查更新。
 
 ### 卸载
 

@@ -40,7 +40,7 @@
 
 仓库应在 `~/zotero-translate` 一类的家目录位置，不在“文稿”“桌面”“下载”或 iCloud 云盘（登录时由系统启动的服务可能读不了那里）。以下命令都在仓库根目录运行。
 
-完成：六项全部通过，结果已列给用户。
+完成：表里的项目全部通过，结果已列给用户。
 
 ### 2. 建环境，下载运行资源
 
@@ -81,41 +81,45 @@ uv sync --frozen
 
 ### 4. 手动试启动
 
-把整段**作为一条命令在同一个 shell 里**运行：它在后台启动服务，最多等 30 秒直到 `/health` 有回应，打印回应和模型配置，最后结束服务。拆开运行，后台进程可能在 `curl` 之前就随 shell 结束，或者留下来占住端口。
+试启动用空的临时数据目录和 8921 端口：服务启动时会恢复并调度数据目录里没做完的任务，用户的数据目录里可能有，临时目录里没有，所以试启动不会调用模型，也不动 8920 上用户的服务。
+
+把整段**作为一条命令在同一个 shell 里**运行：它在后台启动服务，最多等 30 秒直到 `/health` 有回应，打印回应和模型配置，最后结束服务并删掉临时目录。拆开运行，后台进程可能在 `curl` 之前就随 shell 结束，或者留下来占住端口。
 
 ```sh
-.venv/bin/zotero-translate serve > /tmp/zotero-translate-trial.log 2>&1 &
+TRIAL_DIR=$(mktemp -d)
+.venv/bin/zotero-translate serve --port 8921 --data-dir "$TRIAL_DIR" --profiles-dir "$TRIAL_DIR/profiles" > "$TRIAL_DIR.log" 2>&1 &
 TRIAL=$!
 for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:8920/health && break
+  curl -sf http://127.0.0.1:8921/health && break
   sleep 1
 done
 echo
-curl -s http://127.0.0.1:8920/profiles
+curl -s http://127.0.0.1:8921/profiles
 echo
-cat /tmp/zotero-translate-trial.log
+cat "$TRIAL_DIR.log"
 kill $TRIAL
 wait $TRIAL 2>/dev/null
+rm -r "$TRIAL_DIR" "$TRIAL_DIR.log"
 ```
 
 完成：
 
 - 第一行是 `{"service": "zotero-translate", "version": "…"}`；
 - `/profiles` 的回答里 `"current": "gemini"`，`model` 和 `base_url` 是用户写的（回答里没有密钥）；
-- 日志只有一行 `{"url": "http://127.0.0.1:8920"}`；
-- 之后 `lsof -nP -iTCP:8920 -sTCP:LISTEN` 没有输出。
+- 日志只有一行 `{"url": "http://127.0.0.1:8921"}`；
+- 之后 `lsof -nP -iTCP:8921 -sTCP:LISTEN` 没有输出。
 
-整条命令的退出码是 143，这是预期值：最后的 `wait` 返回服务被结束的状态。以上面的输出为准，不看退出码。
+整条命令的退出码是 143，这是预期值：`wait` 返回服务被结束的状态。以上面的输出为准，不看退出码。8921 被占用时，日志里是 `端口 8921 已被占用`：换一个端口重做。
 
 ### 5. 开机自动启动
 
 先告诉用户要写 `~/Library/LaunchAgents/local.zotero-translate.service.plist` 并用 `launchctl` 载入，得到同意。plist 的生成命令在 README 第 3.5 节：读那一节，在仓库根目录运行其中的整段（它用 `$PWD` 和 `$HOME` 写出绝对路径）。然后：
 
 ```sh
-plutil -lint ~/Library/LaunchAgents/local.zotero-translate.service.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.zotero-translate.service.plist
-sleep 3
-launchctl print gui/$(id -u)/local.zotero-translate.service | grep -E 'state|pid|last exit'
+plutil -lint ~/Library/LaunchAgents/local.zotero-translate.service.plist &&
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.zotero-translate.service.plist &&
+sleep 3 &&
+launchctl print gui/$(id -u)/local.zotero-translate.service | grep -E 'state|pid|last exit' &&
 curl -s http://127.0.0.1:8920/health
 ```
 
@@ -164,11 +168,11 @@ curl -s http://127.0.0.1:8920/health
 |---|---|---|
 | `uv sync --frozen` 失败 | 命令的完整输出 | 锁定的 `onnxruntime` 在 macOS 上只有 macOS 14 以上 Apple 芯片的安装包：回到步骤 1 核对芯片和系统；网络问题让用户检查网络。把完整输出给用户 |
 | `serve` 退出码 2 | 终端里的一句话 | `找不到…环境文件：<路径>` 或 `环境文件 <路径> 缺少：<键名>`：回到步骤 3 |
-| `serve` 退出码 1 | 终端里的一句话 | `端口 8920 已被占用`：`lsof -nP -iTCP:8920 -sTCP:LISTEN` 看是谁。`已有翻译服务在使用数据目录`：已经有一个服务在跑 |
+| `serve` 退出码 1 | 终端里的一句话 | `端口 <端口> 已被占用`：`lsof -nP -iTCP:<端口> -sTCP:LISTEN` 看是谁。`已有翻译服务在使用数据目录`：已经有一个服务在用这个数据目录 |
 | 30 秒内 `/health` 没有回应 | 试启动日志 | 日志里就是原因 |
 | `service.log` 每 10 秒出现同一条启动错误 | `~/Library/Logs/zotero-translate/service.log` | 环境文件缺失或缺键，或端口被占，或另一个服务锁着数据目录。launchd 启动失败时约每 10 秒重试一次 |
 | 经 Zotero 提交后任务失败，原因含 `HTTP 401` 或 `403` | 任务的 `report.json` | 密钥错误或无权限，不会自动重跑。请用户在编辑器里改环境文件的密钥，`kickstart` 重启服务，再在任务窗口点“重试” |
-| 失败原因含 `HTTP 429` 或“超时” | 任务的 `report.json` | 限流或端点慢，服务已自动重跑过两次。降低并发（`serve --concurrency 8`，写进 plist），或加大 `ZT_REQUEST_TIMEOUT_SECONDS`；细节见 README 第 6 节 |
+| 失败原因含 `HTTP 429` 或“超时” | 任务的 `report.json` | 限流或端点慢，服务已自动重跑过两次。降低并发（主模型 `serve --concurrency 8`，写进 plist；两个端点时副模型在 `argon.env` 里写 `ZT_CONCURRENCY`），或加大 `ZT_REQUEST_TIMEOUT_SECONDS`；细节见 README 第 6 节 |
 
 ## 用户要改代码时
 
