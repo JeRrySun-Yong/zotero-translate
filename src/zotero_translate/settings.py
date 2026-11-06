@@ -29,12 +29,14 @@ Code's DeepSeek Fast answers a plain request that thinks longer than about
 
 A user profile's tasks append the prompt rules for user profiles to their
 translation batch and review prompts (M4 ticket 15, ADR 0005 supplement,
-``zotero_translate.profile_rules``): ``PipelineSettings.user_profile_rules``,
-on for every user profile (``load_profile_settings``) and for ``run
---user-profile-rules``; Gemini's two files cannot turn it on, so its request
-bodies stay as they were. It is not a line of the file: the user profiles'
-files written before the ticket, and a hand-written file given to ``run``,
-need no change.
+``zotero_translate.profile_rules``): ``PipelineSettings.user_profile_rules``
+is on exactly when the settings are a user profile's
+(``load_profile_settings``: the worker's ``--profile-file``, and ``run
+--profile-file``), and off for Gemini's two files (``load_pipeline_settings``
+has no way to turn it on), so Gemini's request bodies stay as they were. It
+is not a line of the file: the user profiles' files written before the
+ticket, and a hand-written file given to ``run --profile-file``, need no
+change.
 
 Hedging (M3 ticket 15, ADR 0004) is on unless ``run`` or ``serve`` gets
 ``--no-hedging``: a flash send of a translation batch or a review that has
@@ -153,22 +155,20 @@ def load_pipeline_settings(
     cache_dir: Path | None = None,
     hedging: bool = True,
     profile: dict | None = None,
-    user_profile_rules: bool = False,
 ) -> PipelineSettings:
     """Read both environment files; raise ``SettingsError`` if either is missing or incomplete.
 
     With ``hedging``, the threshold is ``HEDGE_AFTER_SECONDS``, or the test
     setting ``ZT_TEST_HEDGE_AFTER_SECONDS``. ``profile`` (``{"id",
     "name"}``, the built-in profile in the service) goes to the task report.
-    ``user_profile_rules`` is ``run --user-profile-rules``: the built-in
-    profile never has them.
+    These are the built-in profile's settings: never the prompt rules for
+    user profiles.
     """
     return PipelineSettings(
         flash=load_model_settings(env_file, concurrency, cache_dir),
         argon=load_argon_settings(argon_env_file, cache_dir),
         hedge_after_seconds=_hedge_after() if hedging else None,
         profile=profile,
-        user_profile_rules=user_profile_rules,
     )
 
 
@@ -206,6 +206,7 @@ def load_profile_settings(
     cache_dir: Path | None = None,
     hedging: bool = True,
     profile: dict | None = None,
+    concurrency: int | None = None,
 ) -> PipelineSettings:
     """A user profile (ADR 0005): one endpoint file for both roles.
 
@@ -217,12 +218,15 @@ def load_profile_settings(
     without hedging, and the task log says so. ``profile`` (``{"id",
     "name"}``) goes to the task report. Its tasks have the prompt rules for
     user profiles (``user_profile_rules``, M4 ticket 15), whatever the file
-    says: a file written before the ticket gets them too.
+    says: a file written before the ticket gets them too. ``concurrency``
+    (``run --profile-file … --concurrency``, for development) replaces the
+    file's limit.
     """
     values = _read_endpoint_file(profile_file, "找不到模型配置的文件")
     if not values.get("AI_DEFAULT_MODEL"):
         raise SettingsError(f"模型配置的文件 {profile_file} 缺少：AI_DEFAULT_MODEL")
-    concurrency = _concurrency_setting(profile_file, values, DEFAULT_PROFILE_CONCURRENCY)
+    if concurrency is None:
+        concurrency = _concurrency_setting(profile_file, values, DEFAULT_PROFILE_CONCURRENCY)
     endpoint = _endpoint_settings(profile_file, values, DEFAULT_MODEL, concurrency, cache_dir)
     return PipelineSettings(
         flash=endpoint,

@@ -17,10 +17,11 @@ between paragraphs or moved a bold span out of its style tag (the review
 prompt's scope of the revision). The examples are generic; an example taken
 from the acceptance papers would bias the papers the rules are judged on.
 
-``PipelineSettings.user_profile_rules`` turns them on: every user profile's
-task (``load_profile_settings``), and ``run --user-profile-rules`` (for
-development, so that a user profile's file can be used with ``run`` as it
-is). Gemini's two endpoint files cannot turn them on.
+``PipelineSettings.user_profile_rules`` turns them on, exactly when the
+settings are a user profile's (``load_profile_settings``): every user
+profile's task in the service, and ``run --profile-file``, which loads a
+profile's file (also a hand-written one) as it is. Gemini's two endpoint
+files cannot turn them on.
 """
 
 LITERAL_VALUES_RULE = (

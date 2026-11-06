@@ -100,9 +100,11 @@ tasks have the prompt rules for user profiles (M4 ticket 15, ADR 0005
 supplement, ``zotero_translate.profile_rules``): a literal values rule in
 every translation batch and review prompt, and the scope of the revision in
 every review prompt; Gemini's tasks do not, so their request bodies and
-cache keys are as before. The worker turns them on for every attempt with
-``--profile-file`` (``settings.load_profile_settings``), whatever the file
-says; the task report says so (``model.user_profile_rules``). The current
+cache keys are as before. They follow the settings the worker loads: on
+for every attempt with ``--profile-file`` (``settings.load_profile_settings``),
+whatever the file says, and no way to turn them on for Gemini's start
+options; ``run --profile-file`` loads a profile's file the same way. The
+task report says so (``model.user_profile_rules``). The current
 profile survives a restart (``<data_dir>/model-profiles.json``); when its
 file is gone, the current profile is Gemini again, with a log line. Profile
 events are logged as ``profile=<id> event=... name=... reason=...``:

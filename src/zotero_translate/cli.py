@@ -3,12 +3,17 @@
 ``serve`` starts the translation service. ``run`` runs one paper task on a
 PDF directly, without Zotero or the service, and writes ``mono.pdf``,
 ``dual.pdf``, ``dossier.json``, ``terms.json``, ``report.json`` and
-``requests.jsonl`` (the request records) into the output directory
-(``--user-profile-rules``, for development: with the prompt rules of a user
-model profile's task, M4 ticket 15); as it
+``requests.jsonl`` (the request records) into the output directory; as it
 exits, ``report.json``'s ``requests`` is brought up to date with
 ``requests.jsonl``. Both share the
 model response cache in the data directory.
+
+``run`` takes either the built-in profile's two endpoint files
+(``--env-file``, ``--argon-env-file``, ``--concurrency``; their defaults are
+Gemini's files) or a user profile's one file (``--profile-file``, as the
+worker gets it, ADR 0005; ``--concurrency`` replaces the file's limit). The
+prompt rules for user profiles (M4 ticket 15) are on exactly with
+``--profile-file``.
 
 ``serve`` exits with 2 when an environment file is missing or incomplete
 and 1 when another service holds the data directory or the port is taken.
@@ -55,15 +60,26 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="run one paper task on a PDF")
     run.add_argument("pdf", type=Path)
     run.add_argument("--output-dir", type=Path, required=True)
-    _add_model_options(run)
+    _add_model_options(run, defaults=False)
     run.add_argument(
-        "--user-profile-rules",
-        action="store_true",
-        help="for development: the prompt rules a user model profile's task has "
-        "(M4 ticket 15); the built-in Gemini has none",
+        "--profile-file",
+        type=Path,
+        help="a user model profile's file (ADR 0005) for both roles, instead of "
+        "--env-file and --argon-env-file; with the prompt rules for user profiles",
     )
 
     args = parser.parse_args(argv)
+    if args.command == "run":
+        if args.profile_file is not None:
+            if args.env_file is not None or args.argon_env_file is not None:
+                run.error("give either --profile-file or --env-file and --argon-env-file")
+        else:
+            if args.env_file is None:
+                args.env_file = s.DEFAULT_ENV_FILE
+            if args.argon_env_file is None:
+                args.argon_env_file = s.DEFAULT_ARGON_ENV_FILE
+            if args.concurrency is None:
+                args.concurrency = s.DEFAULT_CONCURRENCY
     if args.command == "serve":
         from zotero_translate.service import serve as serve_forever
 
@@ -84,21 +100,25 @@ def main(argv: list[str] | None = None) -> int:
     run_then_exit(lambda: _run(args))  # does not return
 
 
-def _add_model_options(parser: argparse.ArgumentParser) -> None:
+def _add_model_options(parser: argparse.ArgumentParser, defaults: bool = True) -> None:
+    """The endpoint options; without ``defaults`` they stay None when not given
+    (``run`` fills them in unless it has ``--profile-file``)."""
     parser.add_argument(
         "--env-file",
         type=Path,
-        default=s.DEFAULT_ENV_FILE,
+        default=s.DEFAULT_ENV_FILE if defaults else None,
         help="flash: file with OPENAI_BASE_URL, OPENAI_API_KEY and AI_DEFAULT_MODEL",
     )
     parser.add_argument(
         "--argon-env-file",
         type=Path,
-        default=s.DEFAULT_ARGON_ENV_FILE,
+        default=s.DEFAULT_ARGON_ENV_FILE if defaults else None,
         help="argon (paper dossier, term list, timed-out requests): the same keys, "
         "and ZT_CONCURRENCY",
     )
-    parser.add_argument("--concurrency", type=int, default=s.DEFAULT_CONCURRENCY)
+    parser.add_argument(
+        "--concurrency", type=int, default=s.DEFAULT_CONCURRENCY if defaults else None
+    )
     parser.add_argument(
         "--no-hedging",
         action="store_true",
@@ -120,14 +140,21 @@ def _run(args) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        model_settings = s.load_pipeline_settings(
-            args.env_file,
-            args.argon_env_file,
-            args.concurrency,
-            s.model_cache_dir(args.data_dir),
-            hedging=not args.no_hedging,
-            user_profile_rules=args.user_profile_rules,
-        )
+        if args.profile_file is not None:  # a user profile: its prompt rules on
+            model_settings = s.load_profile_settings(
+                args.profile_file,
+                s.model_cache_dir(args.data_dir),
+                hedging=not args.no_hedging,
+                concurrency=args.concurrency,
+            )
+        else:  # the built-in profile's files: no user profile rules
+            model_settings = s.load_pipeline_settings(
+                args.env_file,
+                args.argon_env_file,
+                args.concurrency,
+                s.model_cache_dir(args.data_dir),
+                hedging=not args.no_hedging,
+            )
     except s.SettingsError as e:
         print(e, file=sys.stderr)
         return 2

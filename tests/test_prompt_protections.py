@@ -28,9 +28,12 @@ profile) unchanged:
   adversarial ones; what passes is what the accepted Gemini output used.
 """
 
+import inspect
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import tiktoken
@@ -193,7 +196,8 @@ def test_the_rules_are_on_for_a_user_profile_and_off_for_the_built_in_one(tmp_pa
     path = _endpoint_file(tmp_path, "endpoint.env")
     assert load_profile_settings(path).user_profile_rules is True
     assert load_pipeline_settings(path, path).user_profile_rules is False
-    assert load_pipeline_settings(path, path, user_profile_rules=True).user_profile_rules is True
+    # Code review round 1: the built-in profile's files have no way to turn them on.
+    assert "user_profile_rules" not in inspect.signature(load_pipeline_settings).parameters
 
 
 def test_a_user_profile_task_sends_the_rules_and_a_gemini_task_does_not(start_service):
@@ -218,22 +222,58 @@ def test_a_user_profile_task_sends_the_rules_and_a_gemini_task_does_not(start_se
     assert gemini_report["model"]["user_profile_rules"] is False
 
 
-def test_run_sends_the_rules_with_its_development_option(tmp_path):
+def _run(tmp_path, *options, env=None) -> subprocess.CompletedProcess:
+    """``run`` on the excerpt. The default endpoint files point at files that do
+    not exist, so a ``run`` without its own files never reaches a real endpoint."""
+    missing = str(tmp_path / "no-default-endpoint.env")
+    return subprocess.run(
+        [sys.executable, "-m", "zotero_translate", "run", str(EXCERPT)]
+        + ["--output-dir", str(tmp_path / "out"), "--data-dir", str(tmp_path / "data")]
+        + list(options),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "ZT_ENV_FILE": missing, "ZT_ARGON_ENV_FILE": missing, **(env or {})},
+    )
+
+
+def test_run_with_a_user_profile_file_sends_the_rules(tmp_path):
+    # Code review round 1: ``run`` picks the rules by the kind of file it
+    # loads, a user profile's (``--profile-file``, as the worker), not by a
+    # flag; ``--concurrency`` replaces the profile's limit.
     with FakeModel() as model:
-        env = write_env_file(tmp_path, model.base_url, FAKE_API_KEY)
-        result = subprocess.run(
-            [sys.executable, "-m", "zotero_translate", "run", str(EXCERPT)]
-            + ["--output-dir", str(tmp_path / "out"), "--data-dir", str(tmp_path / "data")]
-            + ["--env-file", str(env), "--argon-env-file", str(env), "--user-profile-rules"],
-            capture_output=True,
-            text=True,
-            timeout=300,
+        profile = _endpoint_file(tmp_path, "profile.env").read_text().replace(
+            "http://127.0.0.1:9/v1", model.base_url
         )
+        (tmp_path / "profile.env").write_text(profile)
+        result = _run(tmp_path, "--profile-file", str(tmp_path / "profile.env"), "--concurrency", "3")
     assert result.returncode == 0, result.stderr[-2000:]
     batches = model.requests_of("translate_batch")
+    reviews = model.requests_of("review")
     assert batches and all(profile_rules.BATCH_RULES in r.prompt for r in batches)
+    assert reviews and all(profile_rules.REVIEW_RULES in r.prompt for r in reviews)
+    assert {r.body["model"] for r in model.requests} == {"m"}
     report = json.loads((tmp_path / "out" / "report.json").read_text("utf-8"))
     assert report["model"]["user_profile_rules"] is True
+    assert report["model"]["shared_budget"]["concurrency"] == 3
+    assert model.max_in_flight <= 3
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        # The flag of the first round is gone; the files are closed local ports.
+        ["--env-file", "CLOSED", "--argon-env-file", "CLOSED", "--user-profile-rules"],
+        ["--profile-file", "p.env", "--env-file", "e.env"],
+        ["--profile-file", "p.env", "--argon-env-file", "e.env"],
+    ],
+    ids=["no-free-flag", "profile-and-flash-file", "profile-and-argon-file"],
+)
+def test_run_refuses_a_free_rules_flag_and_mixed_settings(tmp_path, options):
+    closed = _endpoint_file(tmp_path, "closed.env")  # 127.0.0.1:9, a fake key
+    result = _run(tmp_path, *[str(closed) if o == "CLOSED" else o for o in options])
+    assert result.returncode == 2
+    assert not (tmp_path / "out").exists()
 
 
 # -- short labels -------------------------------------------------------------
