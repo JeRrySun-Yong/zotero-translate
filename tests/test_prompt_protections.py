@@ -16,13 +16,15 @@ profile) unchanged:
 - Prompt rules for user profiles only (2a, 2b; ADR 0005 supplement): a
   user profile's task appends a rules block to every translation batch
   prompt (literal values) and to every review prompt (literal values, and
-  the scope of the revision); the shared text stays as it is. The service
-  turns them on for every user profile's task; ``run`` with
-  ``--user-profile-rules``.
+  the scope of the revision); the shared text stays as it is. They are on
+  exactly when a user profile is loaded: every user profile's task in the
+  service, and ``run --profile-file``; the built-in env files cannot turn
+  them on.
 - Short labels are only let through more often, never less (3): an input
-  under 10 tokens fails when its output is blank, only punctuation or a
-  runaway answer; otherwise it passes when either the old token ratio
-  (0.3-3) or the label width rule passes. A label that fails is redone with
+  under 10 tokens fails when its output is blank or has no letter or digit;
+  otherwise it passes when the old token ratio (0.3-3) passes, and, when
+  that fails, when the label width rule passes (the width limits never veto
+  what the ratio passes). A label that fails is redone with
   the engine's simple one-paragraph prompt, as before. The samples are the
   labels ``m4-15-analysis/a-short-labels.md`` traced and codex's
   adversarial ones; what passes is what the accepted Gemini output used.
