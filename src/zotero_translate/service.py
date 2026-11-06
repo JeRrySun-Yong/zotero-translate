@@ -95,7 +95,14 @@ recorded it fails at once with a settings error (``permanent``, reason
 找不到模型配置的文件…): no automatic rerun, and no fallback to another
 profile; an attempt already running goes on with the settings it read.
 Both roles of a user profile share its one endpoint and
-budget, with no hedging (``model_client.PipelineModels``). The current
+budget, with no hedging (``model_client.PipelineModels``). A user profile's
+tasks have the prompt rules for user profiles (M4 ticket 15, ADR 0005
+supplement, ``zotero_translate.profile_rules``): a literal values rule in
+every translation batch and review prompt, and the scope of the revision in
+every review prompt; Gemini's tasks do not, so their request bodies and
+cache keys are as before. The worker turns them on for every attempt with
+``--profile-file`` (``settings.load_profile_settings``), whatever the file
+says; the task report says so (``model.user_profile_rules``). The current
 profile survives a restart (``<data_dir>/model-profiles.json``); when its
 file is gone, the current profile is Gemini again, with a log line. Profile
 events are logged as ``profile=<id> event=... name=... reason=...``:
