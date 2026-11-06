@@ -57,6 +57,7 @@ from zotero_translate.settings import load_pipeline_settings
 from zotero_translate.settings import load_profile_settings
 
 SHORT_LABEL = "Demo Page"  # a short label on page 1 of the AutoDesign excerpt
+FAIL_SIMPLE_RETRY = Path(__file__).parent / "fail_simple_retry"  # see its sitecustomize
 
 
 def answer_short_label_with(output):
@@ -274,6 +275,42 @@ def test_run_refuses_a_free_rules_flag_and_mixed_settings(tmp_path, options):
     result = _run(tmp_path, *[str(closed) if o == "CLOSED" else o for o in options])
     assert result.returncode == 2
     assert not (tmp_path / "out").exists()
+
+
+def test_a_null_draft_whose_simple_redo_fails_keeps_its_source_on_record(tmp_path):
+    # Null draft -> simple one-paragraph redo -> it fails -> the source is kept
+    # and recorded: the report and the run's closing line both count it.
+    with FakeModel() as model:
+        model.respond("translate_batch", answer_short_label_with(None))
+        env = write_env_file(tmp_path, model.base_url, FAKE_API_KEY)
+        result = _run(
+            tmp_path,
+            "--env-file",
+            str(env),
+            "--argon-env-file",
+            str(env),
+            env={
+                "PYTHONPATH": os.pathsep.join(
+                    [str(FAIL_SIMPLE_RETRY)]
+                    + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+                ),
+                "ZT_TEST_FAIL_SIMPLE_RETRY": SHORT_LABEL,
+            },
+        )
+    assert result.returncode == 0, result.stderr[-2000:]
+    report = json.loads((tmp_path / "out" / "report.json").read_text("utf-8"))
+    kept = report["kept_source_paragraphs"]
+    assert [k["page"] for k in kept] == [1]
+    assert SHORT_LABEL in kept[0]["source"]
+    assert "逐段翻译出错" in kept[0]["reason"]
+    assert f"保留原文 {len(kept)} 段" in result.stdout
+    mono = pdf_text((tmp_path / "out" / "mono.pdf").read_bytes())
+    assert SHORT_LABEL.replace(" ", "") in mono
+    assert PSEUDO_PREFIX + SHORT_LABEL.replace(" ", "") not in mono
+    # The built-in profile's files: no user profile rules.
+    batches = model.requests_of("translate_batch")
+    assert batches and not any(profile_rules.BATCH_RULES in r.prompt for r in batches)
+    assert report["model"]["user_profile_rules"] is False
 
 
 # -- short labels -------------------------------------------------------------
