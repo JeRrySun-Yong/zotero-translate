@@ -147,8 +147,9 @@ ABBREVIATION_MAX_WIDTH = 12
 ACRONYM_MAX_LETTERS = 5
 
 # Past twice the source's width, or six Chinese characters for a tiny
-# source, the whole output is a runaway answer ("甲" * 100) or the source
-# repeated ("Object " * 30), not a label's translation.
+# source, an output the token ratio rejects is a runaway answer ("甲" * 100)
+# or the source repeated ("Object " * 30), not a label's translation. It
+# never vetoes an output the ratio check passes.
 SHORT_OUTPUT_MAX_WIDTH_RATIO = 2
 SHORT_OUTPUT_MIN_WIDTH = 12
 
@@ -201,22 +202,25 @@ def translation_length_ok(
     The upstream check: the output/input token ratio is between 0.3 and 3.
     An input under LENGTH_RATIO_MIN_TOKENS (a label) is only let through
     more often than by that check, never less (M4 ticket 15), except for an
-    output that translates nothing or runs away. Its output, style tags left
-    out, fails when:
+    output that translates nothing. Its output, style tags left out, fails
+    when it is blank, or when the source has letters and the output has no
+    letter or digit (only punctuation: "." for a sentence).
 
-    1. it is blank;
-    2. the source has letters and the output has no letter or digit (only
-       punctuation): "." for a sentence;
-    3. it is wider than twice the source, or six Chinese characters for a
-       tiny source: "甲" * 100, "Object " * 30.
+    Otherwise it passes when the token ratio passes (however wide:
+    "MLLMs" -> 多模态大语言模型), or, when the ratio fails, when it fits the
+    label:
 
-    Otherwise it passes when the token ratio passes, or when its Chinese
-    part fits the label: at most 1.2 times the source's width, with room for
-    three Chinese characters (six for an abbreviation): "References" ->
-    参考图像 passes, "Object" -> 物体组合 and "Global" -> 全局风格 (AutoRef's
-    table headers expanded from the paper dossier, rendered at half size)
-    do not. A label that fails is redone with the simple one-paragraph
-    prompt, which has no dossier.
+    - the whole output is at most twice the source's width, or six Chinese
+      characters for a tiny source, so that a runaway answer ("甲" * 100) or
+      the source repeated ("Object " * 30) is not taken for a label;
+    - and its Chinese part is at most 1.2 times the source's width, with
+      room for three Chinese characters (six for an abbreviation):
+      "References" -> 参考图像 passes, "Object" -> 物体组合 and "Global" ->
+      全局风格 (AutoRef's table headers expanded from the paper dossier,
+      rendered at half size) do not.
+
+    A label that fails is redone with the simple one-paragraph prompt, which
+    has no dossier.
     """
     ratio_ok = input_token_count > 0 and (
         0.3 < output_token_count / input_token_count < 3
@@ -227,15 +231,18 @@ def translation_length_ok(
     output = _STYLE_TAG.sub("", output_text).strip()
     if not output:
         return False
-    source_width = display_width(source)
     has_letters = any(character.isalpha() for character in source)
     if has_letters and not any(character.isalnum() for character in output):
         return False
+    if ratio_ok:
+        return True
+    # The width rule, for a label the ratio check rejects.
+    source_width = display_width(source)
     if display_width(output) > max(
         SHORT_OUTPUT_MIN_WIDTH, source_width * SHORT_OUTPUT_MAX_WIDTH_RATIO
     ):
         return False
-    if ratio_ok or not has_letters:
+    if not has_letters:
         return True
     room = (
         ABBREVIATION_MAX_WIDTH

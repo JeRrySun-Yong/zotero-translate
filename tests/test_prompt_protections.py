@@ -301,6 +301,39 @@ def test_a_short_label_that_outgrows_its_box_or_translates_nothing_fails(source,
     assert not length_ok(source, output)
 
 
+# Code review round 1 of ticket 15: the old ratio check passes these (an
+# abbreviation's Chinese full name, a kept model name), and they are wider
+# than twice the source. Width must never veto what the ratio check passes.
+RATIO_PASSED_WIDE = [
+    ("MLLMs", "多模态大语言模型"),  # 3 -> 6 tokens
+    ("BiLSTM", "双向长短期记忆网络"),  # 3 -> 8
+    ("ViT", "视觉Transformer"),  # 2 -> 2
+]
+
+
+@pytest.mark.parametrize(("source", "output"), RATIO_PASSED_WIDE)
+def test_a_wide_short_label_that_the_ratio_check_passes_passes(source, output):
+    assert length_ok(source, output)
+
+
+def _old_ratio_ok(source: str, output: str) -> bool:
+    return 0.3 < tokens(output) / tokens(source) < 3 if tokens(source) else False
+
+
+@pytest.mark.parametrize(
+    ("source", "output"), SHORT_ACCEPTED + SHORT_REJECTED + RATIO_PASSED_WIDE
+)
+def test_only_a_blank_or_punctuation_output_fails_where_the_ratio_check_passes(source, output):
+    """Short labels are only let through more often: of what the old ratio
+    check passes, only a blank output or one with no letter or digit fails."""
+    if not _old_ratio_ok(source, output):
+        return
+    translates_nothing = not output.strip() or (
+        any(c.isalpha() for c in source) and not any(c.isalnum() for c in output)
+    )
+    assert length_ok(source, output) is not translates_nothing
+
+
 def test_a_normal_input_keeps_the_token_ratio():
     assert translation_length_ok("a" * 80, "b" * 80, 40, 50)
     assert not translation_length_ok("a" * 80, "b" * 80, 40, 130)
