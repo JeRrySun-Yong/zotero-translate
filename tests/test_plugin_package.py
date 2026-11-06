@@ -182,16 +182,39 @@ def test_package_leaves_out_tests_and_dev_tools(xpi):
     assert "build.py" not in xpi.namelist()
 
 
+# What marks a development switch: the test settings, the dev bridge, the
+# acceptance's log line and the call that quits Zotero.
+DEV_SWITCH = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
+DEV_SWITCH_FILE = ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js"
+
+
 def test_package_has_no_test_switch(xpi):
     # The acceptance's test switch (scenario 7: quit Zotero before an
     # attachment's identity is written) runs through the dev bridge in the
-    # test profile only (plugin/dev/acceptance/quit_before_identity.js); the
-    # package neither holds it nor reads any test setting.
-    switch = (ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js").read_text("utf-8")
-    forbidden = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
-    assert forbidden.search(switch), "the pattern must match the switch itself"
+    # test profile only; the package neither holds it nor reads any test
+    # setting. The scan needs no development file, so it also runs in the
+    # public repository.
     for name in xpi.namelist():
-        assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name
+        assert not DEV_SWITCH.search(xpi.read(name).decode("utf-8", "replace")), name
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'const flag = Services.env.get("ZT_TEST_PAUSE_AFTER_MARKER");',
+        'Zotero.debug("zotero-translate acceptance: stopping");',
+        "Services.startup.quit(Ci.nsIAppStartup.eAttemptQuit);",
+        'const id = "zotero-translate-dev-bridge@zotero-translate";',
+    ],
+)
+def test_test_switch_pattern_matches_the_switch_features(text):
+    assert DEV_SWITCH.search(text)
+
+
+def test_test_switch_pattern_matches_the_switch_file_itself():
+    if not DEV_SWITCH_FILE.is_file():
+        pytest.skip("the public repository holds no development tools")
+    assert DEV_SWITCH.search(DEV_SWITCH_FILE.read_text("utf-8"))
 
 
 def test_settings_page_suggests_deepseek_fast_only(xpi):

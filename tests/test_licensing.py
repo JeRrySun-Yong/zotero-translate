@@ -88,3 +88,57 @@ def test_every_fixture_belongs_to_one_of_the_three_papers():
                 number = int(info[1].split()[0])
                 assert pdf.xref_get_key(number, "arXivID")[1].split("/abs/")[1].startswith(arxiv), name
                 assert pdf.xref_get_key(number, "License")[1].endswith("/licenses/by/4.0/"), name
+
+
+def notice_sections() -> dict[str, list[str]]:
+    """The notice's bullet lines, per language section ("English", "中文")."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in (ROOT / "engine" / "MODIFICATIONS.md").read_text("utf-8").splitlines():
+        if line.startswith("## "):
+            current = sections.setdefault("English" if "English" in line else "中文", [])
+        elif line.startswith("- ") and current is not None:
+            current.append(line)
+    return sections
+
+
+def test_modification_list_has_one_line_per_directory_not_per_file():
+    sections = notice_sections()
+    assert set(sections) == {"English", "中文"}
+    directories = {}
+    for language, lines in sections.items():
+        found = []
+        for line in lines:
+            match = re.match(r"- `(babeldoc/[^`]*)`", line)
+            assert match, line
+            path = match.group(1)
+            assert (ROOT / "engine" / path).is_dir(), f"{path} is not a directory of the engine"
+            found.append(path)
+        assert len(found) == len(set(found)), f"{language}: a directory twice"
+        directories[language] = set(found)
+    assert directories["English"] == directories["中文"]
+    assert len(directories["English"]) >= 5
+    # Every directory with a modified source file is listed (the list is the
+    # engine tree's directories that differ from upstream, not a subset).
+    assert "babeldoc/format/pdf/document_il/midend/" in directories["English"]
+    assert "babeldoc/docvision/" in directories["English"]
+
+
+def test_modification_notice_gets_the_font_scale_floor_the_right_way_round():
+    # Upstream's floor of the layout search's font scale is 0.1; here it is
+    # raised to 0.5 (engine/babeldoc/format/pdf/document_il/midend/typesetting.py,
+    # MIN_SCALE). The notice must not say the floor got smaller.
+    notice = (ROOT / "engine" / "MODIFICATIONS.md").read_text("utf-8")
+    english, chinese = notice.split("## 中文")
+    assert "from 0.1 to 0.5" in english
+    assert "0.1 提高到 0.5" in chinese
+    assert not re.search(r"smaller (font-)?scale|更小的字号", notice)
+
+
+def test_modification_notice_describes_the_coreml_cache_not_the_coreml_run():
+    # Upstream already ran the layout model through CoreML with a static input
+    # shape; what was added is the compiled-model cache.
+    notice = (ROOT / "engine" / "MODIFICATIONS.md").read_text("utf-8")
+    english, chinese = notice.split("## 中文")
+    assert re.search(r"cache", english) and "static input shape" not in english
+    assert "缓存" in chinese and "固定输入尺寸" not in chinese
