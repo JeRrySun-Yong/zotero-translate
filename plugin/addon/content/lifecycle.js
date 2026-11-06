@@ -21,8 +21,12 @@
  * directly: requestCancel() asks first (the row shows "确认取消？"), and only a
  * second press within CANCEL_CONFIRM_MS cancels; an ask that is not answered
  * in time goes away. A task that stops being cancellable meanwhile drops the
- * ask. On attaching or attach_failed, requestCancel() cancels at once (the
- * service has already succeeded; nothing is lost but a download). Once
+ * ask. Attaching and attach_failed ask first as well (M4 ticket 16; requirement
+ * 5 has no exception, and an attach_failed row loses its "继续挂回" with the
+ * cancel): the second press ends the task here, without a cancel request (the
+ * service has already succeeded; nothing is lost but a download). An ask
+ * does not carry over from one kind of cancel to the other (translating ->
+ * attaching), nor into a PDF being imported. Once
  * confirmed, the cancel request goes out at once; the
  * task is no longer queried. 200, 409 or 404 make it `cancelled`, and
  * nothing is attached; a 503 shows the service's reason, and a 503 or no
@@ -57,9 +61,10 @@
  * output's title, added no earlier than the intent's start, is claimed
  * (its identity written) instead of importing again. A local error makes
  * the task `attach_failed` with the reason; "继续挂回" handles the PDFs
- * again in the same way. "取消" while downloading or waiting to download,
- * or on `attach_failed`, makes the task `cancelled` at once (the service
- * has already succeeded; no cancel request): the download under way is
+ * again in the same way. "取消" (confirmed, like the others) while
+ * downloading or waiting to download, or on `attach_failed`, makes the task
+ * `cancelled` (the service has already succeeded; no cancel request): the
+ * download under way is
  * aborted, and nothing comes after it; attachments already added stay.
  * While a PDF is being imported, the row offers no "取消". An `attaching`
  * task saved by a plugin from before these records (no `attached`) cannot
@@ -404,22 +409,15 @@ var ZoteroTranslateLifecycle = (() => {
         await upload(task);
       },
 
-      /** The task window's "取消", which asks first on a queued, running or
-       *  waiting task: the first press only shows "确认取消？" on the row, and
-       *  a second press within CANCEL_CONFIRM_MS cancels (cancel()); after
-       *  that the ask is gone and the next press asks again. A task that
-       *  stops being cancellable drops its ask. On attaching or attach_failed
-       *  there is nothing to ask: the task is cancelled at once. */
+      /** The task window's "取消", which asks first on a queued, running,
+       *  waiting, attaching or attach_failed task: the first press only shows
+       *  "确认取消？" on the row, and a second press within CANCEL_CONFIRM_MS
+       *  cancels (cancel()); after that the ask is gone and the next press
+       *  asks again. A task that stops being cancellable, or changes from
+       *  one kind of cancel to the other, drops its ask. */
       async requestCancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
-        if (!task) {
-          return;
-        }
-        if (cancelsLocally(task)) {
-          await lifecycle.cancel(key);
-          return;
-        }
-        if (!CANCELLABLE_STATES.includes(task.state)) {
+        if (!task || !(CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task))) {
           return;
         }
         if (cancelConfirm?.key === key) {
@@ -444,7 +442,8 @@ var ZoteroTranslateLifecycle = (() => {
       /** The "取消" button, no confirmation: end the task's operation under
        *  way; while attaching or attach_failed, the task is cancelled at once,
        *  with no cancel request; otherwise save the cancel intent and send the cancel at once.
-       *  The task window calls requestCancel() instead, which asks first. */
+       *  The task window calls requestCancel() instead, which asks first (also
+       *  while attaching and attach_failed). */
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (task && cancelsLocally(task)) {
@@ -539,6 +538,16 @@ var ZoteroTranslateLifecycle = (() => {
      *  being imported; or attach_failed. */
     function cancelsLocally(task) {
       return LOCALLY_CANCELLABLE_STATES.includes(task.state) && !task.importing;
+    }
+
+    /** Which kind of cancel a task in `state` has: "service" (a cancel request
+     *  goes out), "local" (the task ends here), or null (none). An ask holds
+     *  only while the kind stays the same. */
+    function cancelKind(state) {
+      if (CANCELLABLE_STATES.includes(state)) {
+        return "service";
+      }
+      return LOCALLY_CANCELLABLE_STATES.includes(state) ? "local" : null;
     }
 
     /** Set the task's next operation: 2 seconds from now, or 10 while the
@@ -823,6 +832,9 @@ var ZoteroTranslateLifecycle = (() => {
             [output.file]: { taskId: task.taskId, output: output.file, startedAt: clock.now() },
           };
           task.importing = true;
+          if (cancelConfirm?.key === task.key) {
+            clearCancelConfirm(); // no 取消 while importing: nor an ask for it
+          }
           changed(); // the intent is saved before the import
           try {
             attachment = await importAttachment(target, { path, title: output.title });
@@ -1039,8 +1051,8 @@ var ZoteroTranslateLifecycle = (() => {
      *  attach_failed after done, when removing the temporary directory fails)
      *  it clears it. The upload sets submittedAt and clears endedAt itself. */
     function setState(task, state) {
-      if (cancelConfirm?.key === task.key && !CANCELLABLE_STATES.includes(state)) {
-        clearCancelConfirm();
+      if (cancelConfirm?.key === task.key && cancelKind(state) !== cancelKind(task.state)) {
+        clearCancelConfirm(); // no longer cancellable, or the other kind of cancel
       }
       const ended = ENDED_STATES.includes(state);
       if (ended && !(ENDED_STATES.includes(task.state) && task.endedAt != null)) {

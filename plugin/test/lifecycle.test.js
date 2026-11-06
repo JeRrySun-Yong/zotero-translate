@@ -2196,16 +2196,87 @@ test("a row that stops being cancellable drops the ask; another row's ask is a s
   assert.deepEqual([rowOf(env, 0).confirmCancel, rowOf(env, 1).confirmCancel], [false, true]);
 });
 
-test("取消 while 挂回中 or 挂回失败 cancels at once: nothing is lost but the downloads", async () => {
+// Ticket M4-16 item 3: 挂回中 and 挂回失败 ask first too (requirement 5 has no exception).
+test("取消 on 挂回失败 asks first: the first press only asks, the second within 5 seconds cancels without a cancel request", async () => {
   const saved = JSON.stringify([
     { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attach_failed", error: "磁盘已满", attached: {}, importIntents: {} },
   ]);
   const env = environment({ saved });
   env.lifecycle.start();
-  await env.lifecycle.requestCancel(rowOf(env).key);
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+  assert.equal(rowOf(env).canCancel, true);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.equal(rowOf(env).canContinue, true); // 继续挂回 is still offered while it asks
+
+  await env.clock.advance(4999);
+  await env.lifecycle.requestCancel(key);
   assert.deepEqual(env.status(), ["已取消"]);
   assert.equal(rowOf(env).confirmCancel, false);
   assert.deepEqual(env.requests, []);
+});
+
+test("the ask on 挂回失败 goes away after 5 seconds, and the next press asks again", async () => {
+  const saved = JSON.stringify([
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attach_failed", error: "磁盘已满", attached: {}, importIntents: {} },
+  ]);
+  const env = environment({ saved });
+  env.lifecycle.start();
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  await env.clock.advance(5000);
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+});
+
+test("取消 on 挂回中 asks first; the second press cancels at once and nothing is imported", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.findHold = held();
+  await env.clock.advance(2000);
+  assert.equal(env.findHold.count, 1);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  const key = rowOf(env).key;
+
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  assert.equal(rowOf(env).confirmCancel, true);
+
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.ok(!env.requests.includes(CANCEL("t1")));
+  env.findHold.answer();
+  await env.clock.advance(60000);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.imports, []);
+});
+
+test("an ask made while translating does not carry over into 挂回中; once a PDF is being imported there is no ask", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.findHold = held();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  assert.equal(rowOf(env).confirmCancel, false); // the question was about a translation under way
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  env.quitAfterImport = true; // the import starts and never returns
+  env.findHold.answer();
+  await env.clock.advance(2000);
+  assert.equal(rowOf(env).canCancel, false);
+  assert.equal(rowOf(env).confirmCancel, false);
+  await env.lifecycle.requestCancel(key); // nothing to cancel while importing
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.status(), ["挂回中"]);
 });
 
 test("取消 on a waiting-rerun row asks first too; only the second press sends the cancel", async () => {
