@@ -97,3 +97,14 @@ def test_package_has_no_test_switch(xpi):
     assert forbidden.search(switch), "the pattern must match the switch itself"
     for name in xpi.namelist():
         assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name
+
+
+def test_settings_page_suggests_deepseek_fast_only(xpi):
+    # User decision 2026-11-05 (M4 tickets 06 and 14): of Command Code's
+    # DeepSeek models only DeepSeek Fast is offered; the form's examples name
+    # it, and no longer the plain flash model.
+    page = xpi.read("content/preferences.xhtml").decode("utf-8")
+    placeholders = dict(re.findall(r'<html:input id="([^"]+)"[^>]*\bplaceholder="([^"]*)"', page))
+    assert placeholders["zotero-translate-model"] == "例如 deepseek/deepseek-v4.1-flash-fast"
+    assert placeholders["zotero-translate-name"] == "例如 DeepSeek Fast"
+    assert not re.search(r"deepseek-v4\.1-flash(?!-fast)", page)
