@@ -7,6 +7,7 @@ receives it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -21,14 +22,22 @@ from zotero_translate.settings import DEFAULT_PORT
 
 ROOT = Path(__file__).resolve().parent.parent
 
+PLUGIN_ID = "zotero-translate@jerrysun-yong.github.io"
+REPO_URL = "https://github.com/JeRrySun-Yong/zotero-translate"
+
 
 @pytest.fixture(scope="module")
-def xpi(tmp_path_factory) -> zipfile.ZipFile:
+def built_xpi(tmp_path_factory) -> Path:
     output = tmp_path_factory.mktemp("xpi") / "zotero-translate.xpi"
     subprocess.run(
         [sys.executable, str(ROOT / "plugin" / "build.py"), "--output", str(output)], check=True
     )
-    with zipfile.ZipFile(output) as package:
+    return output
+
+
+@pytest.fixture(scope="module")
+def xpi(built_xpi) -> zipfile.ZipFile:
+    with zipfile.ZipFile(built_xpi) as package:
         yield package
 
 
@@ -38,9 +47,46 @@ def test_manifest_declares_a_bootstrap_plugin_for_zotero_7_to_10(xpi):
     assert zotero["strict_min_version"] == "6.999"
     assert zotero["strict_max_version"] == "10.*"
     assert "bootstrap.js" in xpi.namelist()
-    # Zotero rejects a plugin without update_url; ours points at this machine,
-    # so update checks never reach an outside host.
-    assert urlparse(zotero["update_url"]).hostname == "localhost"
+
+
+def test_manifest_names_the_public_identity(xpi):
+    # Zotero rejects a plugin without update_url; the public plugin updates
+    # from the latest GitHub Release of the project.
+    manifest = json.loads(xpi.read("manifest.json"))
+    zotero = manifest["applications"]["zotero"]
+    assert zotero["id"] == PLUGIN_ID
+    update_url = urlparse(zotero["update_url"])
+    assert update_url.scheme == "https"
+    assert update_url.hostname == "github.com"
+    assert update_url.path.endswith("/update.json")
+    assert zotero["update_url"] == f"{REPO_URL}/releases/latest/download/update.json"
+    assert manifest["homepage_url"] == REPO_URL
+    assert manifest["author"] == "JeRrySun-Yong"
+
+
+def test_build_writes_the_update_manifest_next_to_the_xpi(built_xpi, xpi):
+    manifest = json.loads(xpi.read("manifest.json"))
+    zotero = manifest["applications"]["zotero"]
+    update_file = built_xpi.parent / "update.json"
+    assert update_file.is_file()
+    updates = json.loads(update_file.read_text("utf-8"))["addons"][zotero["id"]]["updates"]
+    assert len(updates) == 1
+    (update,) = updates
+    assert update["version"] == manifest["version"]
+    assert update["update_link"] == (
+        f"{REPO_URL}/releases/download/v{manifest['version']}/zotero-translate.xpi"
+    )
+    assert update["update_hash"] == "sha256:" + hashlib.sha256(built_xpi.read_bytes()).hexdigest()
+    assert update["applications"]["zotero"] == {
+        "strict_min_version": zotero["strict_min_version"],
+        "strict_max_version": zotero["strict_max_version"],
+    }
+    assert set(json.loads(update_file.read_text("utf-8"))["addons"]) == {zotero["id"]}
+
+
+def test_package_points_no_one_at_files_the_public_repository_lacks(xpi):
+    for name in xpi.namelist():
+        assert "docs/deployment.md" not in xpi.read(name).decode("utf-8", "replace"), name
 
 
 def test_default_service_address_is_the_services_default_port(xpi):

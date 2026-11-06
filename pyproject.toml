@@ -33,7 +33,8 @@ constraint-dependencies = ["bitstring<5"]
 babeldoc = { path = "engine", editable = true }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# plugin/dev holds the tests of the development tools beside them.
+testpaths = ["tests", "plugin/dev"]
 # With -n (pytest-xdist), each test file runs whole in one process; see tests/conftest.py.
 addopts = "--dist loadfile"
 markers = ["real_model: calls the real pipeline model; skipped unless ZT_REAL_MODEL_SMOKE=1"]
