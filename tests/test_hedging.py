@@ -818,3 +818,80 @@ def test_a_losers_record_failing_after_the_request_returned_is_logged(tmp_path, 
         finally:
             models.close()
     assert "disk full" in caplog.text
+
+
+# M4 ticket 17: an answer that passes the check can echo the key too. It is
+# redacted as it arrives, with the keys of both endpoints (the client that
+# started the request knows both), before the check, the cache and the caller.
+def _assert_keyless(tmp_path: Path, models, log: RequestLog, expected: str) -> None:
+    key = ResponseCache.key(models.flash._body(MESSAGES))
+    entry = ResponseCache(tmp_path / "cache").entry(key)
+    assert entry is not None and entry["content"] == expected, entry
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            for secret in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
+                assert secret.encode() not in path.read_bytes(), path
+
+
+def test_a_hedged_argon_copy_that_wins_with_the_keys_echoed_is_returned_and_cached_without_them(tmp_path):
+    echoed = f"argon {FAKE_ARGON_API_KEY} and flash {FAKE_API_KEY}"
+    expected = f"argon {REDACTED} and flash {REDACTED}"
+    checked = []
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")  # the original never answers: the copy wins
+        argon.respond("other", lambda body: echoed)
+        models, log = _models(flash, argon, tmp_path)
+        try:
+            content = models.flash.complete(MESSAGES, validate=checked.append, kind="review")
+            again = models.flash.complete(MESSAGES, kind="review")  # the cache
+            records = _records(log, 3)
+        finally:
+            models.close()
+
+    assert content == expected and again == expected
+    assert checked == [expected]
+    assert _summary(records)[:2] == [(1, "flash", "cancelled_for_winner", False), (2, "argon", "succeeded", True)]
+    _assert_keyless(tmp_path, models, log, expected)
+
+
+def test_a_hedged_flash_send_that_wins_with_its_key_echoed_is_returned_and_cached_without_it(tmp_path):
+    echoed = f"flash {FAKE_API_KEY}"
+    expected = f"flash {REDACTED}"
+    checked = []
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE * 1.5, echoed))  # past the threshold, so a copy is sent
+        argon.respond("other", _later(HEDGE * 6, f"argon {FAKE_ARGON_API_KEY}"))
+        models, log = _models(flash, argon, tmp_path)
+        try:
+            content = models.flash.complete(MESSAGES, validate=checked.append, kind="review")
+            records = _records(log, 2)
+        finally:
+            models.close()
+
+    assert content == expected
+    assert checked == [expected]
+    assert _summary(records) == [(1, "flash", "succeeded", False), (2, "argon", "cancelled_for_winner", True)]
+    _assert_keyless(tmp_path, models, log, expected)
+
+
+def test_a_request_forwarded_to_argon_with_the_keys_echoed_is_returned_and_cached_without_them(tmp_path):
+    echoed = f"argon {FAKE_ARGON_API_KEY} and flash {FAKE_API_KEY}"
+    expected = f"argon {REDACTED} and flash {REDACTED}"
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.fail_same_request(["timeout", "timeout"])
+        argon.respond("other", lambda body: echoed)
+        models, log = _models(
+            flash, argon, tmp_path, hedge_after=None, flash_changes={"timeout_seconds": 1.0}
+        )
+        try:
+            content = models.flash.complete(MESSAGES, kind="translation_batch")
+        finally:
+            models.close()
+
+    assert content == expected
+    assert [(r["send"], r["endpoint"], r["result"]) for r in load_records(log.path)] == [
+        (1, "flash", "timeout"),
+        (2, "flash", "timeout"),
+        (3, "argon", "succeeded"),
+    ]
+    _assert_keyless(tmp_path, models, log, expected)

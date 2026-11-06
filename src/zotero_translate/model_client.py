@@ -36,22 +36,33 @@ Reliability (ADR 0002):
   cut, the API key of this client and of its fallback is replaced with
   ``[redacted]``; HTTP 401 and 403, which are about the key, carry no body
   at all. The request headers are never logged.
-- The same goes for the error of the caller's ``validate`` (M4 ticket 16):
-  its text can hold the answer it rejected, and an answer can echo the key.
-  Before the text goes into the retry warning, the final ``ModelCallError``
-  or the saved ``rejections``, the keys in it read ``[redacted]``
-  (``_scrub``); the rejection keeps its class and attributes, and so do the
-  parts of the answer it carries (the glosses of a rejected gloss rewrite, the
-  verdicts of a rejected review: the caller takes them back from
-  ``rejections`` and they reach the task report), but the keys in all of
-  them, in its message, its attributes (strings, and strings inside lists,
-  tuples, sets, dicts and dataclasses) and the exceptions it was raised from
-  or while handling, read ``[redacted]``. This holds for plain, streamed and
-  hedged requests alike.
+- An answer is redacted as it arrives (M4 ticket 17): what a send returns
+  goes through ``_redact`` before the caller's ``validate`` sees it, before it
+  is cached and before it is returned, so an answer that echoes the key
+  (and passes ``validate``) reaches the cache, the task report and the
+  caller with ``[redacted]`` in its place. ``_redact`` is the one of the
+  client that started the request, which knows the keys of both endpoints
+  (flash and its fallback argon), so it holds for a request forwarded to
+  argon and for either send of a hedged request; plain, streamed (the joined
+  content) and hedged requests alike. An answer without a key is unchanged.
+  The connection test redacts its own text (``check_connection``).
+- The error of the caller's ``validate`` is cleaned again, on its own (M4
+  ticket 16), as a second line of defence: its text can hold the answer's
+  words, and the rejection carries parts of them. Before the text goes into
+  the retry warning, the final ``ModelCallError`` or the saved
+  ``rejections``, the keys in it read ``[redacted]`` (``_scrub``); the
+  rejection keeps its class and attributes, and so do the parts of the answer
+  it carries (the glosses of a rejected gloss rewrite, the verdicts of a
+  rejected review: the caller takes them back from ``rejections`` and they
+  reach the task report), but the keys in all of them, in its message, its
+  attributes (strings, and strings inside lists, tuples, sets, dicts and
+  dataclasses) and the exceptions it was raised from or while handling, read
+  ``[redacted]``. This holds for plain, streamed and hedged requests alike.
 - Successful answers (those ``validate`` accepts) are cached on disk, keyed by
   a hash of the whole request body, which includes the model name. The cache
   directory is shared by all paper tasks, so a resubmitted paper reuses every
-  answer that succeeded before.
+  answer that succeeded before. What is cached is the redacted answer; an
+  entry written before ticket 17 is not cleaned.
 
 Two endpoints (ADR 0004): ``PipelineModels`` holds a client for flash and
 one for argon. A flash request that is not hedged (hedging off, another
@@ -361,7 +372,11 @@ class ModelClient:
             timing = _SendTiming()
             try:
                 try:
-                    content = target._send(target_body, timing)
+                    # Redacted as it arrives: the check, the cache and the
+                    # caller get no answer with a key in it (also the other
+                    # endpoint's, when the request was forwarded: ``self``
+                    # knows both).
+                    content = self._redact(target._send(target_body, timing))
                 except ModelCallError as e:  # an HTTP error no resend fixes
                     record(target.role, target.model, attempt, timing, "http_error")
                     e.rejections = rejections  # e.g. the gloss rewrite keeps what passed
@@ -461,7 +476,9 @@ class ModelClient:
     ) -> str:
         """Send ``body`` once; fill ``timing`` as it goes, also when this raises.
 
-        ``give_up`` and ``on_out`` are for a hedged request (``_post``).
+        ``give_up`` and ``on_out`` are for a hedged request (``_post``). The
+        content it returns is the endpoint's, stripped, with any key still in
+        it: the caller that started the request redacts it (``_redact``).
         """
         try:
             status_code, data = self._post(body, timing, give_up, on_out)
@@ -968,8 +985,10 @@ class _Hedged:
 
         result = None
         try:
-            content = client._send(
-                candidate.body, timing, candidate.give_up if candidate.hedge else None, out
+            # Redacted as it arrives, with the keys of both endpoints: ``flash``
+            # started the request and knows its fallback, whichever send this is.
+            content = self.flash._redact(
+                client._send(candidate.body, timing, candidate.give_up if candidate.hedge else None, out)
             )
             if self.validate is not None:
                 try:

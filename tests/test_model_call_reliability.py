@@ -510,3 +510,78 @@ def test_a_review_answer_echoing_the_key_in_a_kept_verdict_leaves_it_out_of_the_
     assert result[1] is None
     assert result[0] == f"它分 3 个部分，{REDACTED}"
     assert FAKE_API_KEY not in json.dumps([result, reviewer.report(), reviewer.kept.paragraphs], ensure_ascii=False)
+
+
+# -- M4 ticket 17: a key echoed in an answer that passes validation ---------------
+
+
+def _cache_entries(directory: Path) -> list[dict]:
+    return [json.loads(path.read_text("utf-8")) for path in sorted(directory.rglob("*.json"))]
+
+
+def test_a_validated_answer_echoing_the_key_is_returned_checked_and_cached_without_it(tmp_path):
+    echoed = f"meta-harness {FAKE_API_KEY} 回显"
+    checked = []
+    with FakeModel() as fake:
+        fake.respond("other", lambda body: echoed)
+        client = _client(fake, tmp_path)
+        try:
+            content = client.complete([{"role": "user", "content": "hi"}], validate=checked.append)
+            # The same request again: the cache answers, with what was saved.
+            again = client.complete([{"role": "user", "content": "hi"}], validate=checked.append)
+        finally:
+            client.close()
+
+    expected = f"meta-harness {REDACTED} 回显"
+    assert content == expected and again == expected
+    assert checked == [expected]  # the check sees the answer as it is kept, once (the second was a hit)
+    assert len(fake.requests) == 1
+    entries = _cache_entries(tmp_path / "cache")
+    assert [e["content"] for e in entries] == [expected]
+    for path in (tmp_path / "cache").rglob("*"):
+        if path.is_file():
+            assert FAKE_API_KEY.encode() not in path.read_bytes(), path
+
+
+def test_an_answer_without_the_key_is_returned_and_cached_exactly_as_it_came(tmp_path):
+    # Whitespace inside, a near miss of the key, the other endpoint's key shape:
+    # nothing here is the key, so nothing changes.
+    answer = f'{{"terms": ["a  b", "{FAKE_API_KEY[:-1]}", "sk-other"]}}\n\n  tail 回答'
+    with FakeModel() as fake:
+        fake.respond("other", lambda body: answer)
+        client = _client(fake, tmp_path)
+        try:
+            content = client.complete([{"role": "user", "content": "hi"}], validate=lambda c: None)
+            assert client._redact(answer) == answer
+        finally:
+            client.close()
+
+    assert content == answer.strip()
+    assert [e["content"] for e in _cache_entries(tmp_path / "cache")] == [answer.strip()]
+
+
+def test_a_review_answer_echoing_the_key_that_passes_its_checks_leaves_it_out_of_the_result_and_the_report(
+    tmp_path,
+):
+    items = [
+        {"id": 0, "source": "It has 3 parts.", "draft": "它有几个部分。", "page": 2},
+        {"id": 1, "source": "It runs 7 steps.", "draft": "它运行几步。", "page": 2},
+    ]
+    # Both items pass the checks; item 0 has the key in its text.
+    answer = [
+        {"id": 0, "output": f"它分 3 个部分，{FAKE_API_KEY}"},
+        {"id": 1, "output": "它运行 7 步。"},
+    ]
+    with FakeModel() as fake:
+        fake.respond("review", lambda body: json.dumps(answer, ensure_ascii=False))
+        client = _client(fake, tmp_path)
+        try:
+            reviewer = BatchReviewer(client, FAKE_DOSSIER, KeptSource())
+            result = reviewer(items, [])
+        finally:
+            client.close()
+
+    assert result == {0: f"它分 3 个部分，{REDACTED}", 1: "它运行 7 步。"}
+    assert FAKE_API_KEY not in json.dumps([result, reviewer.report(), reviewer.kept.paragraphs], ensure_ascii=False)
+    cached = "".join(e["content"] for e in _cache_entries(tmp_path / "cache"))
+    assert FAKE_API_KEY not in cached and REDACTED in cached

@@ -23,6 +23,7 @@ import pytest
 
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
+from tests.fake_model import STREAM_PIECE_CHARACTERS
 from tests.fake_model import STREAM_THINKING
 from tests.fake_model import FakeModel
 from zotero_translate.endpoint import SendCancelled
@@ -398,3 +399,28 @@ def test_a_streamed_answer_echoing_the_key_that_fails_its_check_reads_redacted(t
     assert FAKE_API_KEY not in "".join(str(r) for r in error.rejections)
     assert len(error.rejections) == 2
     assert FAKE_API_KEY not in caplog.text and REDACTED in caplog.text, caplog.text
+
+
+def test_a_streamed_answer_echoing_the_key_that_passes_its_check_is_returned_and_cached_without_it(tmp_path):
+    """M4 ticket 17: the key runs across several content deltas; joined, it is one string to redact."""
+    assert len(FAKE_API_KEY) > STREAM_PIECE_CHARACTERS  # the key cannot fit in one delta
+    echoed = f"meta-harness {FAKE_API_KEY} 回显"
+    checked = []
+    with FakeModel() as fake:
+        fake.respond("other", lambda body: echoed)
+        client = ModelClient(_settings(fake, tmp_path, stream=True))
+        try:
+            content = client.complete(MESSAGES, validate=checked.append)
+            again = client.complete(MESSAGES, validate=checked.append)  # the cache
+        finally:
+            client.close()
+
+    expected = f"meta-harness {REDACTED} 回显"
+    assert content == expected and again == expected
+    assert checked == [expected]
+    [request] = fake.requests
+    assert request.body["stream"] is True
+    files = [path for path in (tmp_path / "cache").rglob("*") if path.is_file()]
+    assert len(files) == 1
+    assert FAKE_API_KEY.encode() not in files[0].read_bytes()
+    assert json.loads(files[0].read_text("utf-8"))["content"] == expected

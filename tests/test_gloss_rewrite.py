@@ -204,3 +204,44 @@ def test_a_key_echoed_in_a_gloss_of_a_rejected_rewrite_answer_reaches_no_report_
     for path in files:
         for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
             assert key.encode() not in path.read_bytes(), path
+
+
+def test_a_key_echoed_in_a_gloss_of_an_accepted_rewrite_answer_reaches_no_report_log_or_file(tmp_path):
+    # M4 ticket 17: every gloss passes its check, one with the key in it (the
+    # check counts Chinese characters and looks at the end only), so the answer
+    # is accepted at once. Ticket 16 cleaned only what a rejection keeps.
+    echoed = f"机制 {FAKE_ARGON_API_KEY}"
+    with FakeModel() as model:
+        model.respond("term_list", lambda body: json.dumps({"terms": TERMS}, ensure_ascii=False))
+        model.respond("gloss_rewrite", lambda body: answer({"meta-harness": echoed, "AutoDesign": NOUN}))
+        service = launch_service(model, tmp_path)
+        try:
+            task_id = service.submit(AUTODESIGN)
+            final = service.wait(task_id)
+            report = service.report(task_id)
+            terms = service.http.get(f"/tasks/{task_id}/files/terms").text
+            status = service.http.get(f"/tasks/{task_id}").text
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert len(model.requests_of("gloss_rewrite")) == 1  # accepted on the first send
+    rewrite = report["terms"]["gloss_rewrite"]
+    assert rewrite["succeeded"] is True
+    assert [r["after"] for r in rewrite["rewritten"]] == ["机制 [redacted]", NOUN]
+    assert rewrite["kept"] == []
+    task_dir = service.data_dir / "tasks" / task_id
+    assert "机制 [redacted]" in terms
+    for text in (terms, status, json.dumps(report, ensure_ascii=False)):
+        assert FAKE_ARGON_API_KEY not in text and FAKE_API_KEY not in text
+    # The report, the task log, the request records and the response cache.
+    names = {path.name for path in service.data_dir.rglob("*") if path.is_file()}
+    assert {"task.log", "report.json", "requests.jsonl"} <= names, names
+    cached = [path for path in (service.data_dir / "model-cache").rglob("*.json") if path.is_file()]
+    assert any("机制 [redacted]" in path.read_text("utf-8") for path in cached)
+    files = [path for path in service.data_dir.rglob("*") if path.is_file()]
+    assert files
+    for path in files:
+        for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
+            assert key.encode() not in path.read_bytes(), path
+    assert "[redacted]" in (task_dir / "report.json").read_text("utf-8")
