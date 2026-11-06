@@ -19,11 +19,24 @@ profile) unchanged:
   the scope of the revision); the shared text stays as it is. The service
   turns them on for every user profile's task; ``run`` with
   ``--user-profile-rules``.
+- Short labels are only let through more often, never less (3): an input
+  under 10 tokens fails when its output is blank, only punctuation or a
+  runaway answer; otherwise it passes when either the old token ratio
+  (0.3-3) or the label width rule passes. A label that fails is redone with
+  the engine's simple one-paragraph prompt, as before. The samples are the
+  labels ``m4-15-analysis/a-short-labels.md`` traced and codex's
+  adversarial ones; what passes is what the accepted Gemini output used.
 """
 
 import json
 import subprocess
 import sys
+
+import pytest
+import tiktoken
+from babeldoc.format.pdf.document_il.midend.il_translator_llm_only import (
+    translation_length_ok,
+)
 
 from tests import sample_prompts
 from tests.conftest import EXCERPT
@@ -221,3 +234,99 @@ def test_run_sends_the_rules_with_its_development_option(tmp_path):
     assert batches and all(profile_rules.BATCH_RULES in r.prompt for r in batches)
     report = json.loads((tmp_path / "out" / "report.json").read_text("utf-8"))
     assert report["model"]["user_profile_rules"] is True
+
+
+# -- short labels -------------------------------------------------------------
+
+ENCODING = tiktoken.encoding_for_model("gpt-4o")  # the engine's token count
+
+
+def tokens(text: str) -> int:
+    return len(ENCODING.encode(text, disallowed_special=()))
+
+
+def length_ok(source: str, output: str) -> bool:
+    return translation_length_ok(source, output, tokens(source), tokens(output))
+
+
+# What the accepted Gemini output used (the old ratio check passed them) or
+# what the old check's simple redo gave (Object, Local, Global); and
+# References -> 参考图像, which the ratio check rejected (1 -> 3 tokens) and
+# the simple redo turned into 参考文献 (ticket 06's and ticket 14's target).
+SHORT_ACCEPTED = [
+    ("Calls", "调用次数"),  # MaLiang pages 9 and 10
+    ("Replan", "重新规划"),  # MaLiang page 7
+    ("grounded", "基于参考的"),  # AutoRef page 19
+    ("grounded", "基于参考"),
+    ("+ Ours", "+ 本文方法"),  # AutoRef pages 1 and 8
+    ("Critic VLM", "视觉语言模型评审器"),
+    ("VLM focus", "视觉语言模型关注点"),  # AutoDesign page 10
+    ("mAP", "平均精度均值"),
+    ("Object", "物体"),  # AutoRef pages 6 and 25
+    ("Local", "局部"),
+    ("Global", "全局"),
+    ("References", "参考图像"),  # AutoRef pages 7, 27, 29-31
+    ("The agent searches for suitable images", "智能体搜索合适的图像"),
+    ("2.5", "2.5"),
+    ("Demo Page", PSEUDO_PREFIX + "Demo Page"),  # kept Latin text is not growth
+]
+# The expanded table headers the old check rejected too, so that the simple
+# redo gave the short names; codex's adversarial samples.
+SHORT_REJECTED = [
+    ("Object", "物体组合"),
+    ("Local", "局部属性迁移"),
+    ("Global", "全局风格"),
+    ("Harness", "智能体套件"),
+    ("Layout", "版面布局"),
+    ("Background", "背景替换与融合"),
+    ("OBJECT", "物体组合"),
+    ("OBJECT", "甲" * 100),
+    ("Object", "Object " * 30),
+    ("The agent searches for suitable images", "."),
+    ("The agent searches for suitable images", "，"),
+    ("Demo Page", "。"),  # the old ratio check passed it (2 -> 1 tokens)
+    ("Demo Page", "演示页面" * 3),
+    ("References", "   "),
+    ("References", ""),
+]
+
+
+@pytest.mark.parametrize(("source", "output"), SHORT_ACCEPTED)
+def test_a_short_label_that_the_baseline_used_passes(source, output):
+    assert length_ok(source, output)
+
+
+@pytest.mark.parametrize(("source", "output"), SHORT_REJECTED)
+def test_a_short_label_that_outgrows_its_box_or_translates_nothing_fails(source, output):
+    assert not length_ok(source, output)
+
+
+def test_a_normal_input_keeps_the_token_ratio():
+    assert translation_length_ok("a" * 80, "b" * 80, 40, 50)
+    assert not translation_length_ok("a" * 80, "b" * 80, 40, 130)
+    assert not translation_length_ok("a" * 80, "b" * 80, 40, 5)
+
+
+def test_a_short_label_the_width_rule_lets_through_is_not_redone(tmp_path_factory):
+    # 2 -> 6 tokens: the old ratio check rejected it and redid it alone.
+    label = PSEUDO_PREFIX + SHORT_LABEL
+    run = run_excerpt(tmp_path_factory, "short-pass", answer_short_label_with(label))
+
+    assert run["final"]["state"] == "succeeded", run["final"]["error"]
+    assert short_label_redos(run["model"]) == []
+    assert label.replace(" ", "") in run["mono"]
+
+
+def test_a_short_label_that_fails_is_redone_with_the_simple_prompt(tmp_path_factory):
+    run = run_excerpt(tmp_path_factory, "short-fail", answer_short_label_with("演示页面" * 3))
+
+    assert run["final"]["state"] == "succeeded", run["final"]["error"]
+    assert short_label_redos(run["model"]), "the runaway label was not redone"
+    # Not as a one-item batch with the paper context.
+    assert not [
+        r
+        for r in run["model"].requests_of("translate_batch")
+        if len(batch_items(r.prompt)) == 1 and SHORT_LABEL in batch_items(r.prompt)[0]["input"]
+    ]
+    assert "演示页面演示页面" not in run["mono"]
+    assert PSEUDO_PREFIX + SHORT_LABEL.replace(" ", "") in run["mono"]

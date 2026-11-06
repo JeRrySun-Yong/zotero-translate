@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from string import Template
 
@@ -126,6 +127,124 @@ Some input items have "{KEY_CONCEPT_HEADING_FIELD}": the item is a section headi
 # Parentheses the source does not have make the translation hard to read.
 NO_ADDED_PARENTHESES_RULES = """- Do not add the English source words after Chinese text, as in 鲁棒性（Robustness）: write the Chinese alone, or the English alone where the glossary keeps a term in English.
 - Do not turn the source's commas, dashes or appositives into parentheses: an aside or apposition set off by commas or dashes stays set off by commas or dashes."""
+
+
+# Short labels (M4 ticket 15, from ticket 14). Below this many input tokens
+# an input is usually a label (a table header, a figure label): a Chinese
+# label easily tokenizes to three times the English one's tokens, so the
+# token ratio check alone rejects good translations ("References" ->
+# 参考图像) and the simple redo then picks a worse word (参考文献).
+LENGTH_RATIO_MIN_TOKENS = 10
+
+# A label's Chinese may take up to this factor of the source's width, with
+# room for three Chinese characters, or six for an abbreviation or acronym
+# ("mAP" -> 平均精度均值). Widths count a full-width character as two.
+SHORT_LABEL_MAX_WIDTH_RATIO = 1.2
+SHORT_LABEL_MIN_WIDTH = 6
+ABBREVIATION_MAX_WIDTH = 12
+# An acronym is short; a longer all-capitals word (OBJECT) is an ordinary
+# word set in capitals and gets the ordinary allowance.
+ACRONYM_MAX_LETTERS = 5
+
+# Past twice the source's width, or six Chinese characters for a tiny
+# source, the whole output is a runaway answer ("甲" * 100) or the source
+# repeated ("Object " * 30), not a label's translation.
+SHORT_OUTPUT_MAX_WIDTH_RATIO = 2
+SHORT_OUTPUT_MIN_WIDTH = 12
+
+_STYLE_TAG = re.compile(r"<\s*/?\s*style[^>]*>", re.IGNORECASE)
+
+
+def display_width(text: str) -> int:
+    """Approximate rendered width: a full-width character counts as two."""
+    return sum(
+        2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+        for character in text
+    )
+
+
+def translated_width(text: str) -> int:
+    """Width of the full-width text, the part translating a label adds.
+
+    Latin text kept in a translation (a model name, a key concept) is not
+    growth from translating the label, so it is not counted.
+    """
+    return sum(
+        2 if unicodedata.east_asian_width(character) in ("W", "F") else 0
+        for character in text
+    )
+
+
+def _looks_like_abbreviation(text: str) -> bool:
+    """A one-word abbreviation ("Inst.") or acronym ("BG", "mAP"): at least
+    two capitals and at most ACRONYM_MAX_LETTERS letters."""
+    word = text.strip()
+    if not word or " " in word:
+        return False
+    letters = [character for character in word if character.isalpha()]
+    if not letters:
+        return False
+    if word.endswith("."):
+        return True
+    capitals = sum(1 for character in letters if character.isupper())
+    return capitals >= 2 and len(letters) <= ACRONYM_MAX_LETTERS
+
+
+def translation_length_ok(
+    input_text: str,
+    output_text: str,
+    input_token_count: int,
+    output_token_count: int,
+) -> bool:
+    """Whether the output length is acceptable for this input.
+
+    The upstream check: the output/input token ratio is between 0.3 and 3.
+    An input under LENGTH_RATIO_MIN_TOKENS (a label) is only let through
+    more often than by that check, never less (M4 ticket 15), except for an
+    output that translates nothing or runs away. Its output, style tags left
+    out, fails when:
+
+    1. it is blank;
+    2. the source has letters and the output has no letter or digit (only
+       punctuation): "." for a sentence;
+    3. it is wider than twice the source, or six Chinese characters for a
+       tiny source: "甲" * 100, "Object " * 30.
+
+    Otherwise it passes when the token ratio passes, or when its Chinese
+    part fits the label: at most 1.2 times the source's width, with room for
+    three Chinese characters (six for an abbreviation): "References" ->
+    参考图像 passes, "Object" -> 物体组合 and "Global" -> 全局风格 (AutoRef's
+    table headers expanded from the paper dossier, rendered at half size)
+    do not. A label that fails is redone with the simple one-paragraph
+    prompt, which has no dossier.
+    """
+    ratio_ok = input_token_count > 0 and (
+        0.3 < output_token_count / input_token_count < 3
+    )
+    if input_token_count >= LENGTH_RATIO_MIN_TOKENS:
+        return ratio_ok
+    source = _STYLE_TAG.sub("", input_text).strip()
+    output = _STYLE_TAG.sub("", output_text).strip()
+    if not output:
+        return False
+    source_width = display_width(source)
+    has_letters = any(character.isalpha() for character in source)
+    if has_letters and not any(character.isalnum() for character in output):
+        return False
+    if display_width(output) > max(
+        SHORT_OUTPUT_MIN_WIDTH, source_width * SHORT_OUTPUT_MAX_WIDTH_RATIO
+    ):
+        return False
+    if ratio_ok or not has_letters:
+        return True
+    room = (
+        ABBREVIATION_MAX_WIDTH
+        if _looks_like_abbreviation(source)
+        else SHORT_LABEL_MIN_WIDTH
+    )
+    return translated_width(output) <= max(
+        room, source_width * SHORT_LABEL_MAX_WIDTH_RATIO
+    )
 
 
 class BatchParagraph:
@@ -955,7 +1074,13 @@ class ILTranslatorLLMOnly:
                         )
                         continue
 
-                    if not (0.3 < output_token_count / input_token_count < 3):
+                    if not translation_length_ok(
+                        trimed_input
+                        + "".join(g["gloss_zh"] for g in glosses),
+                        output_unicode,
+                        input_token_count,
+                        output_token_count,
+                    ):
                         llm_translate_tracker.set_error_message(
                             f"Translation result is too long or too short. Input: {input_token_count}, Output: {output_token_count}"
                         )
