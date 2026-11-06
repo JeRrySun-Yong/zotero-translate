@@ -55,7 +55,12 @@ has ``roles``, ``{"flash"|"argon": {"base_url", "model", "concurrency"}}``.
   model, timeout or stream setting makes it untested; if it was current, Gemini is current
   again (event 当前配置改回 Gemini).
 - ``DELETE /profiles/{id}`` ``{}`` -> ``200 {"deleted": id, "current": id}``;
-  409 for Gemini and while an unfinished task recorded the profile.
+  409 for Gemini and while an unfinished task recorded the profile. A
+  submission and a delete do not interleave (M4 ticket 16): one lock
+  (``ProfileStore.exclusive``) covers a submission from taking its profile to
+  its saved task, and a delete from counting the tasks that use the profile
+  to removing it, so of two that race, the delete is refused (409) or the
+  submission is (422, the profile is gone), never neither.
 - ``POST /profiles/{id}/test`` ``{}`` -> ``200 {"ok", "result", "message",
   "seconds", "http_status"}`` once the test has run (it takes up to 60
   seconds), whatever its outcome; ``result`` is one of succeeded,
@@ -200,7 +205,15 @@ when the queue has picked the next task, before its earlier processes are
 reaped (the attempt is the one about to start), and
 ``ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED`` when a cancel has been saved as
 accepted, before the task's processes are reaped (the attempt is the task's
-current one, 0 before the first). ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
+current one, 0 before the first). ``ZT_TEST_PAUSE_AFTER_PROFILE_CHOSEN``
+pauses a submission after it took its model profile, before its task is
+saved (the file is ``<task_id>-0.paused``), and
+``ZT_TEST_PAUSE_AFTER_PROFILE_COUNT`` pauses a profile's delete after it
+counted the unfinished tasks that use the profile, before it removes it
+(``<profile_id>-0.paused``). ``ZT_TEST_SIGNAL_WAITING_FOR_PROFILE_LOCK`` names
+a directory where a submission or a delete that finds the profile lock taken
+creates ``<task_id or profile_id>-0.waiting`` before it waits (it is not
+paused by it), so that a test knows the request has reached the lock. ``ZT_TEST_REAP_SCAN_ERROR`` names a file:
 while it exists, scanning for a task's processes fails, so reaping fails
 (``zotero_translate.processes``). ``ZT_TEST_RERUN_WAITS_SECONDS``
 ("<first>,<second>") replaces the 60 and 300 seconds before the reruns.
@@ -273,6 +286,9 @@ PAUSE_BEFORE_ADOPT = "ZT_TEST_PAUSE_BEFORE_ADOPT"
 PAUSE_BEFORE_RERUN_QUEUE = "ZT_TEST_PAUSE_BEFORE_RERUN_QUEUE"
 PAUSE_BEFORE_REAP = "ZT_TEST_PAUSE_BEFORE_REAP"
 PAUSE_AFTER_CANCEL_ACCEPTED = "ZT_TEST_PAUSE_AFTER_CANCEL_ACCEPTED"
+PAUSE_AFTER_PROFILE_CHOSEN = "ZT_TEST_PAUSE_AFTER_PROFILE_CHOSEN"
+PAUSE_AFTER_PROFILE_COUNT = "ZT_TEST_PAUSE_AFTER_PROFILE_COUNT"
+SIGNAL_WAITING_FOR_PROFILE_LOCK = "ZT_TEST_SIGNAL_WAITING_FOR_PROFILE_LOCK"
 RERUN_WAITS_SETTING = "ZT_TEST_RERUN_WAITS_SECONDS"  # "<first>,<second>", replaces RERUN_WAITS_SECONDS
 DOWNLOAD_DELAY_SETTING = "ZT_TEST_DOWNLOAD_DELAY_SECONDS"  # "<file>=<seconds>[,...]"
 _TASK_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -703,38 +719,43 @@ class TaskQueue:
         the current one, for all its attempts. Raises ``ProfileError`` for a
         profile it cannot use (``ProfileStore.for_submission``), leaving no task.
         Returns the task ID and the recorded profile, ``{"id", "name"}``."""
-        profile_id, profile_name = self.profiles.for_submission(profile)
         task_id = uuid.uuid4().hex
-        directory = self.tasks_dir / task_id
-        directory.mkdir()
-        (directory / td.SOURCE_PDF).write_bytes(pdf)
-        submitted_at = time.time()
-        (directory / "task.json").write_text(
-            json.dumps(
-                {
-                    "task_id": task_id,
-                    "filename": filename,
-                    "submitted_at": submitted_at,
-                    "profile_id": profile_id,
-                    "profile_name": profile_name,
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        with self._cond:
-            td.write_status(
-                directory,
-                state="queued",
-                stage=td.QUEUED_STAGE,
-                progress=0,
-                kept_source_paragraphs=0,
-                kept_source_algorithms=0,
-                **_INITIAL_FIELDS,
-                queue_key=submitted_at,
+        # One lock from taking the profile to the task being saved, so that a
+        # delete of that profile either counts the task or finds the profile
+        # taken by nobody (``ProfileStore``, module docstring; ticket 16).
+        with self.profiles.exclusive(on_wait=lambda: _test_signal(SIGNAL_WAITING_FOR_PROFILE_LOCK, task_id)):
+            profile_id, profile_name = self.profiles.for_submission(profile)
+            _test_pause(PAUSE_AFTER_PROFILE_CHOSEN, task_id, 0)
+            directory = self.tasks_dir / task_id
+            directory.mkdir()
+            (directory / td.SOURCE_PDF).write_bytes(pdf)
+            submitted_at = time.time()
+            (directory / "task.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "filename": filename,
+                        "submitted_at": submitted_at,
+                        "profile_id": profile_id,
+                        "profile_name": profile_name,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
-            self._log(task_id, "submitted", 0, None)
-            self._enqueue(task_id, FIRST_QUEUE_CLASS, submitted_at)
+            with self._cond:
+                td.write_status(
+                    directory,
+                    state="queued",
+                    stage=td.QUEUED_STAGE,
+                    progress=0,
+                    kept_source_paragraphs=0,
+                    kept_source_algorithms=0,
+                    **_INITIAL_FIELDS,
+                    queue_key=submitted_at,
+                )
+                self._log(task_id, "submitted", 0, None)
+                self._enqueue(task_id, FIRST_QUEUE_CLASS, submitted_at)
         return task_id, {"id": profile_id, "name": profile_name}
 
     def task_dir(self, task_id: str) -> Path | None:
@@ -1263,6 +1284,13 @@ def _test_pause(setting: str, task_id: str, attempt: int) -> None:
         time.sleep(0.05)
 
 
+def _test_signal(setting: str, name: str) -> None:
+    """Test only: note that ``name`` is waiting, as ``<dir>/<name>-0.waiting`` (nothing waits for it to go)."""
+    directory = os.environ.get(setting)
+    if directory:
+        (Path(directory) / f"{name}-0.waiting").write_text(setting, encoding="utf-8")
+
+
 def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1324,7 +1352,12 @@ def make_handler(queue: TaskQueue) -> type[BaseHTTPRequestHandler]:
                 if len(rest) == 1 and method == "PUT":
                     return self._json(200, store.update(rest[0], body))
                 if len(rest) == 1 and method == "DELETE":
-                    return self._json(200, store.delete(rest[0], queue.profile_users(rest[0])))
+                    # The count and the removal, ticket 16.
+                    with store.exclusive(on_wait=lambda: _test_signal(SIGNAL_WAITING_FOR_PROFILE_LOCK, rest[0])):
+                        users = queue.profile_users(rest[0])
+                        _test_pause(PAUSE_AFTER_PROFILE_COUNT, rest[0], 0)
+                        answer = store.delete(rest[0], users)
+                    return self._json(200, answer)
                 if len(rest) == 2 and method == "POST" and rest[1] == "test":
                     # The request itself runs outside the store's lock.
                     settings, fingerprint = store.test_settings(rest[0])

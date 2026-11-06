@@ -36,6 +36,18 @@ Reliability (ADR 0002):
   cut, the API key of this client and of its fallback is replaced with
   ``[redacted]``; HTTP 401 and 403, which are about the key, carry no body
   at all. The request headers are never logged.
+- The same goes for the error of the caller's ``validate`` (M4 ticket 16):
+  its text can hold the answer it rejected, and an answer can echo the key.
+  Before the text goes into the retry warning, the final ``ModelCallError``
+  or the saved ``rejections``, the keys in it read ``[redacted]``
+  (``_scrub``); the rejection keeps its class and attributes, and so do the
+  parts of the answer it carries (the glosses of a rejected gloss rewrite, the
+  verdicts of a rejected review: the caller takes them back from
+  ``rejections`` and they reach the task report), but the keys in all of
+  them, in its message, its attributes (strings, and strings inside lists,
+  tuples, sets, dicts and dataclasses) and the exceptions it was raised from
+  or while handling, read ``[redacted]``. This holds for plain, streamed and
+  hedged requests alike.
 - Successful answers (those ``validate`` accepts) are cached on disk, keyed by
   a hash of the whole request body, which includes the model name. The cache
   directory is shared by all paper tasks, so a resubmitted paper reuses every
@@ -117,6 +129,8 @@ slot is recorded on its own.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import hashlib
 import json
 import logging
@@ -181,6 +195,7 @@ FORWARD_AFTER_TIMEOUTS = 2
 HEDGED_KINDS = ("translation_batch", "review")
 ERROR_BODY_CHARACTERS = 200  # of an HTTP error's response body, in its reason
 REDACTED = "[redacted]"  # replaces an API key echoed in an error response
+_SCRUB_DEPTH = 12  # how deep into containers a rejection's data is scrubbed
 
 
 class _RetryableError(Exception):
@@ -365,7 +380,7 @@ class ModelClient:
                     except Exception as e:  # noqa: BLE001 - any rejection means "unparseable"
                         answered = True
                         rejections.append(e)
-                        raise _RetryableError(f"无法解析管线模型的响应：{e}") from e
+                        raise _RetryableError(f"无法解析管线模型的响应：{self._scrub(e)}") from e
             except _RetryableError as e:
                 record(target.role, target.model, attempt, timing, _result_of(e))
                 timeouts_in_a_row = timeouts_in_a_row + 1 if isinstance(e, _Timeout) else 0
@@ -625,12 +640,73 @@ class ModelClient:
 
     def _body_excerpt(self, data: bytes) -> str:
         """``：`` and the start of an error response ``data`` on one line, keys redacted; "" if empty."""
-        text = data.decode("utf-8", errors="replace")
-        clients = [self] if self.fallback is None else [self, self.fallback]
-        for key in {client.settings.api_key for client in clients} - {""}:
-            text = text.replace(key, REDACTED)
+        text = self._redact(data.decode("utf-8", errors="replace"))
         text = " ".join(text.split())[:ERROR_BODY_CHARACTERS]
         return f"：{text}" if text else ""
+
+    def _redact(self, text: str) -> str:
+        """``text`` with the API key of this client and of its fallback replaced by ``REDACTED``."""
+        clients = [self] if self.fallback is None else [self, self.fallback]
+        keys = {client.settings.api_key for client in clients} - {""}
+        for key in sorted(keys, key=len, reverse=True):  # a key inside another goes last
+            text = text.replace(key, REDACTED)
+        return text
+
+    def _scrub(self, error: BaseException) -> str:
+        """The text of ``error``, which the caller's ``validate`` raised, with the keys redacted.
+
+        ``error`` is kept for the caller (``ModelCallError.rejections``; the
+        caller tells its class and reads what it carries), so it is cleaned
+        in place instead of being replaced: its message, its attributes
+        (``_scrubbed_value``) and the exceptions it was raised from or while
+        handling (their traceback frames are not touched). The cleaned
+        message is returned.
+        """
+        shown = self._redact(str(error))
+        self._scrub_exception(error, set())
+        return shown
+
+    def _scrub_exception(self, error: BaseException, seen: set[int]) -> None:
+        if id(error) in seen:
+            return
+        seen.add(id(error))
+        text = str(error)
+        shown = self._redact(text)
+        if shown != text:
+            error.args = (shown,)
+        for name, value in list(vars(error).items()):
+            cleaned = self._scrubbed_value(value, seen, 0)
+            if cleaned is not value:
+                setattr(error, name, cleaned)
+        for chained in (error.__cause__, error.__context__):
+            if chained is not None:
+                self._scrub_exception(chained, seen)
+
+    def _scrubbed_value(self, value, seen: set[int], depth: int):
+        """``value`` with the keys redacted in its strings, also those inside
+        lists, tuples, sets, dicts and dataclass instances (copies; the
+        original is not changed); any other value is returned as it is."""
+        if depth > _SCRUB_DEPTH:
+            return value
+        if isinstance(value, str):
+            return self._redact(value)
+        kind = type(value)
+        if kind is dict:
+            return {
+                self._scrubbed_value(k, seen, depth + 1): self._scrubbed_value(v, seen, depth + 1)
+                for k, v in value.items()
+            }
+        if kind in (list, tuple, set, frozenset):
+            return kind(self._scrubbed_value(v, seen, depth + 1) for v in value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            copied = copy.copy(value)
+            for field in dataclasses.fields(value):
+                cleaned = self._scrubbed_value(getattr(value, field.name), seen, depth + 1)
+                object.__setattr__(copied, field.name, cleaned)
+            return copied
+        if isinstance(value, BaseException):
+            self._scrub_exception(value, seen)
+        return value
 
     def _count_timeout(self) -> None:
         with self._lock:
@@ -899,7 +975,7 @@ class _Hedged:
                 try:
                     self.validate(content)
                 except Exception as e:  # noqa: BLE001 - any rejection means "unparseable"
-                    raise _Rejected(f"无法解析管线模型的响应：{e}", e) from e
+                    raise _Rejected(f"无法解析管线模型的响应：{self.flash._scrub(e)}", e) from e
             candidate.content = content
         except _GaveUp:
             self._events.put(("gave_up", candidate))

@@ -21,6 +21,8 @@ import json
 
 import pytest
 
+from tests.conftest import FAKE_API_KEY
+from tests.conftest import FAKE_ARGON_API_KEY
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.fake_model import FakeModel
@@ -167,3 +169,38 @@ def test_no_request_when_every_gloss_passes(tmp_path_factory):
     assert final["state"] == "succeeded", final["error"]
     assert model.requests_of("gloss_rewrite") == []
     assert report["terms"]["gloss_rewrite"] is None
+
+
+def test_a_key_echoed_in_a_gloss_of_a_rejected_rewrite_answer_reaches_no_report_log_or_file(tmp_path):
+    # Ticket 16, round 2: gloss A passes its own check with the key in it; gloss
+    # B fails, so the whole answer is rejected on every send. When the sends
+    # are used up, A is taken from the last rejected answer into the report.
+    echoed = f"机制 {FAKE_ARGON_API_KEY}"
+    with FakeModel() as model:
+        model.respond("term_list", lambda body: json.dumps({"terms": TERMS}, ensure_ascii=False))
+        model.respond("gloss_rewrite", lambda body: answer({"meta-harness": echoed, "AutoDesign": STILL_LONG}))
+        service = launch_service(model, tmp_path)
+        try:
+            task_id = service.submit(AUTODESIGN)
+            final = service.wait(task_id)
+            report = service.report(task_id)
+            terms = service.http.get(f"/tasks/{task_id}/files/terms").text
+            status = service.http.get(f"/tasks/{task_id}").text
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert len(model.requests_of("gloss_rewrite")) == 4  # every send was rejected
+    rewrite = report["terms"]["gloss_rewrite"]
+    assert rewrite["succeeded"] is False
+    assert [r["after"] for r in rewrite["rewritten"]] == ["机制 [redacted]"]
+    assert [k["english"] for k in rewrite["kept"]] == [["AutoDesign"]]
+    task_dir = service.data_dir / "tasks" / task_id
+    assert "机制 [redacted]" in terms and "[redacted]" in (task_dir / "report.json").read_text("utf-8")
+    for text in (terms, status, json.dumps(report, ensure_ascii=False)):
+        assert FAKE_ARGON_API_KEY not in text and FAKE_API_KEY not in text
+    files = [path for path in service.data_dir.rglob("*") if path.is_file()]
+    assert {"task.log", "report.json"} <= {path.name for path in files}
+    for path in files:
+        for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
+            assert key.encode() not in path.read_bytes(), path

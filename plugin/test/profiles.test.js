@@ -389,3 +389,171 @@ test("apply refused by the service says why", async () => {
     error: "没有应用：这份配置还没有通过测试连接",
   });
 });
+
+// M4 ticket 16 item 2: the key goes only to a translation service on this
+// computer. The service accepts a Host of 127.0.0.1:<port> or localhost:<port>
+// only (service.py, _local_host); a real service is not affected.
+test("an address that is not this computer gets no profile request at all", async () => {
+  for (const address of [
+    "http://192.168.1.5:8920",
+    "https://example.com",
+    "http://127.0.0.1.example.com:8920",
+    "http://localhost.example.com:8920",
+    "http://127.0.0.1@example.com:8920",
+    "http://example.com/127.0.0.1",
+    "http://[::1]:8920",
+    "http://0.0.0.0:8920",
+    "http://127.0.0.2:8920",
+    "not a url",
+    "",
+  ]) {
+    const { fetch, calls } = fakeFetch(() => json(200, LISTING));
+    const client = profiles.createClient({ fetch, serviceUrl: () => `  ${address}  ` });
+    const error = `翻译服务地址不是本机（${address}），不发送配置和密钥`;
+    assert.deepEqual(await client.saveAndTest(NEW_FORM, null), { error }, `new: ${address}`);
+    assert.deepEqual(await client.saveAndTest({ ...profiles.formFromProfile(SAVED), model: "vendor/model-b" }, SAVED), { error }, `edit: ${address}`);
+    assert.deepEqual(await client.saveAndTest(profiles.formFromProfile(SAVED), SAVED), { error }, `test: ${address}`);
+    assert.deepEqual(await client.apply(SAVED.id), { error }, `apply: ${address}`);
+    assert.deepEqual(await client.remove(SAVED.id), { error }, `remove: ${address}`);
+    assert.deepEqual(await client.status(), { error, serviceUrl: address }, `list: ${address}`);
+    assert.deepEqual(calls, [], address);
+  }
+});
+
+test("this computer's addresses (127.0.0.1, localhost, any port, either case) are used as before", async () => {
+  for (const address of [SERVICE, "http://localhost:8920/", "http://LocalHost:9000", "http://127.0.0.1:8941"]) {
+    const { fetch, calls } = fakeFetch(
+      () => json(201, SAVED),
+      () => json(200, answer("succeeded", "连接成功", 1)),
+      () => json(200, LISTING),
+      () => json(200, {}),
+      () => json(200, {}),
+    );
+    const client = profiles.createClient({ fetch, serviceUrl: () => address });
+    assert.equal((await client.saveAndTest(NEW_FORM, null)).profile.id, SAVED.id, address);
+    assert.deepEqual(await client.status(), { listing: LISTING }, address);
+    assert.deepEqual(await client.apply(SAVED.id), { ok: true }, address);
+    assert.deepEqual(await client.remove(SAVED.id), { ok: true }, address);
+    assert.equal(calls.length, 5, address);
+    const base = address.trim().replace(/\/+$/, "");
+    assert.deepEqual(calls.map((c) => c.url.startsWith(base)), [true, true, true, true, true], address);
+  }
+});
+
+test("the status line says the address is not this computer, with no restart help", () => {
+  const error = "翻译服务地址不是本机（https://example.com），不发送配置和密钥";
+  assert.deepEqual(profiles.statusView({ error, serviceUrl: "https://example.com" }), { running: false, text: error, help: "" });
+});
+
+// ---- round 2 of ticket M4-16: the check is at the point of sending ----
+
+const REMOTE = "https://example.com";
+const NOT_LOCAL = (address) => `翻译服务地址不是本机（${address}），不发送配置和密钥`;
+
+test("an address changed to another host while the save is pending: nothing more is sent, the error says so", async () => {
+  for (const changeIn of ["the save request", "onSaved"]) {
+    let address = SERVICE;
+    const change = () => {
+      address = REMOTE;
+    };
+    const { fetch, calls } = fakeFetch(
+      () => {
+        if (changeIn === "the save request") {
+          change();
+        }
+        return json(201, SAVED);
+      },
+      () => json(200, answer("succeeded", "连接成功", 1)), // the test request: must stay unused
+    );
+    const client = profiles.createClient({ fetch, serviceUrl: () => address });
+    const outcome = await client.saveAndTest(NEW_FORM, null, {
+      onSaved: () => {
+        if (changeIn === "onSaved") {
+          change();
+        }
+      },
+    });
+    assert.deepEqual(calls.map((c) => c.url), [`${SERVICE}/profiles`], changeIn);
+    // The profile was saved, and the page needs to know: it refreshes and selects it.
+    assert.deepEqual(outcome, { profile: SAVED, error: NOT_LOCAL(REMOTE) }, changeIn);
+  }
+});
+
+test("one save-and-test goes to one service: an address changed to another local port in between is not followed", async () => {
+  let address = SERVICE;
+  const { fetch, calls } = fakeFetch(
+    () => {
+      address = "http://localhost:9000";
+      return json(201, SAVED);
+    },
+    () => json(200, answer("succeeded", "连接成功", 1)),
+  );
+  const outcome = await profiles.createClient({ fetch, serviceUrl: () => address }).saveAndTest(NEW_FORM, null);
+  assert.deepEqual(calls.map((c) => c.url), [`${SERVICE}/profiles`, `${SERVICE}/profiles/${SAVED.id}/test`]);
+  assert.equal(outcome.profile.id, SAVED.id);
+  assert.equal(outcome.error, undefined);
+});
+
+test("a request that starts after the address became remote is not sent either", async () => {
+  let address = SERVICE;
+  const { fetch, calls } = fakeFetch(() => json(200, LISTING), () => json(200, {}), () => json(200, {}));
+  const client = profiles.createClient({ fetch, serviceUrl: () => address });
+  assert.deepEqual(await client.status(), { listing: LISTING });
+  address = REMOTE;
+  assert.deepEqual(await client.status(), { error: NOT_LOCAL(REMOTE), serviceUrl: REMOTE });
+  assert.deepEqual(await client.apply(SAVED.id), { error: NOT_LOCAL(REMOTE) });
+  assert.deepEqual(await client.remove(SAVED.id), { error: NOT_LOCAL(REMOTE) });
+  assert.equal(calls.length, 1);
+});
+
+test("addressProblem reads the host that a request would reach", () => {
+  const blocked = [
+    "http://127.0.0.1.example.com",
+    "http://127.0.0.1.example.com:8920/tasks",
+    "http://localhost@evil.com",
+    "http://localhost:8920@evil.com",
+    "http://127.0.0.1@evil.com:8920",
+    "http://user:password@evil.com",
+    "http://user:password@example.com:8920/x",
+    "http://[::1]",
+    "http://[::1]:8920",
+    "http://localhost.",
+    "http://localhost.:8920",
+    "http://0.0.0.0:8920",
+    "http://LOCALHOST.EXAMPLE.COM:8920",
+    "HTTP://EXAMPLE.COM",
+    "ftp://127.0.0.1",
+    "ftp://localhost:8920",
+    "file:///tmp/service",
+    "ws://127.0.0.1:8920",
+    "wss://localhost:8920",
+    "javascript:alert(1)",
+    "//127.0.0.1:8920",
+    "127.0.0.1:8920",
+    "localhost:8920",
+    "http://",
+    "   ",
+  ];
+  for (const address of blocked) {
+    assert.notEqual(profiles.addressProblem(address), "", address);
+  }
+  const local = [
+    "http://127.0.0.1:8920",
+    "http://127.0.0.1",
+    "https://127.0.0.1:8920/",
+    "http://localhost:8920",
+    "HTTP://LOCALHOST:8920",
+    "http://LocalHost:9000/path",
+    "  http://127.0.0.1:8941  ",
+    "http://user:password@127.0.0.1:8920", // the host is this computer
+    "http://user:password@localhost:8920",
+    // The URL parser turns these into 127.0.0.1, the host a request reaches.
+    "http://127.0.0.1.",
+    "http://127.1:8920/",
+    "http://2130706433:8920",
+  ];
+  for (const address of local) {
+    assert.equal(profiles.addressProblem(address), "", address);
+  }
+  assert.equal(profiles.addressProblem("https://example.com "), NOT_LOCAL("https://example.com"));
+});

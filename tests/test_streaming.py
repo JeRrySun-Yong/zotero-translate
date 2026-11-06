@@ -14,6 +14,7 @@ profile setting through the service is in ``test_model_profiles.py``.
 """
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -371,3 +372,29 @@ def test_one_event_may_be_split_across_several_data_lines(tmp_path):
 
     [request] = fake.requests
     assert request.fault is None and not request.disconnected
+
+
+def test_a_streamed_answer_echoing_the_key_that_fails_its_check_reads_redacted(tmp_path, caplog):
+    """M4 ticket 16 item 1: the check's error holds the joined answer, key included."""
+    echoed = f"meta-harness {FAKE_API_KEY} 回显"
+
+    def reject(content: str) -> None:
+        raise ValueError(f"术语条目 {content} 缺少判断依据 reason")
+
+    with FakeModel() as fake:
+        fake.respond("other", lambda body: echoed)
+        client = ModelClient(_settings(fake, tmp_path, stream=True, max_retries=1))
+        try:
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(ModelCallError) as failure:
+                    client.complete(MESSAGES, validate=reject)
+        finally:
+            client.close()
+
+    error = failure.value
+    assert [r.get("stream") for r in (q.body for q in fake.requests)] == [True, True]
+    assert FAKE_API_KEY not in str(error), str(error)
+    assert f"术语条目 meta-harness {REDACTED} 回显 缺少判断依据 reason" in str(error), str(error)
+    assert FAKE_API_KEY not in "".join(str(r) for r in error.rejections)
+    assert len(error.rejections) == 2
+    assert FAKE_API_KEY not in caplog.text and REDACTED in caplog.text, caplog.text

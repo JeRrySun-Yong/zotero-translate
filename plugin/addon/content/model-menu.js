@@ -18,6 +18,14 @@
  * page has its own client (profiles.js) and writes nothing here.
  */
 var ZoteroTranslateModelMenu = (() => {
+  /** What the submenu's grey item says when the status has no listing. */
+  function unavailable(found) {
+    if (found.error) {
+      return "翻译服务地址不是本机"; // the client sent nothing (profiles.js, addressProblem)
+    }
+    return found.noProfiles ? "翻译服务版本太旧" : "翻译服务连不上";
+  }
+
   /** The item menu's state, {listing, problem}: `listing` is the service's
    *  answer ({current, profiles}), null while the service cannot be reached,
    *  has no profiles, or has not answered yet; `problem` says which, for the
@@ -43,7 +51,7 @@ var ZoteroTranslateModelMenu = (() => {
         }
         state = found.listing
           ? { listing: found.listing, problem: "" }
-          : { listing: null, problem: found.noProfiles ? "翻译服务版本太旧" : "翻译服务连不上" };
+          : { listing: null, problem: unavailable(found) };
         onChange(state);
         return true;
       },
