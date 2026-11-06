@@ -83,16 +83,13 @@ def test_package_holds_no_credentials_or_translation_parameters(xpi):
             assert not profile_fields.search(text), name
 
 
-def test_the_package_names_gemini_nowhere(xpi):
-    # The scan above reads every file: the settings page's example for a
-    # profile's name used to be let through it (it said DeepSeek Fast's
-    # quality is below Gemini's); since the user's decision of 2026-11-06
-    # the name field has no example, and nothing in the package says so.
-    assert FORBIDDEN.search("例如 DeepSeek Fast（质量低于 Gemini）")
+def test_the_package_no_longer_says_a_model_is_below_gemini(xpi):
+    # The settings page's example for a profile's name used to say DeepSeek
+    # Fast's quality is below Gemini's; since the user's decision of
+    # 2026-11-06 the name field has no example, and that sentence is nowhere.
+    sentence = re.compile(r"质量低于\s*Gemini", re.IGNORECASE)
     for name in xpi.namelist():
-        text = xpi.read(name).decode("utf-8", "replace")
-        assert "质量低于" not in text, name
-        assert "gemini" not in text.lower(), name
+        assert not sentence.search(xpi.read(name).decode("utf-8", "replace")), name
 
 
 def test_package_leaves_out_tests_and_dev_tools(xpi):

@@ -57,6 +57,7 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -99,7 +100,7 @@ DEFAULT_PROFILES_DIR = Path(
 )
 
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-_LINE_ENDS = re.compile(r"\r\n|\n|\r")  # where ``load_builtin_profile_name`` cuts the file into lines
+_LINE_ENDS = re.compile(r"\r\n|\n|\r")  # where an env file is cut into lines (``env_entries``)
 
 
 class SettingsError(Exception):
@@ -130,15 +131,32 @@ class ModelSettings:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """Parse ``KEY=VALUE`` lines; ignore blank lines and comments."""
+    """Parse ``KEY=VALUE`` lines; ignore blank lines and comments.
+
+    A line ends at a line feed or a carriage return, as in every editor
+    that wrote the file, and nowhere else (``env_entries``): a vertical
+    tab, a form feed, NEL, U+2028 and the like stay in the line's value, so
+    that a value cannot start a setting of its own, e.g. a profile's name.
+    """
     values: dict[str, str] = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for key, value in env_entries(Path(path).read_text(encoding="utf-8")):
+        values[key] = _unquote(value)
+    return values
+
+
+def env_entries(text: str) -> Iterator[tuple[str, str]]:
+    """``(key, value as written)`` of each ``KEY=VALUE`` line of an env file's ``text``, in order.
+
+    The one place that cuts an env file into lines (``read_env_file``,
+    ``load_builtin_profile_name``): at ``\\r\\n``, ``\\n`` and ``\\r`` only, not
+    wherever ``str.splitlines`` would.
+    """
+    for line in _LINE_ENDS.split(text):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         match = _ENV_LINE.match(line)
         if match:
-            values[match.group(1)] = _unquote(match.group(2))
-    return values
+            yield match.group(1), match.group(2)
 
 
 def _unquote(value: str) -> str:
@@ -225,11 +243,10 @@ def load_builtin_profile_name(env_file: Path) -> str:
     Only ``serve`` and ``run`` call it, once at startup: loading the model
     settings (a worker, the listing) does not look at the name.
 
-    The name's line is found here, not through ``read_env_file``: that cuts
-    the file with ``str.splitlines``, which also ends a line at a vertical
-    tab, form feed, NEL and the like, and would hand over the name cut short
-    where the check for control characters never sees them. A line ends here
-    at a line feed or carriage return only.
+    The name's value is taken as written (``env_entries``, the cut into
+    lines ``read_env_file`` shares), before quotes and spaces are taken off:
+    a vertical tab, form feed, NEL in it stay in the name for the check for
+    control characters to see, and none of them starts a setting.
     """
     _read_endpoint_file(env_file, "找不到管线模型的环境文件")
     try:
@@ -237,12 +254,9 @@ def load_builtin_profile_name(env_file: Path) -> str:
     except (OSError, UnicodeDecodeError) as e:
         raise SettingsError(f"读不了环境文件 {env_file}：{type(e).__name__}") from e
     value = ""
-    for line in _LINE_ENDS.split(text):
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        match = _ENV_LINE.match(line)
-        if match and match.group(1) == PROFILE_NAME_SETTING:
-            value = match.group(2)  # the last line wins, as in read_env_file
+    for key, written in env_entries(text):
+        if key == PROFILE_NAME_SETTING:
+            value = written  # the last line wins, as in read_env_file
     if value[:1] in ("'", '"') and not (len(value) >= 2 and value[-1] == value[0]):
         raise SettingsError(
             f"环境文件 {env_file} 中的 {PROFILE_NAME_SETTING} 的引号没有配对（值要写在一行里）"

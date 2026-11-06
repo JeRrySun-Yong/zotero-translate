@@ -19,6 +19,7 @@ import sys
 import pytest
 
 from tests import sample_prompts
+from tests.conftest import ARGON_MODEL_NAME
 from tests.conftest import EXCERPT
 from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
@@ -42,6 +43,7 @@ from zotero_translate.request_log import load_records
 from zotero_translate.service import _task_profile
 from zotero_translate.settings import SettingsError
 from zotero_translate.settings import load_pipeline_settings
+from zotero_translate.settings import read_env_file
 
 NAME = "GPT-5 Mini"
 NAME_LINE = f"ZT_PROFILE_NAME={NAME}\n"
@@ -479,3 +481,112 @@ def test_a_user_profile_name_that_starts_with_a_dash_runs_a_task(tmp_path):
     assert final["state"] == "succeeded", final["error"]
     assert final["profile"] == {"id": profile["id"], "name": "-custom"}
     assert report["profile"]["name"] == "-custom" and report["profile"]["id"] == profile["id"]
+
+
+# -- the name's line is one line for every reader of the file ---------------------------
+
+# ``str.splitlines`` ends a line at these as well as at a line feed; the env
+# file's readers end it at a line feed or carriage return only (round 2).
+INJECTED_NAMES = {
+    "u2028-model": "Friendly\u2028AI_DEFAULT_MODEL=changed",
+    "vt-timeout": "Friendly\x0bZT_REQUEST_TIMEOUT_SECONDS=bad",
+    "ff-key": "Friendly\x0cOPENAI_API_KEY=sk-other",
+    "nel-url": "Friendly\x85OPENAI_BASE_URL=http://127.0.0.1:1/v1",
+    "u2029-concurrency": "Friendly\u2029ZT_CONCURRENCY=0",
+}
+
+
+def _old_read_env_file(text: str) -> dict[str, str]:
+    """``read_env_file`` as it was before M5 ticket 02 (lines cut by ``splitlines``)."""
+    from zotero_translate.settings import _ENV_LINE
+
+    values = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ENV_LINE.match(line)
+        if match:
+            value = match.group(2)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            values[match.group(1)] = value
+    return values
+
+
+ORDINARY_FILES = {
+    "lf": "OPENAI_BASE_URL=http://a/v1\nOPENAI_API_KEY=k\nAI_DEFAULT_MODEL=m\n",
+    "crlf": "OPENAI_BASE_URL=http://a/v1\r\nOPENAI_API_KEY=k\r\nAI_DEFAULT_MODEL=m\r\n",
+    "cr-only": "OPENAI_BASE_URL=http://a/v1\rOPENAI_API_KEY=k\rAI_DEFAULT_MODEL=m\r",
+    "no-final-newline": "OPENAI_BASE_URL=http://a/v1\nOPENAI_API_KEY=k",
+    "comments-blanks-export": "# a comment\n\n  export OPENAI_BASE_URL = http://a/v1  \n  # another\nOPENAI_API_KEY='k'\n\n",
+    "quotes-and-repeats": 'ZT_PROFILE_NAME="one"\nZT_PROFILE_NAME=\'two words\'\nA="x y"\nB=\n',
+    "tabs-and-trailing-space": "A=1\t\nB = 2 \n\tC=3\n",
+    "unicode": "ZT_PROFILE_NAME=名称 ☃\nOPENAI_API_KEY=k\n",
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize("name", ORDINARY_FILES)
+def test_the_other_keys_of_an_ordinary_env_file_parse_as_before(tmp_path, name):
+    path = tmp_path / "ordinary.env"
+    path.write_bytes(ORDINARY_FILES[name].encode("utf-8"))
+    assert read_env_file(path) == _old_read_env_file(path.read_text("utf-8"))
+
+
+@pytest.mark.parametrize("name", INJECTED_NAMES)
+def test_a_name_line_is_one_line_it_sets_no_model_setting(tmp_path, name):
+    """A character that only ``splitlines`` takes for a line end stays in the
+    name's line: it starts no setting of its own, so the model, the timeout,
+    the key, the address and the request body (and its cache key) are those
+    of the file without the name."""
+    base = "OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\n"
+    plain, injected = tmp_path / "plain.env", tmp_path / "injected.env"
+    argon = tmp_path / "argon.env"
+    plain.write_text(base, encoding="utf-8")
+    injected.write_bytes((base + f"ZT_PROFILE_NAME={INJECTED_NAMES[name]}\n").encode("utf-8"))
+    argon.write_text(base, encoding="utf-8")
+
+    assert set(read_env_file(injected)) == {"OPENAI_BASE_URL", "OPENAI_API_KEY", "ZT_PROFILE_NAME"}
+    assert load_pipeline_settings(injected, argon) == load_pipeline_settings(plain, argon)
+    before, after = _flash_bodies(plain, argon), _flash_bodies(injected, argon)
+    for kind in MESSAGES_OF:
+        assert before[kind] == after[kind]
+        assert ResponseCache.key(before[kind]) == ResponseCache.key(after[kind])
+
+
+def _models(model: FakeModel) -> set[str]:
+    return {r.body["model"] for r in model.requests}
+
+
+def test_a_name_with_a_setting_inside_changes_no_model_setting_in_the_service(tmp_path):
+    """A name Friendly<U+2028>AI_DEFAULT_MODEL=changed is a legal name (U+2028
+    is no control character), and the service started under it sends the
+    model of the file; the same name written into the file while the service
+    runs, or one with a vertical tab and a bad timeout in it, breaks neither
+    the listing nor the next task."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, f"ZT_PROFILE_NAME={INJECTED_NAMES['u2028-model']}\n")
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            first_listing = _builtin(service)
+            first_id = service.submit()
+            first = _settled(service, first_id)
+            original = env_file.read_text("utf-8")
+            listings = []
+            for key in ("vt-timeout", "ff-key", "nel-url", "u2029-concurrency"):
+                line = f"ZT_PROFILE_NAME={INJECTED_NAMES[key]}\n"
+                env_file.write_bytes(original.replace(f"ZT_PROFILE_NAME={INJECTED_NAMES['u2028-model']}\n", line).encode())
+                listings.append(_builtin(service))
+            second_id = service.submit()
+            second = _settled(service, second_id)
+        finally:
+            stop_service(service)
+
+    assert first_listing["name"] == INJECTED_NAMES["u2028-model"]
+    assert first_listing["model"] == FAKE_MODEL_NAME and "error" not in first_listing
+    assert [(b["name"], b["model"], b.get("error")) for b in listings] == [
+        (INJECTED_NAMES["u2028-model"], FAKE_MODEL_NAME, None)
+    ] * 4
+    assert first["state"] == second["state"] == "succeeded", (first["error"], second["error"])
+    assert first["profile"]["name"] == second["profile"]["name"] == INJECTED_NAMES["u2028-model"]
+    assert _models(model) <= {FAKE_MODEL_NAME, ARGON_MODEL_NAME}, _models(model)
