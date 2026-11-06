@@ -7,6 +7,7 @@ receives it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -21,14 +22,22 @@ from zotero_translate.settings import DEFAULT_PORT
 
 ROOT = Path(__file__).resolve().parent.parent
 
+PLUGIN_ID = "zotero-translate@jerrysun-yong.github.io"
+REPO_URL = "https://github.com/JeRrySun-Yong/zotero-translate"
+
 
 @pytest.fixture(scope="module")
-def xpi(tmp_path_factory) -> zipfile.ZipFile:
+def built_xpi(tmp_path_factory) -> Path:
     output = tmp_path_factory.mktemp("xpi") / "zotero-translate.xpi"
     subprocess.run(
         [sys.executable, str(ROOT / "plugin" / "build.py"), "--output", str(output)], check=True
     )
-    with zipfile.ZipFile(output) as package:
+    return output
+
+
+@pytest.fixture(scope="module")
+def xpi(built_xpi) -> zipfile.ZipFile:
+    with zipfile.ZipFile(built_xpi) as package:
         yield package
 
 
@@ -38,9 +47,46 @@ def test_manifest_declares_a_bootstrap_plugin_for_zotero_7_to_10(xpi):
     assert zotero["strict_min_version"] == "6.999"
     assert zotero["strict_max_version"] == "10.*"
     assert "bootstrap.js" in xpi.namelist()
-    # Zotero rejects a plugin without update_url; ours points at this machine,
-    # so update checks never reach an outside host.
-    assert urlparse(zotero["update_url"]).hostname == "localhost"
+
+
+def test_manifest_names_the_public_identity(xpi):
+    # Zotero rejects a plugin without update_url; the public plugin updates
+    # from the latest GitHub Release of the project.
+    manifest = json.loads(xpi.read("manifest.json"))
+    zotero = manifest["applications"]["zotero"]
+    assert zotero["id"] == PLUGIN_ID
+    update_url = urlparse(zotero["update_url"])
+    assert update_url.scheme == "https"
+    assert update_url.hostname == "github.com"
+    assert update_url.path.endswith("/update.json")
+    assert zotero["update_url"] == f"{REPO_URL}/releases/latest/download/update.json"
+    assert manifest["homepage_url"] == REPO_URL
+    assert manifest["author"] == "JeRrySun-Yong"
+
+
+def test_build_writes_the_update_manifest_next_to_the_xpi(built_xpi, xpi):
+    manifest = json.loads(xpi.read("manifest.json"))
+    zotero = manifest["applications"]["zotero"]
+    update_file = built_xpi.parent / "update.json"
+    assert update_file.is_file()
+    updates = json.loads(update_file.read_text("utf-8"))["addons"][zotero["id"]]["updates"]
+    assert len(updates) == 1
+    (update,) = updates
+    assert update["version"] == manifest["version"]
+    assert update["update_link"] == (
+        f"{REPO_URL}/releases/download/v{manifest['version']}/zotero-translate.xpi"
+    )
+    assert update["update_hash"] == "sha256:" + hashlib.sha256(built_xpi.read_bytes()).hexdigest()
+    assert update["applications"]["zotero"] == {
+        "strict_min_version": zotero["strict_min_version"],
+        "strict_max_version": zotero["strict_max_version"],
+    }
+    assert set(json.loads(update_file.read_text("utf-8"))["addons"]) == {zotero["id"]}
+
+
+def test_package_points_no_one_at_files_the_public_repository_lacks(xpi):
+    for name in xpi.namelist():
+        assert "docs/deployment.md" not in xpi.read(name).decode("utf-8", "replace"), name
 
 
 def test_default_service_address_is_the_services_default_port(xpi):
@@ -136,16 +182,39 @@ def test_package_leaves_out_tests_and_dev_tools(xpi):
     assert "build.py" not in xpi.namelist()
 
 
+# What marks a development switch: the test settings, the dev bridge, the
+# acceptance's log line and the call that quits Zotero.
+DEV_SWITCH = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
+DEV_SWITCH_FILE = ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js"
+
+
 def test_package_has_no_test_switch(xpi):
     # The acceptance's test switch (scenario 7: quit Zotero before an
     # attachment's identity is written) runs through the dev bridge in the
-    # test profile only (plugin/dev/acceptance/quit_before_identity.js); the
-    # package neither holds it nor reads any test setting.
-    switch = (ROOT / "plugin" / "dev" / "acceptance" / "quit_before_identity.js").read_text("utf-8")
-    forbidden = re.compile(r"ZT_TEST_|zotero-translate-dev|zotero-translate acceptance|eAttemptQuit")
-    assert forbidden.search(switch), "the pattern must match the switch itself"
+    # test profile only; the package neither holds it nor reads any test
+    # setting. The scan needs no development file, so it also runs in the
+    # public repository.
     for name in xpi.namelist():
-        assert not forbidden.search(xpi.read(name).decode("utf-8", "replace")), name
+        assert not DEV_SWITCH.search(xpi.read(name).decode("utf-8", "replace")), name
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'const flag = Services.env.get("ZT_TEST_PAUSE_AFTER_MARKER");',
+        'Zotero.debug("zotero-translate acceptance: stopping");',
+        "Services.startup.quit(Ci.nsIAppStartup.eAttemptQuit);",
+        'const id = "zotero-translate-dev-bridge@zotero-translate";',
+    ],
+)
+def test_test_switch_pattern_matches_the_switch_features(text):
+    assert DEV_SWITCH.search(text)
+
+
+def test_test_switch_pattern_matches_the_switch_file_itself():
+    if not DEV_SWITCH_FILE.is_file():
+        pytest.skip("the public repository holds no development tools")
+    assert DEV_SWITCH.search(DEV_SWITCH_FILE.read_text("utf-8"))
 
 
 def test_settings_page_suggests_deepseek_fast_only(xpi):
