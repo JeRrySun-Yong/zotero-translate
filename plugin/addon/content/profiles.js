@@ -196,7 +196,7 @@ var ZoteroTranslateProfiles = (() => {
     return `${role("主模型", flash)}；${role("副模型", argon)}。由翻译服务的启动参数决定，这里不能修改。`;
   }
 
-  // The service runs under a LaunchAgent (docs/deployment.md, section 4);
+  // The service runs under a LaunchAgent (README.md);
   // the plugin neither starts nor restarts it (spec, out of scope).
   const UNREACHABLE_HELP =
     "翻译服务由 LaunchAgent 在登录时启动。没在运行时，可以在终端运行 " +

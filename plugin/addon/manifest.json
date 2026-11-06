@@ -3,10 +3,12 @@
   "name": "Zotero Translate",
   "version": "0.1.0",
   "description": "把论文交给本机翻译服务，取回中文译文和双语对照 PDF。",
+  "author": "JeRrySun-Yong",
+  "homepage_url": "https://github.com/JeRrySun-Yong/zotero-translate",
   "applications": {
     "zotero": {
-      "id": "zotero-translate@zotero-translate",
-      "update_url": "https://localhost/zotero-translate/update.json",
+      "id": "zotero-translate@jerrysun-yong.github.io",
+      "update_url": "https://github.com/JeRrySun-Yong/zotero-translate/releases/latest/download/update.json",
       "strict_min_version": "6.999",
       "strict_max_version": "10.*"
     }

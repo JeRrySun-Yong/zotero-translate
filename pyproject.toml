@@ -6,6 +6,8 @@
 [project]
 name = "zotero-translate"
 version = "0.1.0"
+description = "Translate a paper from Zotero into a Chinese-only PDF and a bilingual side-by-side PDF."
+license = "AGPL-3.0-only"
 requires-python = "==3.12.*"
 dependencies = ["babeldoc", "httpx", "psutil", "pymupdf"]
 
@@ -33,7 +35,8 @@ constraint-dependencies = ["bitstring<5"]
 babeldoc = { path = "engine", editable = true }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# plugin/dev holds the tests of the development tools beside them.
+testpaths = ["tests", "plugin/dev"]
 # With -n (pytest-xdist), each test file runs whole in one process; see tests/conftest.py.
 addopts = "--dist loadfile"
 markers = ["real_model: calls the real pipeline model; skipped unless ZT_REAL_MODEL_SMOKE=1"]
