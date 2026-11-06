@@ -12,6 +12,7 @@ worker (the service's switch is in ``test_hedging_service.py``).
 """
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from tests.conftest import FAKE_API_KEY
 from tests.conftest import FAKE_ARGON_API_KEY
 from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import FakeModel
+from zotero_translate.model_client import REDACTED
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import PipelineModels
 from zotero_translate.model_client import ResponseCache
@@ -404,6 +406,92 @@ def test_rejections_are_in_send_order_when_every_send_is_rejected(tmp_path):
     assert "共尝试 2 次，其中 1 次发给 fake-argon" in str(failure.value)
 
 
+# M4 ticket 16 item 1: a check's error that holds an answer echoing the key.
+# Each endpoint's answer echoes the key it was sent; both read "[redacted]".
+def test_a_hedged_request_rejected_with_the_keys_echoed_reads_redacted_everywhere(
+    tmp_path, caplog
+):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE * 2, f"flash {FAKE_API_KEY}"))
+        argon.respond("other", lambda body: f"argon {FAKE_ARGON_API_KEY}")
+        models, log = _models(
+            flash, argon, tmp_path, flash_changes={"max_retries": 1}, argon_changes={"max_retries": 1}
+        )
+
+        def validate(content: str) -> None:
+            raise ValueError(f"术语条目 {content} 缺少判断依据 reason")
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(ModelCallError) as failure:
+                    models.flash.complete(MESSAGES, validate=validate, kind="review")
+        finally:
+            models.close()
+
+    error = failure.value
+    keys = (FAKE_API_KEY, FAKE_ARGON_API_KEY)
+    assert error.answered
+    assert [str(r) for r in error.rejections] == [
+        f"术语条目 flash {REDACTED} 缺少判断依据 reason",
+        f"术语条目 argon {REDACTED} 缺少判断依据 reason",
+    ]
+    assert all(isinstance(r, ValueError) for r in error.rejections)
+    for text in (str(error), str(error.__cause__), caplog.text, log.path.read_text("utf-8")):
+        assert all(key not in text for key in keys), text
+    assert REDACTED in str(error)
+
+
+def test_a_hedged_request_resent_after_a_rejection_with_the_key_echoed_logs_it_redacted(
+    tmp_path, caplog
+):
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", lambda body: f"flash {FAKE_API_KEY}")  # before the threshold
+        models, _ = _models(flash, argon, tmp_path, flash_changes={"max_retries": 1})
+
+        def validate(content: str) -> None:
+            raise ValueError(f"术语条目 {content} 缺少判断依据 reason")
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(ModelCallError) as failure:
+                    models.flash.complete(MESSAGES, validate=validate, kind="review")
+        finally:
+            models.close()
+
+    [warning] = [r for r in caplog.messages if "model request failed (attempt 1/2)" in r]
+    assert f"术语条目 flash {REDACTED} 缺少判断依据 reason" in warning, warning
+    assert FAKE_API_KEY not in caplog.text and FAKE_API_KEY not in str(failure.value)
+    assert argon.requests == []
+
+
+def test_the_parts_of_a_hedged_answer_a_rejection_keeps_are_scrubbed_of_both_keys(tmp_path):
+    class Rejection(ValueError):
+        def __init__(self, parts: dict):
+            super().__init__("还有条目不合格")
+            self.parts = parts
+
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE * 2, f"flash {FAKE_API_KEY}"))
+        argon.respond("other", lambda body: f"argon {FAKE_ARGON_API_KEY}")
+        models, _ = _models(
+            flash, argon, tmp_path, flash_changes={"max_retries": 1}, argon_changes={"max_retries": 1}
+        )
+
+        def validate(content: str) -> None:
+            raise Rejection({"answer": [content]})
+
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                models.flash.complete(MESSAGES, validate=validate, kind="review")
+        finally:
+            models.close()
+
+    assert [r.parts for r in failure.value.rejections] == [
+        {"answer": [f"flash {REDACTED}"]},
+        {"answer": [f"argon {REDACTED}"]},
+    ]
+
+
 # Spec section 8: when every candidate fails, the review falls back as it
 # would without hedging (on the verdicts of the last parsed answer by send).
 REVIEW_ITEMS = [  # both drafts fail the number check
@@ -730,3 +818,80 @@ def test_a_losers_record_failing_after_the_request_returned_is_logged(tmp_path, 
         finally:
             models.close()
     assert "disk full" in caplog.text
+
+
+# M4 ticket 17: an answer that passes the check can echo the key too. It is
+# redacted as it arrives, with the keys of both endpoints (the client that
+# started the request knows both), before the check, the cache and the caller.
+def _assert_keyless(tmp_path: Path, models, log: RequestLog, expected: str) -> None:
+    key = ResponseCache.key(models.flash._body(MESSAGES))
+    entry = ResponseCache(tmp_path / "cache").entry(key)
+    assert entry is not None and entry["content"] == expected, entry
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            for secret in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
+                assert secret.encode() not in path.read_bytes(), path
+
+
+def test_a_hedged_argon_copy_that_wins_with_the_keys_echoed_is_returned_and_cached_without_them(tmp_path):
+    echoed = f"argon {FAKE_ARGON_API_KEY} and flash {FAKE_API_KEY}"
+    expected = f"argon {REDACTED} and flash {REDACTED}"
+    checked = []
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.inject_error("timeout")  # the original never answers: the copy wins
+        argon.respond("other", lambda body: echoed)
+        models, log = _models(flash, argon, tmp_path)
+        try:
+            content = models.flash.complete(MESSAGES, validate=checked.append, kind="review")
+            again = models.flash.complete(MESSAGES, kind="review")  # the cache
+            records = _records(log, 3)
+        finally:
+            models.close()
+
+    assert content == expected and again == expected
+    assert checked == [expected]
+    assert _summary(records)[:2] == [(1, "flash", "cancelled_for_winner", False), (2, "argon", "succeeded", True)]
+    _assert_keyless(tmp_path, models, log, expected)
+
+
+def test_a_hedged_flash_send_that_wins_with_its_key_echoed_is_returned_and_cached_without_it(tmp_path):
+    echoed = f"flash {FAKE_API_KEY}"
+    expected = f"flash {REDACTED}"
+    checked = []
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE * 1.5, echoed))  # past the threshold, so a copy is sent
+        argon.respond("other", _later(HEDGE * 6, f"argon {FAKE_ARGON_API_KEY}"))
+        models, log = _models(flash, argon, tmp_path)
+        try:
+            content = models.flash.complete(MESSAGES, validate=checked.append, kind="review")
+            records = _records(log, 2)
+        finally:
+            models.close()
+
+    assert content == expected
+    assert checked == [expected]
+    assert _summary(records) == [(1, "flash", "succeeded", False), (2, "argon", "cancelled_for_winner", True)]
+    _assert_keyless(tmp_path, models, log, expected)
+
+
+def test_a_request_forwarded_to_argon_with_the_keys_echoed_is_returned_and_cached_without_them(tmp_path):
+    echoed = f"argon {FAKE_ARGON_API_KEY} and flash {FAKE_API_KEY}"
+    expected = f"argon {REDACTED} and flash {REDACTED}"
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.fail_same_request(["timeout", "timeout"])
+        argon.respond("other", lambda body: echoed)
+        models, log = _models(
+            flash, argon, tmp_path, hedge_after=None, flash_changes={"timeout_seconds": 1.0}
+        )
+        try:
+            content = models.flash.complete(MESSAGES, kind="translation_batch")
+        finally:
+            models.close()
+
+    assert content == expected
+    assert [(r["send"], r["endpoint"], r["result"]) for r in load_records(log.path)] == [
+        (1, "flash", "timeout"),
+        (2, "flash", "timeout"),
+        (3, "argon", "succeeded"),
+    ]
+    _assert_keyless(tmp_path, models, log, expected)

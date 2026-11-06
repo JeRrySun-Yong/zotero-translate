@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from string import Template
 
@@ -58,7 +59,7 @@ PROMPT_TEMPLATE = Template(
 - Numbers (decimals, percentages, values with units), URLs, code identifiers, model names and dataset names: keep them exactly as in the input.
 - JSON keys or structure.
 
-$glossary_usage_rules_block$first_mention_rules_block$key_concept_heading_rules_block
+$glossary_usage_rules_block$first_mention_rules_block$key_concept_heading_rules_block$batch_extra_rules_block
 ## Output Format
 Return a JSON array of the same length.  
 For each item:
@@ -126,6 +127,131 @@ Some input items have "{KEY_CONCEPT_HEADING_FIELD}": the item is a section headi
 # Parentheses the source does not have make the translation hard to read.
 NO_ADDED_PARENTHESES_RULES = """- Do not add the English source words after Chinese text, as in 鲁棒性（Robustness）: write the Chinese alone, or the English alone where the glossary keeps a term in English.
 - Do not turn the source's commas, dashes or appositives into parentheses: an aside or apposition set off by commas or dashes stays set off by commas or dashes."""
+
+
+# Short labels (M4 ticket 15, from ticket 14). Below this many input tokens
+# an input is usually a label (a table header, a figure label): a Chinese
+# label easily tokenizes to three times the English one's tokens, so the
+# token ratio check alone rejects good translations ("References" ->
+# 参考图像) and the simple redo then picks a worse word (参考文献).
+LENGTH_RATIO_MIN_TOKENS = 10
+
+# A label's Chinese may take up to this factor of the source's width, with
+# room for three Chinese characters, or six for an abbreviation or acronym
+# ("mAP" -> 平均精度均值). Widths count a full-width character as two.
+SHORT_LABEL_MAX_WIDTH_RATIO = 1.2
+SHORT_LABEL_MIN_WIDTH = 6
+ABBREVIATION_MAX_WIDTH = 12
+# An acronym is short; a longer all-capitals word (OBJECT) is an ordinary
+# word set in capitals and gets the ordinary allowance.
+ACRONYM_MAX_LETTERS = 5
+
+# Past twice the source's width, or six Chinese characters for a tiny
+# source, an output the token ratio rejects is a runaway answer ("甲" * 100)
+# or the source repeated ("Object " * 30), not a label's translation. It
+# never vetoes an output the ratio check passes.
+SHORT_OUTPUT_MAX_WIDTH_RATIO = 2
+SHORT_OUTPUT_MIN_WIDTH = 12
+
+_STYLE_TAG = re.compile(r"<\s*/?\s*style[^>]*>", re.IGNORECASE)
+
+
+def display_width(text: str) -> int:
+    """Approximate rendered width: a full-width character counts as two."""
+    return sum(
+        2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+        for character in text
+    )
+
+
+def translated_width(text: str) -> int:
+    """Width of the full-width text, the part translating a label adds.
+
+    Latin text kept in a translation (a model name, a key concept) is not
+    growth from translating the label, so it is not counted.
+    """
+    return sum(
+        2 if unicodedata.east_asian_width(character) in ("W", "F") else 0
+        for character in text
+    )
+
+
+def _looks_like_abbreviation(text: str) -> bool:
+    """A one-word abbreviation ("Inst.") or acronym ("BG", "mAP"): at least
+    two capitals and at most ACRONYM_MAX_LETTERS letters."""
+    word = text.strip()
+    if not word or " " in word:
+        return False
+    letters = [character for character in word if character.isalpha()]
+    if not letters:
+        return False
+    if word.endswith("."):
+        return True
+    capitals = sum(1 for character in letters if character.isupper())
+    return capitals >= 2 and len(letters) <= ACRONYM_MAX_LETTERS
+
+
+def translation_length_ok(
+    input_text: str,
+    output_text: str,
+    input_token_count: int,
+    output_token_count: int,
+) -> bool:
+    """Whether the output length is acceptable for this input.
+
+    The upstream check: the output/input token ratio is between 0.3 and 3.
+    An input under LENGTH_RATIO_MIN_TOKENS (a label) is only let through
+    more often than by that check, never less (M4 ticket 15), except for an
+    output that translates nothing. Its output, style tags left out, fails
+    when it is blank, or when the source has letters and the output has no
+    letter or digit (only punctuation: "." for a sentence).
+
+    Otherwise it passes when the token ratio passes (however wide:
+    "MLLMs" -> 多模态大语言模型), or, when the ratio fails, when it fits the
+    label:
+
+    - the whole output is at most twice the source's width, or six Chinese
+      characters for a tiny source, so that a runaway answer ("甲" * 100) or
+      the source repeated ("Object " * 30) is not taken for a label;
+    - and its Chinese part is at most 1.2 times the source's width, with
+      room for three Chinese characters (six for an abbreviation):
+      "References" -> 参考图像 passes, "Object" -> 物体组合 and "Global" ->
+      全局风格 (AutoRef's table headers expanded from the paper dossier,
+      rendered at half size) do not.
+
+    A label that fails is redone with the simple one-paragraph prompt, which
+    has no dossier.
+    """
+    ratio_ok = input_token_count > 0 and (
+        0.3 < output_token_count / input_token_count < 3
+    )
+    if input_token_count >= LENGTH_RATIO_MIN_TOKENS:
+        return ratio_ok
+    source = _STYLE_TAG.sub("", input_text).strip()
+    output = _STYLE_TAG.sub("", output_text).strip()
+    if not output:
+        return False
+    has_letters = any(character.isalpha() for character in source)
+    if has_letters and not any(character.isalnum() for character in output):
+        return False
+    if ratio_ok:
+        return True
+    # The width rule, for a label the ratio check rejects.
+    source_width = display_width(source)
+    if display_width(output) > max(
+        SHORT_OUTPUT_MIN_WIDTH, source_width * SHORT_OUTPUT_MAX_WIDTH_RATIO
+    ):
+        return False
+    if not has_letters:
+        return True
+    room = (
+        ABBREVIATION_MAX_WIDTH
+        if _looks_like_abbreviation(source)
+        else SHORT_LABEL_MIN_WIDTH
+    )
+    return translated_width(output) <= max(
+        room, source_width * SHORT_LABEL_MAX_WIDTH_RATIO
+    )
 
 
 class BatchParagraph:
@@ -875,10 +1001,11 @@ class ILTranslatorLLMOnly:
             for llm_translate_tracker in llm_translate_trackers:
                 llm_translate_tracker.set_output(llm_output)
             translation_results = self._parse_llm_output(llm_output, len(inputs))
+            review_kept: set = set()
             if self.translation_config.batch_reviewer is not None:
                 if self.il_translator.has_request_error:
                     return
-                translation_results = self._review(
+                translation_results, review_kept = self._review(
                     translation_results,
                     inputs,
                     json_format_input,
@@ -889,8 +1016,10 @@ class ILTranslatorLLMOnly:
 
             for id_, output in translation_results.items():
                 should_fallback = True
-                if output is None:
-                    # The review kept this paragraph's source text.
+                if output is None and id_ in review_kept:
+                    # The review kept this paragraph's source text and
+                    # recorded it. Any other null is a null draft: it is
+                    # redone alone below (M4 ticket 15).
                     should_fallback = False
                     self.total_count += 1
                     if pbar:
@@ -910,6 +1039,15 @@ class ILTranslatorLLMOnly:
 
                     # Clean up any excessive punctuation in the translated text
                     translated_text = re.sub(r"[. 。…，]{20,}", ".", output)
+
+                    # A blank answer would clear the paragraph, and a short
+                    # input's blank answer can pass the length check: it
+                    # fails here and is redone alone (M4 ticket 15).
+                    if not translated_text.strip():
+                        inputs[id_][4].set_error_message("Translation result is empty.")
+                        logger.warning("Translation result is empty, fallback.")
+                        inputs[id_][4].set_placeholder_full_match()
+                        continue
 
                     # Get the original input for this translation
                     translate_input = inputs[id_][1]
@@ -943,7 +1081,13 @@ class ILTranslatorLLMOnly:
                         )
                         continue
 
-                    if not (0.3 < output_token_count / input_token_count < 3):
+                    if not translation_length_ok(
+                        trimed_input
+                        + "".join(g["gloss_zh"] for g in glosses),
+                        output_unicode,
+                        input_token_count,
+                        output_token_count,
+                    ):
                         llm_translate_tracker.set_error_message(
                             f"Translation result is too long or too short. Input: {input_token_count}, Output: {output_token_count}"
                         )
@@ -1059,17 +1203,19 @@ class ILTranslatorLLMOnly:
         batch_paragraph: BatchParagraph,
         should_translate_paragraph: list[int],
         batch_text: str,
-    ) -> dict:
-        """Review the batch's drafts; return {id: final text, or None to keep the source}.
+    ) -> tuple[dict, set]:
+        """Review the batch's drafts.
 
-        Drafts that are not strings are left to the checks below, which
-        redo them one by one.
+        Return {id: final text, or None to keep the source} and the ids whose
+        source the review kept (and recorded). Drafts that are not strings,
+        null included, or are blank, are left to the checks below, which
+        redo them one by one (M4 ticket 15).
         """
         items = []
         for obj in json_format_input:
             id_ = obj["id"]
             draft = translation_results.get(id_)
-            if not isinstance(draft, str):
+            if not isinstance(draft, str) or not draft.strip():
                 continue
             page = batch_paragraph.pages[should_translate_paragraph[id_]]
             item = {
@@ -1083,11 +1229,12 @@ class ILTranslatorLLMOnly:
                     item[field] = obj[field]
             items.append(item)
         if not items:
-            return translation_results
+            return translation_results, set()
         final = self.translation_config.batch_reviewer(
             items, self._active_glossary_entries(batch_text)
         )
-        return {**translation_results, **final}
+        kept = {id_ for id_, text in final.items() if text is None}
+        return {**translation_results, **final}, kept
 
     def _active_glossary_entries(self, text: str) -> list[tuple[str, str]]:
         entries: list[tuple[str, str]] = []
@@ -1205,6 +1352,12 @@ class ILTranslatorLLMOnly:
             key_concept_heading_rules_block=KEY_CONCEPT_HEADING_TRANSLATION_RULES
             if has_key_concept_headings
             else "",
+            # A user model profile's rules (M4 ticket 15); none for the
+            # built-in profile, whose prompt stays as it was.
+            batch_extra_rules_block=getattr(
+                self.translation_config, "batch_extra_rules", None
+            )
+            or "",
             contextual_hints_block=contextual_hints_block,
             json_input_str=json_input_str,
             glossary_tables_block=glossary_tables_block,

@@ -43,3 +43,11 @@ def test_a_changed_version_fails_the_check(version, translation):
 )
 def test_a_kept_version_passes_also_with_a_space(version, translation):
     assert problems(SOURCES[version], translation) == []
+
+
+def test_a_blank_translation_fails_the_checks():
+    # M4 ticket 15 (from ticket 14): an empty or whitespace-only text would
+    # clear the paragraph.
+    assert problems("Demo Page", "") == ["译文为空"]
+    assert problems("Demo Page", " \n\t") == ["译文为空"]
+    assert problems("", "") == ["译文为空"]

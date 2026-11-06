@@ -4,7 +4,7 @@ Test fixture only. It can:
 
 - record every request (model, parameters, messages) for the test to read;
 - answer by request kind with pre-written responders;
-- inject errors (500, 429, 400, 401, 403, timeout, slow, empty content, invalid
+- inject errors (500, 429, 400, 401, 403, 404, timeout, slow, empty content, invalid
   JSON) on the N-th request of a kind, or on the first request of a kind and then on
   each resend of that same request (``fail_same_request``; a resend may
   name another model, as a request forwarded to argon does). "timeout" sends
@@ -13,13 +13,32 @@ Test fixture only. It can:
   normal answer a few bytes at a time over ``slow_body_seconds``; "400"
   answers with ``REJECTION_BODY``, a JSON error spread over several lines
   and longer than 200 characters; "400_echo" answers with an error that
-  echoes the request's Authorization header, key included;
+  echoes the request's Authorization header, key included; "200_echo"
+  answers 200 with content (not JSON) that echoes it too; "null_content",
+  "list_content" and "object_content" answer 200 with a message content
+  that is not a string;
 - inject a delay and count the maximum number of requests in flight;
 - keep connections open between requests (``keep_alive``, HTTP/1.1), so
   that a client reuses them; each request records its client's port;
 - see a client disconnect: a request that hangs ("timeout",
   "hang_after_headers") ends as soon as the client closes its connection,
-  is marked ``disconnected`` and leaves the in-flight count at once.
+  is marked ``disconnected`` and leaves the in-flight count at once;
+- answer a request whose body has ``"stream": true`` (M4 ticket 12) as a
+  server-sent event stream, closed when it ends: a comment line, a role
+  delta, thinking deltas (``reasoning``, ``reasoning_content``,
+  ``reasoning_details``, as Command Code's DeepSeek sends them), the content
+  in small pieces, a chunk with ``finish_reason``, a usage chunk and
+  ``data: [DONE]``. Two faults are for streams: "stream_cut" sends the
+  thinking and half the content and closes the connection, with no
+  ``finish_reason`` and no ``[DONE]``; "stream_trickle" sends a thinking
+  delta every ``STREAM_TRICKLE_SECONDS`` until the client disconnects, so
+  bytes keep arriving on a send that never answers. Every other fault
+  applies to a stream as to a plain answer (an error status is a plain JSON
+  answer; "empty", "invalid_json" and the not-text faults are the streamed
+  content). Each request records its raw body (``raw_body``). A test can
+  set ``stream_body`` to make every streamed answer exactly those bytes
+  (e.g. a malformed event, an ``event: error``, or an event split across
+  several ``data:`` lines), whatever the responder gives.
 
 Request kinds are recognised from the message content:
 
@@ -49,6 +68,9 @@ Request kinds are recognised from the message content:
   ``ALGORITHM_REVIEW_MARKER``. The default answer returns every draft.
 - ``single_paragraph``: the engine's one-paragraph prompts, which it uses to
   redo a paragraph after a failed or rejected batch.
+- ``connection_test``: a model profile's connection test (M4 ticket 02),
+  recognised by ``CONNECTION_TEST_MARKER`` in its instructions. The default
+  answer is ``{"ok": true}``.
 - ``other``: anything else.
 """
 
@@ -118,6 +140,9 @@ REVIEW_MARKER = "Review the draft translation"
 ALGORITHM_MARKER = "Translate the natural language in the rows of a pseudocode algorithm"
 ALGORITHM_REVIEW_MARKER = "Review the draft translation of the rows of a pseudocode algorithm"
 
+# A phrase of the connection test's instructions (zotero_translate.model_client).
+CONNECTION_TEST_MARKER = "This is a connection test"
+
 _ERRORS = {
     "500",
     "429",
@@ -125,12 +150,24 @@ _ERRORS = {
     "400_echo",
     "401",
     "403",
+    "404",
     "timeout",
     "hang_after_headers",
     "slow",
     "empty",
     "invalid_json",
+    "200_echo",
+    "null_content",
+    "list_content",
+    "object_content",
+    "stream_cut",
+    "stream_trickle",
 }
+STREAM_TRICKLE_SECONDS = 0.05  # between the thinking deltas of "stream_trickle"
+STREAM_PIECE_CHARACTERS = 7  # the streamed content comes in pieces this long
+STREAM_THINKING = ("先想一想。", "再核对一遍。")  # thinking deltas, never part of the answer
+# The message content of the faults whose answer is 200 with content that is not text.
+_NOT_TEXT_CONTENT = {"null_content": None, "list_content": ["ok"], "object_content": {"ok": True}}
 HANG_SECONDS = 3600.0  # how long "timeout" and "hang_after_headers" hold a connection open
 
 # The body of an injected HTTP 400: several lines, the message first, then
@@ -157,6 +194,7 @@ class RecordedRequest:
     received_at: float = 0.0  # time.monotonic() when the request arrived
     disconnected: bool = False  # the client closed the connection before the answer ended
     client_port: int = 0  # the client's end of the connection; equal ports: a reused connection
+    raw_body: bytes = b""  # the request body as it came over the wire
 
     @property
     def prompt(self) -> str:
@@ -189,6 +227,7 @@ class FakeModel:
     keep_alive: bool = False  # HTTP/1.1: a connection stays open for the client's next request
     requests: list[RecordedRequest] = field(default_factory=list)
     max_in_flight: int = 0
+    stream_body: bytes | None = None  # a streamed answer's whole body, instead of the usual stream
 
     def __post_init__(self):
         self._lock = threading.Lock()
@@ -205,6 +244,7 @@ class FakeModel:
             "algorithm": pseudo_translate_algorithm,
             "algorithm_review": keep_algorithm_drafts,
             "single_paragraph": pseudo_translate_single,
+            "connection_test": lambda body: '{"ok": true}',
             "other": lambda body: "ok",
         }
         self._server: ThreadingHTTPServer | None = None
@@ -218,7 +258,7 @@ class FakeModel:
     def inject_error(self, error: str, *, kind: str | None = None, nth: int = 1) -> None:
         """Fail the ``nth`` request of ``kind`` (any kind if None) once.
 
-        ``error`` is one of: "500", "429", "400", "400_echo", "401", "403", "timeout",
+        ``error`` is one of: "500", "429", "400", "400_echo", "200_echo", "401", "403", "404", "timeout",
         "hang_after_headers", "slow", "empty", "invalid_json".
         """
         assert error in _ERRORS, error
@@ -263,8 +303,8 @@ class FakeModel:
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length) or b"{}")
-                fake._handle(self, body)
+                self.raw_body = self.rfile.read(length)  # read by ``_handle``
+                fake._handle(self, json.loads(self.raw_body or b"{}"))
 
         self._server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
         self._server.daemon_threads = True
@@ -290,6 +330,7 @@ class FakeModel:
                 fault=fault,
                 received_at=time.monotonic(),
                 client_port=handler.client_address[1],
+                raw_body=getattr(handler, "raw_body", b""),
             )
             self.requests.append(request)
             self._in_flight += 1
@@ -306,7 +347,7 @@ class FakeModel:
             if fault == "400_echo":
                 echo = {"message": "injected 400", "authorization": handler.headers.get("Authorization")}
                 return _send_json(handler, 400, {"error": echo})
-            if fault in ("401", "403"):
+            if fault in ("401", "403", "404"):
                 return _send_json(handler, int(fault), {"error": {"message": f"injected {fault}"}})
             if fault in ("timeout", "hang_after_headers"):
                 if fault == "hang_after_headers":
@@ -321,9 +362,20 @@ class FakeModel:
                 content = ""
             elif fault == "invalid_json":
                 content = "this is not json {"
+            elif fault == "200_echo":
+                content = f"not json; you sent {handler.headers.get('Authorization')}"
             else:
                 content = self._responders[kind](body)
+            if body.get("stream") is True:
+                if fault in _NOT_TEXT_CONTENT:
+                    content = _NOT_TEXT_CONTENT[fault]
+                request.disconnected = not _send_stream(
+                    handler, body.get("model", ""), content, fault, self.stream_body
+                )
+                return None
             payload = _completion(body.get("model", ""), content)
+            if fault in _NOT_TEXT_CONTENT:
+                payload["choices"][0]["message"]["content"] = _NOT_TEXT_CONTENT[fault]
             if fault == "slow":
                 request.disconnected = not _send_json_slowly(handler, payload, self.slow_body_seconds)
                 return None
@@ -378,6 +430,8 @@ def classify(body: dict) -> str:
         return "gloss_rewrite"
     if any(DOSSIER_MARKER in text for text in instructions):
         return "dossier"
+    if any(CONNECTION_TEST_MARKER in text for text in instructions):
+        return "connection_test"
     return "other"
 
 
@@ -549,6 +603,71 @@ def _send_text(handler: BaseHTTPRequestHandler, status: int, text: str) -> None:
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def _send_stream(
+    handler: BaseHTTPRequestHandler,
+    model: str,
+    content,
+    fault: str | None,
+    body: bytes | None = None,
+) -> bool:
+    """Answer as a server-sent event stream (see the module docstring); close the connection after.
+
+    ``body``, when given, is the whole stream, as it is.
+    Return False if the client closed the connection before the stream ended.
+    """
+    handler.close_connection = True
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    if body is not None:
+        try:
+            handler.wfile.write(body)
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        return True
+
+    def chunk(delta: dict | None, finish: str | None = None, **extra) -> bytes:
+        choices = [] if delta is None else [{"index": 0, "delta": delta, "finish_reason": finish}]
+        data = {"id": "fake-stream", "object": "chat.completion.chunk", "model": model, "choices": choices, **extra}
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    thinking = [
+        chunk({"role": "assistant", "content": "", "reasoning": STREAM_THINKING[0]}),
+        chunk({"reasoning_content": STREAM_THINKING[1], "reasoning_details": [{"text": "x"}]}),
+    ]
+    if isinstance(content, str):
+        pieces = [content[i : i + STREAM_PIECE_CHARACTERS] for i in range(0, len(content), STREAM_PIECE_CHARACTERS)]
+        deltas = [chunk({"content": piece}) for piece in pieces]
+    else:  # a content that is not text, in one delta
+        deltas = [chunk({"content": content})]
+    try:
+        handler.wfile.write(b": PROCESSING\n\n")
+        for event in thinking:
+            handler.wfile.write(event)
+            handler.wfile.flush()
+        if fault == "stream_trickle":
+            while True:
+                time.sleep(STREAM_TRICKLE_SECONDS)
+                handler.wfile.write(chunk({"reasoning": "还在想。"}))
+                handler.wfile.flush()
+        if fault == "stream_cut":
+            for event in deltas[: max(1, len(deltas) // 2)]:
+                handler.wfile.write(event)
+            handler.wfile.flush()
+            return True
+        for event in deltas:
+            handler.wfile.write(event)
+        handler.wfile.write(chunk({}, "stop"))
+        handler.wfile.write(chunk(None, usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}))
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        return False  # the client gave up on the stream
+    return True
 
 
 def _send_json_slowly(handler: BaseHTTPRequestHandler, payload: dict, seconds: float) -> bool:

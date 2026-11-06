@@ -141,6 +141,28 @@ def test_draft_and_review_both_changing_a_number_keep_the_source_after_the_retri
     assert re.sub(r"\s+", "", kept[0]["source"]).find(ABSTRACT_PHRASE) >= 0
 
 
+def blank_reviews(body: dict) -> str:
+    items = review_items(body["messages"][-1]["content"]) or []
+    return json.dumps([{"id": i["id"], "output": " "} for i in items], ensure_ascii=False)
+
+
+def test_a_blank_review_is_not_adopted(fake_model, start_service):
+    # M4 ticket 15 (from ticket 14): a blank review gives way to the draft.
+    fake_model.respond("review", blank_reviews)
+    service = start_service(fake_model)
+
+    task_id = service.submit()
+    final = service.wait(task_id)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert final["kept_source_paragraphs"] == 0
+    mono = pdf_text(service.download(task_id, "mono"))
+    assert PSEUDO_PREFIX + SOURCE_PHRASE.replace(" ", "") in mono
+    drafts_used = service.report(task_id)["review"]["drafts_used"]
+    assert drafts_used
+    assert all("译文为空" in d["reason"] for d in drafts_used)
+
+
 def test_a_resubmit_on_the_same_data_judges_the_cached_review(fake_model, start_service):
     fake_model.respond("review", reviewed(change_number=True))
     service = start_service(fake_model)

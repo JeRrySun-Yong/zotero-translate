@@ -233,6 +233,7 @@ class TranslationConfig:
             [list[dict], list[tuple[str, str]]], dict[int, str | None]
         ]
         | None = None,
+        batch_extra_rules: str | None = None,
         on_source_kept: Callable[[int | None, str, str], None] | None = None,
         algorithm_detector: Callable[[object], set[int]] | None = None,
         algorithm_translator: Callable[[list[tuple[int, object, str | None]]], None]
@@ -424,6 +425,10 @@ class TranslationConfig:
         # paragraph's source text (the reviewer records it). None skips the
         # review.
         self.batch_reviewer = batch_reviewer
+        # A rules block appended to every LLM batch prompt, after its other
+        # rule blocks (a user model profile's rules, M4 ticket 15). None
+        # leaves the prompt as it was.
+        self.batch_extra_rules = batch_extra_rules
         # Called with (1-based page, source text, reason) for a paragraph
         # that keeps its source text because its translation failed.
         self.on_source_kept = on_source_kept

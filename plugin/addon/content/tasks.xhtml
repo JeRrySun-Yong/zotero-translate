@@ -3,19 +3,28 @@
 <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
         xmlns:html="http://www.w3.org/1999/xhtml"
         id="zotero-translate-tasks" windowtype="zotero-translate:tasks"
-        title="翻译任务" width="860" height="360">
+        title="翻译任务" width="980" height="360">
   <html:style>
     table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; vertical-align: top; }
     #zotero-translate-notices { margin: 0 0 8px; padding: 6px 8px 6px 24px; background: #fff4d6; }
+    th, .stage, .profile, .buttons { white-space: nowrap; }
+    .progress { white-space: nowrap; }
+    .progress progress { width: 90px; vertical-align: middle; margin-inline-end: 6px; }
+    .elapsed { white-space: nowrap; }
+    .status-word { white-space: nowrap; }
+    .status-detail { font-size: 0.85em; color: #666; margin-top: 2px; }
   </html:style>
   <script src="chrome://zotero/content/include.js"/>
   <script src="chrome://zotero-translate/content/tasks.js"/>
   <vbox flex="1" style="padding: 8px; overflow: auto;">
+    <hbox pack="end" style="margin: 0 0 8px;">
+      <html:button id="zotero-translate-clear-ended" disabled="disabled">清除已结束</html:button>
+    </hbox>
     <html:ul id="zotero-translate-notices" hidden="hidden"/>
     <html:table>
       <html:thead>
-        <html:tr><html:th>论文</html:th><html:th>阶段</html:th><html:th>进度</html:th><html:th>状态</html:th><html:th></html:th></html:tr>
+        <html:tr><html:th>论文</html:th><html:th>配置</html:th><html:th>阶段</html:th><html:th>进度</html:th><html:th>已用时间</html:th><html:th>状态</html:th><html:th></html:th></html:tr>
       </html:thead>
       <html:tbody id="zotero-translate-rows"/>
     </html:table>

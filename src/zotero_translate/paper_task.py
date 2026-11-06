@@ -110,6 +110,7 @@ def run_paper_task(
     from babeldoc.glossary import GlossaryEntry
     from babeldoc.translator.translator import set_translate_rate_limiter
 
+    from zotero_translate import profile_rules
     from zotero_translate.algorithm_layout import AlgorithmLayout
     from zotero_translate.algorithm_translation import AlgorithmTranslator
     from zotero_translate.algorithms import AlgorithmDetector
@@ -141,6 +142,7 @@ def run_paper_task(
     kept = KeptSource()
     algorithms = AlgorithmDetector()
     report = TaskReport(models, kept, algorithms, attempt)
+    report.user_profile_rules = settings.user_profile_rules
 
     def progress(stage: str, percent: int) -> None:
         report.enter_stage(stage)
@@ -172,7 +174,11 @@ def run_paper_task(
         )
         first_mentions = FirstMentionPlan(term_list.terms)
         report.first_mentions = first_mentions.placements
-        reviewer = BatchReviewer(client, dossier, kept)
+        # The prompt rules for user profiles only (M4 ticket 15).
+        rules = settings.user_profile_rules
+        reviewer = BatchReviewer(
+            client, dossier, kept, extra_rules=profile_rules.REVIEW_RULES if rules else None
+        )
         algorithm_translator = AlgorithmTranslator(
             client, dossier, algorithms, term_list.glossary_entries()
         )
@@ -201,6 +207,7 @@ def run_paper_task(
             first_mention_recorder=first_mentions.record_translations,
             key_concept_headings=first_mentions.key_concept_headings,
             batch_reviewer=reviewer,
+            batch_extra_rules=profile_rules.BATCH_RULES if rules else None,
             on_source_kept=kept.record,
             algorithm_detector=algorithms.engine_page,
             algorithm_translator=algorithm_translator.start,

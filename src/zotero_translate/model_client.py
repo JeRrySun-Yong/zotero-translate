@@ -10,7 +10,8 @@ Reliability (ADR 0002):
 - The request timeout bounds the whole request, from sending it to reading
   the last byte of the response (see ``_post``). A send that runs past it
   is cancelled; its slot comes back once its connection has closed.
-- Network errors, timeouts, HTTP 400, 429 and 5xx, empty content and
+- Network errors, timeouts, HTTP 400, 429 and 5xx, empty content, a
+  content that is not a string and
   answers the caller's ``validate`` rejects are retried, at most
   ``max_retries`` times. Other HTTP errors (e.g. 401, 403) fail at once.
   When the attempts are used up, ``complete`` raises ``ModelCallError`` with
@@ -35,10 +36,33 @@ Reliability (ADR 0002):
   cut, the API key of this client and of its fallback is replaced with
   ``[redacted]``; HTTP 401 and 403, which are about the key, carry no body
   at all. The request headers are never logged.
+- An answer is redacted as it arrives (M4 ticket 17): what a send returns
+  goes through ``_redact`` before the caller's ``validate`` sees it, before it
+  is cached and before it is returned, so an answer that echoes the key
+  (and passes ``validate``) reaches the cache, the task report and the
+  caller with ``[redacted]`` in its place. ``_redact`` is the one of the
+  client that started the request, which knows the keys of both endpoints
+  (flash and its fallback argon), so it holds for a request forwarded to
+  argon and for either send of a hedged request; plain, streamed (the joined
+  content) and hedged requests alike. An answer without a key is unchanged.
+  The connection test redacts its own text (``check_connection``).
+- The error of the caller's ``validate`` is cleaned again, on its own (M4
+  ticket 16), as a second line of defence: its text can hold the answer's
+  words, and the rejection carries parts of them. Before the text goes into
+  the retry warning, the final ``ModelCallError`` or the saved
+  ``rejections``, the keys in it read ``[redacted]`` (``_scrub``); the
+  rejection keeps its class and attributes, and so do the parts of the answer
+  it carries (the glosses of a rejected gloss rewrite, the verdicts of a
+  rejected review: the caller takes them back from ``rejections`` and they
+  reach the task report), but the keys in all of them, in its message, its
+  attributes (strings, and strings inside lists, tuples, sets, dicts and
+  dataclasses) and the exceptions it was raised from or while handling, read
+  ``[redacted]``. This holds for plain, streamed and hedged requests alike.
 - Successful answers (those ``validate`` accepts) are cached on disk, keyed by
   a hash of the whole request body, which includes the model name. The cache
   directory is shared by all paper tasks, so a resubmitted paper reuses every
-  answer that succeeded before.
+  answer that succeeded before. What is cached is the redacted answer; an
+  entry written before ticket 17 is not cleaned.
 
 Two endpoints (ADR 0004): ``PipelineModels`` holds a client for flash and
 one for argon. A flash request that is not hedged (hedging off, another
@@ -86,8 +110,26 @@ same address and API key, they are one endpoint and share one budget, of
 flash's concurrency setting; argon's own setting is ignored, and the log
 says so. The engine's own concurrency still comes from flash's setting.
 
+Streamed requests (M4 ticket 12): with ``settings.stream`` (a user
+profile's setting, ``ZT_STREAM=1``; off for the built-in Gemini, whose
+request bodies and cache keys stay as they were), the body asks for
+``"stream": true`` and the answer is the stream's content deltas, joined
+(``_streamed_content``); thinking deltas are not read. The endpoint reads
+the whole stream as it reads a plain body, so the request timeout, a
+cancel, a hedge's winner and closing the client end a stream in flight as
+they end any send. A stream that ends without a ``finish_reason`` broke off,
+and one with an ``event: error`` failed on the way; both are retried like
+an unparseable answer (recorded ``invalid_answer``).
+Why: Command Code's DeepSeek Fast answers a plain request that thinks
+longer than about 125 seconds with HTTP 524 (ticket 03).
+
 Closing a client cancels its sends in flight (a failed paper task does not
 wait for its algorithm requests to time out); they raise ``SendCancelled``.
+
+Connection test (M4 ticket 02, ADR 0005): ``check_connection`` sends a
+model profile's one small request, with the paper task's parameters, and
+tells the outcome apart (succeeded, unreachable, unauthorized, model not
+found, timeout, unparseable, another HTTP error).
 
 Request latency records (spec section 7, ``zotero_translate.request_log``):
 with a ``request_log``, every send gets a record when it ends, and so does
@@ -98,14 +140,18 @@ slot is recorded on its own.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import hashlib
 import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -117,6 +163,7 @@ from zotero_translate.request_log import KIND_STAGES
 from zotero_translate.request_log import RequestLog
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import PipelineSettings
+from zotero_translate.settings import base_url_problem
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +206,7 @@ FORWARD_AFTER_TIMEOUTS = 2
 HEDGED_KINDS = ("translation_batch", "review")
 ERROR_BODY_CHARACTERS = 200  # of an HTTP error's response body, in its reason
 REDACTED = "[redacted]"  # replaces an API key echoed in an error response
+_SCRUB_DEPTH = 12  # how deep into containers a rejection's data is scrubbed
 
 
 class _RetryableError(Exception):
@@ -324,7 +372,11 @@ class ModelClient:
             timing = _SendTiming()
             try:
                 try:
-                    content = target._send(target_body, timing)
+                    # Redacted as it arrives: the check, the cache and the
+                    # caller get no answer with a key in it (also the other
+                    # endpoint's, when the request was forwarded: ``self``
+                    # knows both).
+                    content = self._redact(target._send(target_body, timing))
                 except ModelCallError as e:  # an HTTP error no resend fixes
                     record(target.role, target.model, attempt, timing, "http_error")
                     e.rejections = rejections  # e.g. the gloss rewrite keeps what passed
@@ -343,7 +395,7 @@ class ModelClient:
                     except Exception as e:  # noqa: BLE001 - any rejection means "unparseable"
                         answered = True
                         rejections.append(e)
-                        raise _RetryableError(f"无法解析管线模型的响应：{e}") from e
+                        raise _RetryableError(f"无法解析管线模型的响应：{self._scrub(e)}") from e
             except _RetryableError as e:
                 record(target.role, target.model, attempt, timing, _result_of(e))
                 timeouts_in_a_row = timeouts_in_a_row + 1 if isinstance(e, _Timeout) else 0
@@ -405,12 +457,15 @@ class ModelClient:
         return self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
 
     def _body(self, messages: list[dict]) -> dict:
-        return {
+        body = {
             "model": self.settings.model,
             "messages": messages,
             "temperature": self.settings.temperature,
             "reasoning_effort": self.settings.reasoning_effort,
         }
+        if self.settings.stream:  # off: the body, and so its cache key, as before ticket 12
+            body["stream"] = True
+        return body
 
     def _send(
         self,
@@ -421,7 +476,9 @@ class ModelClient:
     ) -> str:
         """Send ``body`` once; fill ``timing`` as it goes, also when this raises.
 
-        ``give_up`` and ``on_out`` are for a hedged request (``_post``).
+        ``give_up`` and ``on_out`` are for a hedged request (``_post``). The
+        content it returns is the endpoint's, stripped, with any key still in
+        it: the caller that started the request redacts it (``_redact``).
         """
         try:
             status_code, data = self._post(body, timing, give_up, on_out)
@@ -455,13 +512,91 @@ class ModelClient:
             raise ModelCallError(
                 f"管线模型拒绝了请求（HTTP {status_code}）" + self._body_excerpt(data)
             )
-        try:
-            content = json.loads(data)["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as e:
-            raise _RetryableError("无法解析管线模型的响应") from e
+        if self.settings.stream:
+            content = self._streamed_content(data)
+        else:
+            try:
+                content = json.loads(data)["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError) as e:
+                raise _RetryableError("无法解析管线模型的响应") from e
+        if content is not None and not isinstance(content, str):  # e.g. an array or an object
+            raise _RetryableError(f"管线模型回答的 content 不是文本（{type(content).__name__}）")
         if not content or not content.strip():
             raise _RetryableError("管线模型返回了空内容")
         return content.strip()
+
+    def _streamed_content(self, data: bytes):
+        """The answer of a streamed response: its server-sent events' content deltas, joined.
+
+        Each event's ``data`` is a chat completion chunk, up to ``data:
+        [DONE]``; comments (``:``) and other fields are skipped. Only
+        ``delta.content`` of the first choice counts: thinking deltas
+        (``reasoning``, ``reasoning_content``, ``reasoning_details``) are not
+        read. A stream with no ``finish_reason`` broke off before the answer
+        ended, and one whose ``finish_reason`` is ``error``, with an
+        ``error`` chunk, or with an ``event: error`` (whatever its data
+        holds, also after the answer finished) failed on the way: all are
+        retried. So is a chunk whose shape is not that of a chat completion
+        chunk (choices that are not a list of objects, a delta that is not an
+        object, a content that is not text): it cannot be read, like an
+        answer that does not parse, rather than end the request with a
+        ``TypeError``.
+        """
+        parts: list[str] = []
+        finish = None
+        done = False
+        unreadable = "无法解析管线模型的流式响应"
+        error_in_stream = "管线模型在流式回答中出错"
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise _RetryableError(unreadable) from e
+        for name, event in _sse_events(text):
+            if name == "error":
+                excerpt = self._body_excerpt(event.encode()) if event else ""
+                raise _RetryableError(error_in_stream + excerpt)
+            if done or event is None:
+                continue
+            if event == "[DONE]":
+                done = True
+                continue
+            try:
+                chunk = json.loads(event)
+            except ValueError as e:
+                raise _RetryableError(unreadable) from e
+            if not isinstance(chunk, dict):
+                raise _RetryableError(unreadable)
+            if "error" in chunk:
+                excerpt = self._body_excerpt(json.dumps(chunk["error"], ensure_ascii=False).encode())
+                raise _RetryableError(error_in_stream + excerpt)
+            choices = chunk.get("choices")
+            if choices is None:
+                choices = []
+            if not isinstance(choices, list):
+                raise _RetryableError(f"{unreadable}（choices 不是列表）")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise _RetryableError(f"{unreadable}（choice 不是对象）")
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta")
+                if delta is None:
+                    delta = {}
+                if not isinstance(delta, dict):
+                    raise _RetryableError(f"{unreadable}（delta 不是对象）")
+                content = delta.get("content")
+                if content is not None and not isinstance(content, str):
+                    raise _RetryableError(
+                        f"{unreadable}（content 不是文本：{type(content).__name__}）"
+                    )
+                if content:
+                    parts.append(content)
+                finish = choice.get("finish_reason") or finish
+        if finish is None:
+            raise _RetryableError("管线模型的流式回答在结束之前中断（没有 finish_reason）")
+        if finish == "error":
+            raise _RetryableError("管线模型的流式回答以出错结束（finish_reason 为 error）")
+        return "".join(parts)
 
     def _post(
         self,
@@ -522,12 +657,73 @@ class ModelClient:
 
     def _body_excerpt(self, data: bytes) -> str:
         """``：`` and the start of an error response ``data`` on one line, keys redacted; "" if empty."""
-        text = data.decode("utf-8", errors="replace")
-        clients = [self] if self.fallback is None else [self, self.fallback]
-        for key in {client.settings.api_key for client in clients} - {""}:
-            text = text.replace(key, REDACTED)
+        text = self._redact(data.decode("utf-8", errors="replace"))
         text = " ".join(text.split())[:ERROR_BODY_CHARACTERS]
         return f"：{text}" if text else ""
+
+    def _redact(self, text: str) -> str:
+        """``text`` with the API key of this client and of its fallback replaced by ``REDACTED``."""
+        clients = [self] if self.fallback is None else [self, self.fallback]
+        keys = {client.settings.api_key for client in clients} - {""}
+        for key in sorted(keys, key=len, reverse=True):  # a key inside another goes last
+            text = text.replace(key, REDACTED)
+        return text
+
+    def _scrub(self, error: BaseException) -> str:
+        """The text of ``error``, which the caller's ``validate`` raised, with the keys redacted.
+
+        ``error`` is kept for the caller (``ModelCallError.rejections``; the
+        caller tells its class and reads what it carries), so it is cleaned
+        in place instead of being replaced: its message, its attributes
+        (``_scrubbed_value``) and the exceptions it was raised from or while
+        handling (their traceback frames are not touched). The cleaned
+        message is returned.
+        """
+        shown = self._redact(str(error))
+        self._scrub_exception(error, set())
+        return shown
+
+    def _scrub_exception(self, error: BaseException, seen: set[int]) -> None:
+        if id(error) in seen:
+            return
+        seen.add(id(error))
+        text = str(error)
+        shown = self._redact(text)
+        if shown != text:
+            error.args = (shown,)
+        for name, value in list(vars(error).items()):
+            cleaned = self._scrubbed_value(value, seen, 0)
+            if cleaned is not value:
+                setattr(error, name, cleaned)
+        for chained in (error.__cause__, error.__context__):
+            if chained is not None:
+                self._scrub_exception(chained, seen)
+
+    def _scrubbed_value(self, value, seen: set[int], depth: int):
+        """``value`` with the keys redacted in its strings, also those inside
+        lists, tuples, sets, dicts and dataclass instances (copies; the
+        original is not changed); any other value is returned as it is."""
+        if depth > _SCRUB_DEPTH:
+            return value
+        if isinstance(value, str):
+            return self._redact(value)
+        kind = type(value)
+        if kind is dict:
+            return {
+                self._scrubbed_value(k, seen, depth + 1): self._scrubbed_value(v, seen, depth + 1)
+                for k, v in value.items()
+            }
+        if kind in (list, tuple, set, frozenset):
+            return kind(self._scrubbed_value(v, seen, depth + 1) for v in value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            copied = copy.copy(value)
+            for field in dataclasses.fields(value):
+                cleaned = self._scrubbed_value(getattr(value, field.name), seen, depth + 1)
+                object.__setattr__(copied, field.name, cleaned)
+            return copied
+        if isinstance(value, BaseException):
+            self._scrub_exception(value, seen)
+        return value
 
     def _count_timeout(self) -> None:
         with self._lock:
@@ -544,6 +740,31 @@ class ModelClient:
     def close(self) -> None:
         """Cancel the endpoint's sends in flight and close it (also for a client sharing it)."""
         self.endpoint.close()
+
+
+_SSE_LINE_END = re.compile(r"\r\n|\r|\n")  # not str.splitlines: a JSON string may hold U+2028
+
+
+def _sse_events(text: str):
+    """The name and ``data`` of each server-sent event in ``text``, its ``data:`` lines joined.
+
+    ``data`` is None for an event without a ``data:`` line; ``name`` is ""
+    for an event without an ``event:`` field.
+    """
+    name = ""
+    lines: list[str] = []
+    for line in [*_SSE_LINE_END.split(text), ""]:  # the end of the body ends an event too
+        if not line:
+            if name or lines:
+                yield name, ("\n".join(lines) if lines else None)
+                name = ""
+                lines = []
+            continue
+        field, _, value = line.partition(":")
+        if field == "event":
+            name = value[1:] if value.startswith(" ") else value
+        elif field == "data":
+            lines.append(value[1:] if value.startswith(" ") else value)
 
 
 def _result_of(error: _RetryableError) -> str:
@@ -764,14 +985,16 @@ class _Hedged:
 
         result = None
         try:
-            content = client._send(
-                candidate.body, timing, candidate.give_up if candidate.hedge else None, out
+            # Redacted as it arrives, with the keys of both endpoints: ``flash``
+            # started the request and knows its fallback, whichever send this is.
+            content = self.flash._redact(
+                client._send(candidate.body, timing, candidate.give_up if candidate.hedge else None, out)
             )
             if self.validate is not None:
                 try:
                     self.validate(content)
                 except Exception as e:  # noqa: BLE001 - any rejection means "unparseable"
-                    raise _Rejected(f"无法解析管线模型的响应：{e}", e) from e
+                    raise _Rejected(f"无法解析管线模型的响应：{self.flash._scrub(e)}", e) from e
             candidate.content = content
         except _GaveUp:
             self._events.put(("gave_up", candidate))
@@ -845,6 +1068,125 @@ class _Hedged:
         return error
 
 
+# The connection test of a model profile (M4 ticket 02, ADR 0005).
+CONNECTION_TEST_MESSAGES = [
+    {
+        "role": "system",
+        "content": "This is a connection test of the translation pipeline. "
+        'Reply with exactly this JSON object and nothing else: {"ok": true}',
+    },
+    {"role": "user", "content": 'Return {"ok": true}.'},
+]
+CONNECTION_TEST_TIMEOUT_SECONDS = 60.0  # at most; a profile's shorter request timeout wins
+# The outcomes of a connection test; "http_error" is any other HTTP error (429, 5xx).
+CONNECTION_TEST_RESULTS = (
+    "succeeded",
+    "invalid_address",
+    "unreachable",
+    "unauthorized",
+    "model_not_found",
+    "timeout",
+    "unparseable",
+    "http_error",
+)
+_CONNECTION_TEST_MESSAGES = {
+    "succeeded": "连接成功",
+    "invalid_address": "地址无效",
+    "unreachable": "地址连不上",
+    "unauthorized": "密钥无效",
+    "model_not_found": "模型不存在",
+    "timeout": "请求超时",
+    "unparseable": "回答不能解析",
+    "http_error": "端点出错",
+}
+
+
+@dataclass(frozen=True)
+class ConnectionCheck:
+    """The outcome of ``check_connection``: one of ``CONNECTION_TEST_RESULTS``."""
+
+    result: str
+    message: str  # readable Chinese, with the endpoint's reason; never the API key
+    seconds: float
+    http_status: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result == "succeeded"
+
+
+def check_connection(settings: ModelSettings) -> ConnectionCheck:
+    """Send one small request with the paper task's parameters; tell the outcome.
+
+    The body is built as for every paper task request (model, reasoning
+    effort, temperature, streaming: ``ModelClient._body``), and the answer's message
+    ``content`` must be the JSON object ``{"ok": true}``, fenced or not;
+    a model's thinking (DeepSeek's ``reasoning_content`` or ``reasoning``)
+    is not read. One send: no retry, no cache, a timeout of at most
+    ``CONNECTION_TEST_TIMEOUT_SECONDS``. A 404, or a 400 or 422 whose body
+    names the model, means the model does not exist. An address that cannot
+    be one (``settings.base_url_problem``), or an error building the client,
+    is ``invalid_address``; a content that is not a string, ``unparseable``.
+    The message never holds the API key: where the endpoint's text or an
+    exception's echoes it, it reads ``REDACTED``.
+    """
+    settings = replace(
+        settings,
+        timeout_seconds=min(settings.timeout_seconds, CONNECTION_TEST_TIMEOUT_SECONDS),
+        max_retries=0,
+        concurrency=1,
+        cache_dir=None,
+    )
+    timing = _SendTiming()
+    started = time.monotonic()
+
+    def outcome(result: str, detail: str = "") -> ConnectionCheck:
+        # The detail is the endpoint's text (an answer's start, an error
+        # body, an exception): an echoed key, bare or after "Bearer ", goes.
+        if settings.api_key:
+            detail = detail.replace(settings.api_key, REDACTED)
+        message = _CONNECTION_TEST_MESSAGES[result] + (f"：{detail}" if detail else "")
+        return ConnectionCheck(result, message, round(time.monotonic() - started, 3), timing.http_status)
+
+    problem = base_url_problem(settings.base_url)
+    if problem:
+        return outcome("invalid_address", problem)
+    try:
+        client = ModelClient(settings)
+    except Exception as e:  # noqa: BLE001 - its text goes through the redaction too
+        return outcome("invalid_address", f"{type(e).__name__}: {e}")
+    try:
+        try:
+            content = client._send(client._body(CONNECTION_TEST_MESSAGES), timing)
+        except httpx.InvalidURL as e:
+            return outcome("invalid_address", f"{type(e).__name__}: {e}")
+        except _Timeout as e:
+            return outcome("timeout", str(e))
+        except _NetworkError as e:
+            cause = f"{type(e.__cause__).__name__}" if e.__cause__ else ""
+            return outcome("unreachable", f"{e}（{cause}）" if cause else str(e))
+        except (ModelCallError, _HttpError) as e:
+            status = timing.http_status
+            if status in (401, 403):
+                return outcome("unauthorized", str(e))
+            if status == 404 or (status in (400, 422) and "model" in str(e).lower()):
+                return outcome("model_not_found", str(e))
+            return outcome("http_error", str(e))
+        except _RetryableError as e:  # an empty or malformed response body
+            return outcome("unparseable", str(e))
+        try:
+            answer = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content))
+        except ValueError:
+            answer = None
+        if not isinstance(answer, dict) or answer.get("ok") is not True:
+            # Redacted before it is cut, so no part of an echoed key is left.
+            shown = content.replace(settings.api_key, REDACTED) if settings.api_key else content
+            return outcome("unparseable", f"回答不是 {{\"ok\": true}}：{' '.join(shown.split())[:80]}")
+        return outcome("succeeded")
+    finally:
+        client.close()
+
+
 class PipelineModels:
     """The paper task's two clients (ADR 0004).
 
@@ -858,6 +1200,7 @@ class PipelineModels:
 
     def __init__(self, settings: PipelineSettings, request_log: RequestLog | None = None):
         self.request_log = request_log
+        self.profile = settings.profile  # {"id", "name"} of a service task; None for ``run``
         flash, argon = settings.flash, settings.argon
         flash_endpoint = Endpoint(flash)
         argon_endpoint = None

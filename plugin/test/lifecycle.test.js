@@ -4,10 +4,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTaskLifecycle } = require("../addon/content/lifecycle.js");
+const { createModelMenu } = require("../addon/content/model-menu.js");
+const { statusText, lifecycleSource } = require("../addon/content/core.js");
 
 const SERVICE = "http://127.0.0.1:8920";
 const SOURCE = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "AutoDesign.pdf" };
-const DISCONNECTED = (minutes) => `翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
+// Rows' status word and detail line, as statusText joins them ("失败：原因").
+const DISCONNECTED = (minutes) => `等待服务：翻译服务暂时连不上，恢复后继续（已 ${minutes} 分钟）`;
 const MINUTE = 60000;
 const ALREADY_ACTIVE = (title) => `${title}：已有未结束的翻译任务，本次提交已忽略`;
 
@@ -68,15 +71,20 @@ function fakeClock(time = 0) {
  *  which a restart passes on. `failWrite` (a file name), `failRemove`,
  *  `failImport` and `failMark` (a reason) inject errors; `quitAfterImport`
  *  and `quitAfterMark` make Zotero quit there: the attachment is saved (with
- *  its identity, after mark) and the lifecycle never goes on. */
-function environment({ routes = {}, saved = null, time = 0, library = [] } = {}) {
+ *  its identity, after mark) and the lifecycle never goes on. The notices
+ *  of ended tasks go to `announced` (`announce` replaces that; `logError`
+ *  replaces throwing). */
+function environment({ routes = {}, saved = null, time = 0, library = [], announce = null, logError = null } = {}) {
   const env = {
     clock: fakeClock(time),
+    announced: [],
     requests: [],
     requestTimes: [],
     imports: [],
+    relates: [],
     saved,
     routes,
+    serviceUrl: SERVICE, // the service address currently set; a test changes it
     missingSources: [],
     files: new Map(),
     steps: [],
@@ -84,6 +92,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
     failRemove: false,
     failImport: null,
     failMark: null,
+    failRelate: null,
     quitAfterImport: false,
     quitAfterMark: false,
     findHold: null, // a held() whose route each look-up waits for
@@ -104,7 +113,7 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
       return typeof route === "function" ? route(options) : route.clone();
     },
     clock: env.clock,
-    serviceUrl: () => SERVICE,
+    serviceUrl: () => env.serviceUrl,
     readSource: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
     attachTarget: async (task) => {
       if (task.itemID) {
@@ -134,6 +143,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
       },
       remove: async (dir) => {
         env.steps.push(`remove ${dir}`);
+        if (env.removeHold) {
+          await env.removeHold();
+        }
         if (env.failRemove) {
           throw new Error("无法删除临时目录");
         }
@@ -169,7 +181,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
         if (env.failMark) {
           throw new Error(env.failMark);
         }
-        env.library.find((a) => a.id === id).identity = identityOf(identity);
+        const attachment = env.library.find((a) => a.id === id);
+        attachment.identity = identityOf(identity);
+        attachment.source = identity.sourceItemID ?? null; // zotero-translate.js records its key (ticket M4-16)
         if (env.quitAfterMark) {
           return never();
         }
@@ -185,18 +199,30 @@ function environment({ routes = {}, saved = null, time = 0, library = [] } = {})
         return found ? found.id : null;
       },
     },
+    relate: async (sourceItemID, outputID) => {
+      env.relates.push([sourceItemID, outputID]);
+      if (env.failRelate) {
+        throw new Error(env.failRelate);
+      }
+    },
     store: {
       load: () => env.saved,
       save: (value) => {
         env.saved = value;
       },
     },
+    announce: announce || ((notice) => env.announced.push(notice)),
     debug: () => {},
-    logError: (e) => {
-      throw e;
-    },
+    logError:
+      logError ||
+      ((e) => {
+        throw e;
+      }),
   });
-  env.status = () => env.lifecycle.rows().map((row) => row.status);
+  /** The rows' status words and details, joined by statusText. */
+  env.status = () => env.lifecycle.rows().map(statusText);
+  /** The notices so far: [outcome, title, status and detail (statusText), results]. */
+  env.notices = () => env.announced.map(({ outcome, row }) => [outcome, row.title, statusText(row), row.results]);
   /** The attachments the user sees: [title, text, identity]. */
   env.attached = () => env.library.filter((a) => !a.deleted).map((a) => [a.title, a.text, a.identity]);
   /** When (clock time) each request for `key` was sent. */
@@ -236,7 +262,7 @@ test("a submitted PDF is uploaded and its row shows the place in the queue", asy
   assert.deepEqual(env.requests, [UPLOAD]);
   await env.clock.advance(1);
   assert.deepEqual(env.requests, [UPLOAD, QUERY("t1")]);
-  assert.deepEqual(env.status(), ["排队中（第 2 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 2 位"]);
 });
 
 test("after the service succeeds, both PDFs are attached to the original item", async () => {
@@ -258,7 +284,7 @@ test("a failed task shows the service's reason and a retry button that uploads a
   const env = await submitted({ [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）" }) });
   await env.clock.advance(2000);
   const [row] = env.lifecycle.rows();
-  assert.equal(row.status, "失败：管线模型拒绝了请求（HTTP 400）");
+  assert.deepEqual([row.status, row.detail], ["失败", "管线模型拒绝了请求（HTTP 400）"]);
   assert.equal(row.canRetry, true);
 
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
@@ -266,6 +292,249 @@ test("a failed task shows the service's reason and a retry button that uploads a
   assert.deepEqual(env.status(), ["排队中"]);
   assert.equal(env.lifecycle.rows()[0].canRetry, false);
   assert.equal(env.lifecycle.tasks[0].taskId, "t2");
+});
+
+/** The multipart fields of an upload request, read where the fake fetch sees it. */
+async function uploadFields(options) {
+  return new Response(options.body, { headers: options.headers }).formData();
+}
+
+const PROFILE = { id: "0123456789ab", name: "DeepSeek" };
+
+test("a task records the profile the service says it uses, shows it, and 重试 names it in the upload", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2" });
+      },
+      [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  assert.deepEqual([...forms[0].keys()], ["file", "filename"]); // a new submission names no profile
+  assert.equal(env.lifecycle.tasks[0].profile, undefined);
+
+  await env.clock.advance(2000);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  const [row] = env.lifecycle.rows();
+  assert.equal(row.profile, "DeepSeek");
+
+  await env.lifecycle.retry(row.key);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE); // kept until the service answers again
+  assert.equal(env.lifecycle.tasks[0].taskId, "t2");
+});
+
+test("a saved task's recorded profile survives a restart, and its 重试 names it", async () => {
+  const saved = JSON.stringify([
+    {
+      ...SOURCE,
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "failed",
+      submittedAt: 0,
+      generation: 0,
+      error: "管线模型拒绝了请求（HTTP 400）",
+      profile: PROFILE,
+    },
+  ]);
+  const forms = [];
+  const env = environment({
+    saved,
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: "t2" });
+      },
+    },
+  });
+  env.lifecycle.start();
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  assert.equal(env.lifecycle.rows()[0].profile, "DeepSeek");
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[0].get("profile"), PROFILE.id);
+});
+
+// ---- item 6 of ticket M4-16: 重试 goes to the service the task was submitted to ----
+
+const SERVICE_B = "http://127.0.0.1:8921";
+const UPLOAD_B = `POST ${SERVICE_B}/tasks`;
+
+test("重试 after the service address was changed goes to the original service, with the original profile", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2" });
+      },
+      [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+      [UPLOAD_B]: json(201, { task_id: "elsewhere" }), // must stay unused
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["失败：管线模型拒绝了请求（HTTP 400）"]);
+
+  env.serviceUrl = SERVICE_B; // the setting changes to another service
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.requests.filter((r) => r.startsWith("POST")), [UPLOAD, UPLOAD]);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+  assert.equal(env.lifecycle.tasks[0].serviceUrl, SERVICE);
+  assert.equal(env.lifecycle.tasks[0].taskId, "t2");
+
+  // The new task's queries go to the original service too (as before).
+  env.routes[QUERY("t2")] = status("running");
+  await env.clock.advance(2000);
+  assert.equal(env.requests.at(-1), QUERY("t2"));
+  assert.ok(!env.requests.some((r) => r.includes(SERVICE_B)));
+});
+
+test("a new submission goes to the service address currently set", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), [UPLOAD_B]: json(201, { task_id: "tb" }) } });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  env.serviceUrl = SERVICE_B;
+  await env.lifecycle.submit(sourceNamed("B", 21));
+  assert.deepEqual(env.lifecycle.tasks.map((t) => [t.serviceUrl, t.taskId]), [[SERVICE, "t1"], [SERVICE_B, "tb"]]);
+});
+
+test("重试 of a task saved without a service address (an older plugin) uses the address currently set", async () => {
+  const saved = JSON.stringify([{ ...SOURCE, taskId: "t1", state: "failed", submittedAt: 0, generation: 0, error: "x", profile: PROFILE }]);
+  const env = environment({ saved, routes: { [UPLOAD_B]: json(201, { task_id: "tb" }) } });
+  env.serviceUrl = SERVICE_B;
+  env.lifecycle.start();
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.requests, [UPLOAD_B]);
+  assert.equal(env.lifecycle.tasks[0].serviceUrl, SERVICE_B);
+});
+
+test("重试 when the original service cannot be reached fails naming that service, not the one set now", async () => {
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), [QUERY("t1")]: status("failed", { error: "x", profile: PROFILE }), [UPLOAD_B]: json(201, { task_id: "tb" }) },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  await env.clock.advance(2000);
+  env.serviceUrl = SERVICE_B;
+  delete env.routes[UPLOAD]; // the original service is down
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.status(), [`失败：无法连接翻译服务（服务地址：${SERVICE}）`]);
+  assert.ok(!env.requests.includes(UPLOAD_B));
+});
+
+test("a running task's profile is saved with it", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running", { progress: 40, profile: PROFILE }) });
+  await env.clock.advance(2000);
+  assert.equal(JSON.parse(env.saved)[0].profile.id, PROFILE.id);
+});
+
+test("a task cancelled before its first query keeps the profile its submission answer named", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: forms.length === 1 ? "t1" : "t2", profile: PROFILE });
+      },
+      [CANCEL("t1")]: status("cancelled", { profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  // The submission's answer, not a query's: the task is cancelled at once.
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  assert.equal(env.lifecycle.rows()[0].profile, "DeepSeek");
+
+  await env.lifecycle.cancel(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(env.times(QUERY("t1")).length, 0);
+
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[1].get("profile"), PROFILE.id); // whatever profile is current by now
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+});
+
+test("a cancel answer records the profile when the submission answer had none", async () => {
+  const forms = [];
+  const env = environment({
+    routes: {
+      [UPLOAD]: async (options) => {
+        forms.push(await uploadFields(options));
+        return json(201, { task_id: "t1" }); // a service whose submission answer names no profile
+      },
+      [CANCEL("t1")]: status("cancelled", { profile: PROFILE }),
+    },
+  });
+  env.lifecycle.start();
+  await env.lifecycle.submit(SOURCE);
+  assert.equal(env.lifecycle.tasks[0].profile, undefined);
+  await env.lifecycle.cancel(env.lifecycle.rows()[0].key);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE);
+  await env.lifecycle.retry(env.lifecycle.rows()[0].key);
+  assert.equal(forms[1].get("profile"), PROFILE.id);
+});
+
+test("a retry the service refuses shows its reason and keeps the task's profile", async () => {
+  const env = await submitted({
+    [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）", profile: PROFILE }),
+    [UPLOAD]: async (options) =>
+      (await uploadFields(options)).get("profile")
+        ? json(409, { error: "这份配置还没有通过测试连接，不能用来提交" })
+        : json(201, { task_id: "t1", profile: PROFILE }),
+  });
+  await env.clock.advance(2000);
+  const [row] = env.lifecycle.rows();
+  await env.lifecycle.retry(row.key);
+  assert.deepEqual(env.status(), ["失败：翻译服务拒绝了提交：这份配置还没有通过测试连接，不能用来提交"]);
+  assert.deepEqual(env.lifecycle.tasks[0].profile, PROFILE); // no fallback to the current profile
+});
+
+const GEMINI = { id: "gemini", name: "Gemini", builtin: true, tested: true };
+const PROFILES = [GEMINI, { ...PROFILE, tested: true }];
+
+test("a switch made in the model menu is the profile the next submission records", async () => {
+  let current = { id: GEMINI.id, name: GEMINI.name };
+  const client = {
+    status: async () => ({ listing: { current: current.id, profiles: PROFILES } }),
+    apply: async (id) => {
+      current = { id, name: PROFILES.find((profile) => profile.id === id).name };
+      return { ok: true };
+    },
+  };
+  const menu = createModelMenu({ client });
+  const forms = [];
+  const env = environment({
+    routes: {
+      // The service records the profile the request names, else its current one.
+      [UPLOAD]: async (options) => {
+        const form = await uploadFields(options);
+        forms.push(form);
+        const named = form.get("profile");
+        const recorded = named ? { id: named, name: PROFILES.find((profile) => profile.id === named).name } : current;
+        return json(201, { task_id: `t${forms.length}`, profile: recorded });
+      },
+    },
+  });
+  env.lifecycle.start();
+  await menu.refresh(); // the item menu's first opening
+  await env.lifecycle.submit(SOURCE);
+  await menu.switchTo(PROFILE.id); // one click in "切换模型"
+  await env.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "Second" });
+
+  // A new submission names no profile (also after the switch): the service
+  // takes the one the switch made current.
+  assert.equal(forms[0].get("profile"), null);
+  assert.equal(forms[1].get("profile"), null);
+  assert.deepEqual(env.lifecycle.tasks.map((task) => task.profile), [
+    { id: GEMINI.id, name: GEMINI.name },
+    { id: PROFILE.id, name: PROFILE.name },
+  ]);
+  assert.deepEqual(env.lifecycle.rows().map((row) => row.profile), ["Gemini", "DeepSeek"]);
 });
 
 test("after Zotero restarts, saved tasks are queried again and still attached", async () => {
@@ -279,6 +548,7 @@ test("after Zotero restarts, saved tasks are queried again and still attached", 
       serviceUrl: SERVICE,
       taskId: "t1",
       state: "running",
+      submittedAt: 0,
       disconnectedSince: null,
       generation: 0,
       attached: {},
@@ -632,6 +902,7 @@ test("an upload under way is saved; after a Zotero restart its row fails with �
       serviceUrl: SERVICE,
       taskId: null,
       state: "submitting",
+      submittedAt: 0,
       disconnectedSince: null,
       generation: 0,
       error: null,
@@ -671,7 +942,7 @@ for (const [name, route] of Object.entries(UNANSWERED_DOWNLOADS)) {
     await env.clock.advance(120000);
     assert.equal(env.lifecycle.tasks[0].state, "attaching");
     assert.ok(env.lifecycle.tasks[0].disconnectedSince != null);
-    assert.match(env.status()[0], /^翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
+    assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上，恢复后继续（已 \d 分钟）$/);
     assert.deepEqual(env.attached(), [["中文译文", "mono pdf", "t1/mono"]]); // the first is attached
     assert.deepEqual(env.files, new Map());
     assert.deepEqual(savedOf(env).map((t) => [t.state, t.attached, t.importIntents]), [["attaching", { mono: 100 }, {}]]);
@@ -758,7 +1029,7 @@ test("an attaching task saved before a restart downloads again after it", async 
 // ---- cancel, retry and duplicate submissions (ticket 08) ----
 
 const CANCELLING = "取消中";
-const CANCELLING_DISCONNECTED = "取消中（翻译服务暂时连不上）";
+const CANCELLING_DISCONNECTED = "取消中：翻译服务暂时连不上";
 const cancelledAnswer = (taskId, code = 200) => json(code, { task_id: taskId, state: code === 200 ? "cancelled" : "succeeded", cancel_requested: code === 200 });
 const rowOf = (env, index = 0) => env.lifecycle.rows()[index];
 const savedOf = (env) => JSON.parse(env.saved);
@@ -1093,7 +1364,7 @@ test("a retry of a cancelled task starts a new generation with nothing of the ol
   assert.equal(task.taskId, "t2");
   await env.clock.advance(6000);
   assert.deepEqual(env.times(QUERY("t2")), [16000, 18000, 20000]); // one schedule, every 2 seconds
-  assert.deepEqual(env.status(), ["排队中（第 3 位）"]);
+  assert.deepEqual(env.status(), ["排队中：第 3 位"]);
   assert.ok(!env.requests.some((r) => r.includes("/files/")));
 });
 
@@ -1335,7 +1606,7 @@ test("取消 while waiting to download again ends the task; nothing is downloade
   const env = await submitted(succeededRoutes("t1"));
   delete env.routes[DUAL("t1")];
   await env.clock.advance(2000);
-  assert.match(env.status()[0], /^翻译服务暂时连不上/);
+  assert.match(env.status()[0], /^等待服务：翻译服务暂时连不上/);
   assert.equal(rowOf(env).canCancel, true);
   await env.lifecycle.cancel(rowOf(env).key);
   assert.deepEqual(env.status(), ["已取消"]);
@@ -1428,4 +1699,935 @@ test("a retry starts with no attach records or import intent of the old task", a
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
   await env.lifecycle.retry(rowOf(env).key);
   assert.deepEqual(savedOf(env).map((t) => [t.taskId, t.attached, t.importIntents]), [["t2", {}, {}]]);
+});
+
+// ---- the done notice and opening the results (M4 ticket 07) ----
+
+const RESULTS = { mono: 100, dual: 101 }; // the attachments imported first in an environment
+
+test("only an 已挂回 row has results (打开译文, 打开双语, 在库中显示): its two attachments", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("queued", { queue_position: 1 }) });
+  const seen = [[env.lifecycle.tasks[0].state, rowOf(env).results]];
+  for (const state of ["running", "waiting_rerun"]) {
+    env.routes[QUERY("t1")] = status(state, { reruns_used: 0, reruns_max: 2, next_attempt_in_seconds: 60 });
+    await env.clock.advance(2000);
+    seen.push([env.lifecycle.tasks[0].state, rowOf(env).results]);
+  }
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.writeHold = held(); // the first PDF is downloaded, not yet written (never)
+  await env.clock.advance(2000);
+  seen.push([env.lifecycle.tasks[0].state, rowOf(env).results]);
+  assert.deepEqual(seen, [
+    ["queued", null],
+    ["running", null],
+    ["waiting_rerun", null],
+    ["attaching", null],
+  ]);
+
+  const attachFailed = await submitted(succeededRoutes("t1"));
+  attachFailed.failImport = "x";
+  await attachFailed.clock.advance(2000);
+  assert.deepEqual([attachFailed.lifecycle.tasks[0].state, rowOf(attachFailed).results], ["attach_failed", null]);
+
+  const failed = await submitted({ [QUERY("t1")]: status("failed", { error: "x" }) });
+  await failed.clock.advance(2000);
+  assert.deepEqual([failed.lifecycle.tasks[0].state, rowOf(failed).results], ["failed", null]);
+
+  const cancelled = await submitted({ [CANCEL("t1")]: json(200, { state: "cancelled" }) });
+  await cancelled.lifecycle.cancel(rowOf(cancelled).key);
+  assert.deepEqual([cancelled.lifecycle.tasks[0].state, rowOf(cancelled).results], ["cancelled", null]);
+
+  const done = await submitted(succeededRoutes("t1"));
+  await done.clock.advance(2000);
+  assert.deepEqual([done.lifecycle.tasks[0].state, rowOf(done).results], ["done", RESULTS]);
+});
+
+test("an 已挂回 row has the results also when attaching found the attachments instead of importing them", async () => {
+  const library = [
+    { id: 7, target: { parentItemID: 10 }, title: "中文译文", text: "mono pdf", addedAt: 0, identity: "t1/mono", deleted: false },
+    { id: 8, target: { parentItemID: 10 }, title: "双语对照", text: "dual pdf", addedAt: 0, identity: "t1/dual", deleted: false },
+  ];
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attaching", attached: {} }]);
+  const env = environment({ saved, library, routes: succeededRoutes("t1") });
+  env.lifecycle.start();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.imports, []);
+  assert.deepEqual(rowOf(env).results, { mono: 7, dual: 8 });
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回", { mono: 7, dual: 8 }]]);
+});
+
+test("a notice comes once when a task becomes 已挂回, with the row's status and the two attachments", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running", { progress: 40 }) });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices(), []);
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.routes[QUERY("t1")] = status("succeeded", { kept_source_paragraphs: 2 });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices(), [["done", "AutoDesign", "已挂回：2 段保留原文", RESULTS]]);
+  await env.clock.advance(60000);
+  assert.equal(env.announced.length, 1);
+});
+
+test("a notice comes once when a task fails, with the reason: the service's failure, a refused upload, a failed attach", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("failed", { error: "管线模型拒绝了请求（HTTP 400）" }) });
+  await env.clock.advance(2000);
+  await env.clock.advance(60000);
+  assert.deepEqual(env.notices(), [["failed", "AutoDesign", "失败：管线模型拒绝了请求（HTTP 400）", null]]);
+
+  const refusedUpload = environment({ routes: { [UPLOAD]: json(413, {}) } });
+  refusedUpload.lifecycle.start();
+  await refusedUpload.lifecycle.submit(SOURCE);
+  assert.deepEqual(refusedUpload.notices(), [
+    ["failed", "AutoDesign", `失败：翻译服务拒绝了提交（HTTP 413，服务地址：${SERVICE}）`, null],
+  ]);
+
+  const attachFailed = await submitted(succeededRoutes("t1"));
+  attachFailed.failImport = "无法写入 Zotero 存储目录";
+  await attachFailed.clock.advance(2000);
+  await attachFailed.clock.advance(60000);
+  assert.deepEqual(attachFailed.notices(), [["failed", "AutoDesign", ATTACH_FAILED("无法写入 Zotero 存储目录"), null]]);
+});
+
+test("no notice while a task is unfinished, disconnected or cancelled", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("waiting_rerun", { reruns_used: 0, reruns_max: 2, next_attempt_in_seconds: 60, error: "HTTP 500" }) });
+  await env.clock.advance(2000);
+  delete env.routes[QUERY("t1")];
+  await env.clock.advance(20000);
+  assert.deepEqual(env.status(), [DISCONNECTED(1)]);
+  env.routes[CANCEL("t1")] = json(200, { state: "cancelled" });
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.announced, []);
+
+  const attachCancelled = await submitted(succeededRoutes("t1"));
+  attachCancelled.failImport = "x";
+  await attachCancelled.clock.advance(2000);
+  assert.equal(attachCancelled.announced.length, 1); // 挂回失败
+  await attachCancelled.lifecycle.cancel(rowOf(attachCancelled).key);
+  assert.deepEqual(attachCancelled.status(), ["已取消"]);
+  assert.equal(attachCancelled.announced.length, 1);
+});
+
+test("each new failure after 重试 or 继续挂回 has its own notice", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("failed", { error: "第一次" }) });
+  await env.clock.advance(2000);
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("failed", { error: "第二次" });
+  await env.lifecycle.retry(rowOf(env).key);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.notices().map((n) => n[2]), ["失败：第一次", "失败：第二次"]);
+
+  const attach = await submitted(succeededRoutes("t1"));
+  attach.failImport = "第一次";
+  await attach.clock.advance(2000);
+  attach.failImport = "第二次";
+  await attach.lifecycle.continueAttach(rowOf(attach).key);
+  attach.failImport = null;
+  await attach.lifecycle.continueAttach(rowOf(attach).key);
+  assert.deepEqual(attach.notices().map((n) => [n[0], n[2]]), [
+    ["failed", ATTACH_FAILED("第一次")],
+    ["failed", ATTACH_FAILED("第二次")],
+    ["done", "已挂回"],
+  ]);
+});
+
+test("after a Zotero restart no notice comes again; a task that ends after the restart has its one notice", async () => {
+  // Before the restart: one task done (notice), one attach_failed (notice), one running.
+  const before = environment({
+    routes: {
+      [UPLOAD]: json(201, { task_id: "t1" }),
+      ...succeededRoutes("t1"),
+      [QUERY("t2")]: status("succeeded"),
+      [MONO("t2")]: pdfBytes("mono 2"),
+      [DUAL("t2")]: pdfBytes("dual 2"),
+      [QUERY("t3")]: status("running"),
+    },
+  });
+  before.lifecycle.start();
+  await before.lifecycle.submit(SOURCE);
+  before.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await before.lifecycle.submit({ ...SOURCE, sourceItemID: 12, title: "AutoRef" });
+  before.routes[UPLOAD] = json(201, { task_id: "t3" });
+  await before.lifecycle.submit({ ...SOURCE, sourceItemID: 13, title: "MaLiang" });
+  before.routes[DUAL("t2")] = () => {
+    before.failImport = "磁盘已满";
+    return pdfBytes("dual 2");
+  };
+  await before.clock.advance(2000);
+  assert.deepEqual(before.notices().map((n) => [n[0], n[1]]), [["done", "AutoDesign"], ["failed", "AutoRef"]]);
+  before.lifecycle.stop();
+
+  const after = environment({ saved: before.saved, library: before.library, time: before.clock.now(), routes: { [QUERY("t3")]: status("running") } });
+  after.lifecycle.start();
+  assert.deepEqual(after.lifecycle.rows().map((r) => [r.title, statusText(r)]), [
+    ["AutoRef", ATTACH_FAILED("磁盘已满")],
+    ["MaLiang", "翻译中"],
+  ]);
+  await after.clock.advance(10000);
+  assert.deepEqual(after.announced, []);
+  Object.assign(after.routes, { [QUERY("t3")]: status("succeeded"), [MONO("t3")]: pdfBytes("mono 3"), [DUAL("t3")]: pdfBytes("dual 3") });
+  await after.clock.advance(2000);
+  assert.deepEqual(after.notices().map((n) => [n[0], n[1]]), [["done", "MaLiang"]]);
+
+  // A second restart: nothing again.
+  after.lifecycle.stop();
+  const again = environment({ saved: after.saved, library: after.library, time: after.clock.now() });
+  again.lifecycle.start();
+  await again.clock.advance(10000);
+  assert.deepEqual(again.announced, []);
+});
+
+test("a task that fails while being restored (an upload under way at quit) has its notice once, not after the next restart", async () => {
+  const before = environment({ routes: { [UPLOAD]: never } });
+  before.lifecycle.start();
+  before.lifecycle.submit(SOURCE);
+  await settle();
+  before.lifecycle.stop();
+
+  const after = environment({ saved: before.saved });
+  after.lifecycle.start();
+  assert.deepEqual(after.notices(), [["failed", "AutoDesign", "失败：提交未完成，请重试", null]]);
+  after.lifecycle.stop();
+
+  const again = environment({ saved: after.saved });
+  again.lifecycle.start();
+  assert.deepEqual(again.announced, []);
+});
+
+test("an attaching task from before attach records becomes 挂回失败 at restore with one notice; restored again, none", async () => {
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attaching" }]);
+  const env = environment({ saved });
+  env.lifecycle.start();
+  assert.deepEqual(env.notices(), [["failed", "AutoDesign", ATTACH_FAILED(UPGRADE_ATTACH_ERROR), null]]);
+  env.lifecycle.stop();
+  const again = environment({ saved: env.saved });
+  again.lifecycle.start();
+  assert.deepEqual(again.announced, []);
+});
+
+test("after stop (the plugin is shut down), a request under way that comes back brings no notice", async () => {
+  for (const [name, answer] of [
+    ["failed", () => status("failed", { error: "管线模型拒绝了请求" })],
+    ["succeeded", () => status("succeeded")],
+  ]) {
+    const query = held();
+    const env = await submitted({ [QUERY("t1")]: query.route, [MONO("t1")]: pdfBytes("mono pdf"), [DUAL("t1")]: pdfBytes("dual pdf") });
+    await env.clock.advance(2000);
+    assert.equal(query.count, 1, name);
+    env.lifecycle.stop();
+    query.answer(answer());
+    await env.clock.advance(60000);
+    assert.deepEqual(env.announced, [], name);
+  }
+
+  // A failed upload after stop: no notice either.
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const submitting = env.lifecycle.submit(SOURCE);
+  await settle();
+  env.lifecycle.stop();
+  upload.answer(json(413, {}));
+  await submitting;
+  assert.deepEqual(env.announced, []);
+});
+
+test("a notice that throws is logged; the task goes on", async () => {
+  const logged = [];
+  const env = await submitted(succeededRoutes("t1"), {
+    announce: () => {
+      throw new Error("no window");
+    },
+    logError: (e) => logged.push(e.message),
+  });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.equal(env.saved, "[]");
+  assert.deepEqual(logged, ["no window"]);
+});
+
+// ---- the submission and "清除已结束" (M4 ticket 08) ----
+
+test("submit returns the new task, or null when the PDF already has an unfinished task", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  const task = await env.lifecycle.submit(SOURCE);
+  assert.deepEqual([task.taskId, task.state], ["t1", "queued"]);
+  assert.equal(await env.lifecycle.submit(SOURCE), null);
+
+  const refusedUpload = environment();
+  refusedUpload.lifecycle.start();
+  const failed = await refusedUpload.lifecycle.submit(SOURCE);
+  assert.deepEqual([failed.taskId, failed.state], [null, "failed"]);
+});
+
+const NO_PDF = (title) => `${title}：该条目没有 PDF 附件`;
+const sourceNamed = (title, id) => ({ sourceItemID: id, itemID: id + 100, title, sourceFileName: `${title}.pdf` });
+/** sourceOf for submitBatch: an item is a source, or the reason it has none. */
+const asSource = async (item) => item;
+
+test("a batch's submission notice: the titles the service took, and why the others were skipped", async () => {
+  const env = await submitted(); // SOURCE has an unfinished task
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.submitBatch([sourceNamed("B", 21), NO_PDF("C"), SOURCE], asSource);
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "已提交 1 篇", titles: ["B"], reasons: [NO_PDF("C"), ALREADY_ACTIVE("AutoDesign")] },
+  ]);
+  // The task window shows this submission's reasons too.
+  assert.deepEqual(env.lifecycle.notices, [NO_PDF("C"), ALREADY_ACTIVE("AutoDesign")]);
+});
+
+test("after stop, an upload under way when it comes back brings no submission notice", async () => {
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const batch = env.lifecycle.submitBatch([SOURCE, NO_PDF("C")], asSource);
+  await settle();
+  env.lifecycle.stop();
+  upload.answer(json(201, { task_id: "t1" }));
+  await batch;
+  assert.deepEqual(env.announced, []);
+});
+
+test("two batches at once each tell only their own skipped items", async () => {
+  const upload = held();
+  const env = environment({ routes: { [UPLOAD]: upload.route } });
+  env.lifecycle.start();
+  const first = env.lifecycle.submitBatch([SOURCE, NO_PDF("C")], asSource);
+  await settle(); // the first batch's upload is under way
+  await env.lifecycle.submitBatch([NO_PDF("D")], asSource);
+  upload.answer(json(201, { task_id: "t1" }));
+  await first;
+  assert.deepEqual(
+    env.announced.map(({ headline, reasons }) => [headline, reasons]),
+    [
+      ["没有提交", [NO_PDF("D")]],
+      ["已提交 1 篇", [NO_PDF("C")]],
+    ],
+  );
+});
+
+test("清除已结束 removes only the done, cancelled and failed rows; unfinished ones stay, saved and still handled", async () => {
+  const UNFINISHED = ["queued", "running", "waiting_rerun", "attaching", "attach_failed", "cancelling"];
+  const saved = UNFINISHED.map((state, i) => ({
+    sourceItemID: 50 + i,
+    itemID: 40 + i,
+    title: `U-${state}`,
+    sourceFileName: "u.pdf",
+    serviceUrl: SERVICE,
+    taskId: `u${i}`,
+    state,
+    attached: {},
+    error: state === "attach_failed" ? "磁盘已满" : null,
+  }));
+  let uploads = 0;
+  const upload = held();
+  const env = environment({
+    saved: JSON.stringify(saved),
+    routes: {
+      // t1 succeeds, t2 fails, t3 is cancelled by the service; the fourth upload is still under way.
+      [UPLOAD]: (options) => (++uploads <= 3 ? json(201, { task_id: `t${uploads}` }) : upload.route(options)),
+      ...succeededRoutes("t1"),
+      [QUERY("t2")]: status("failed", { error: "HTTP 400" }),
+      [QUERY("t3")]: status("cancelled", { cancel_requested: true }),
+    },
+  });
+  env.lifecycle.start();
+  for (const [i, title] of ["Done", "Failed", "Cancelled"].entries()) {
+    await env.lifecycle.submit({ sourceItemID: 11 + i, itemID: 10 + i, title, sourceFileName: `${title}.pdf` });
+  }
+  const submitting = env.lifecycle.submit({ sourceItemID: 20, itemID: 21, title: "Submitting", sourceFileName: "s.pdf" });
+  await env.clock.advance(2000);
+  const states = () => env.lifecycle.tasks.map((t) => [t.title, t.state]);
+  assert.deepEqual(states().slice(6), [["Done", "done"], ["Failed", "failed"], ["Cancelled", "cancelled"], ["Submitting", "submitting"]]);
+  assert.deepEqual(
+    env.lifecycle.rows().map((row) => row.ended),
+    [false, false, false, false, false, false, true, true, true, false],
+  );
+
+  const savedBefore = env.saved;
+  let redraws = 0;
+  env.lifecycle.listeners.add(() => redraws++);
+  env.lifecycle.clearEnded();
+  assert.deepEqual(
+    env.lifecycle.rows().map((row) => row.title),
+    [...UNFINISHED.map((state) => `U-${state}`), "Submitting"],
+  );
+  assert.equal(redraws, 1);
+  assert.equal(env.saved, savedBefore); // ended tasks were never saved; the unfinished ones still are
+  assert.deepEqual(env.lifecycle.rows().map((row) => row.ended), Array(7).fill(false));
+
+  // The unfinished tasks go on: the queued one is queried again, the upload under way still lands.
+  env.routes[QUERY("u0")] = status("running", { progress: 30 });
+  upload.answer(json(201, { task_id: "t4" }));
+  await submitting;
+  await env.clock.advance(10000);
+  assert.deepEqual(states(), [...UNFINISHED.map((state, i) => [`U-${state}`, i === 0 ? "running" : state]), ["Submitting", "queued"]]);
+
+  // Nothing ended: nothing to clear, and no redraw.
+  const redrawsBefore = redraws;
+  env.lifecycle.clearEnded();
+  assert.equal(env.lifecycle.rows().length, 7);
+  assert.equal(redraws, redrawsBefore);
+});
+
+test("a cleared task's late answers change nothing, and a cleared failed PDF can be submitted again", async () => {
+  const query = held();
+  const env = await submitted({ [QUERY("t1")]: query.route, [CANCEL("t1")]: json(200, { state: "cancelled" }) });
+  await env.clock.advance(2000); // the query is under way
+  await env.lifecycle.cancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  env.lifecycle.clearEnded();
+  query.answer(status("succeeded", { stage: "完成", progress: 100 }));
+  await env.clock.advance(10000);
+  assert.deepEqual(env.lifecycle.rows(), []);
+  assert.deepEqual(env.requests.filter((r) => r.includes("/files/")), []);
+
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("queued");
+  assert.equal((await env.lifecycle.submit(SOURCE)).taskId, "t2");
+  assert.deepEqual(env.status(), ["排队中"]);
+});
+
+// ---- progress and elapsed time (ticket M4-09) ----
+
+const elapsedOf = (env) => env.lifecycle.rows().map((row) => row.elapsed);
+
+test("a row's progress is the service's percentage; elapsed time counts from the submission", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("queued", { progress: 0 }) }, { time: 1_000_000 });
+  assert.deepEqual(env.lifecycle.rows().map((row) => [row.progress, row.elapsed]), [[null, "0 秒"]]);
+  await env.clock.advance(2000);
+  env.routes[QUERY("t1")] = status("running", { progress: 37 });
+  await env.clock.advance(63000);
+  assert.deepEqual(env.lifecycle.rows().map((row) => [row.progress, row.percent, row.elapsed]), [[37, "37%", "1 分 5 秒"]]);
+});
+
+test("after Zotero restarts, elapsed time goes on from the submission, never from 0", async () => {
+  const before = await submitted({ [QUERY("t1")]: status("running", { progress: 40 }) }, { time: 1_000_000 });
+  await before.clock.advance(5 * MINUTE);
+  assert.deepEqual(elapsedOf(before), ["5 分 0 秒"]);
+  before.lifecycle.stop();
+  assert.equal(savedOf(before)[0].submittedAt, 1_000_000);
+
+  // Zotero was closed for 10 minutes.
+  const after = environment({ saved: before.saved, time: before.clock.now() + 10 * MINUTE, routes: { [QUERY("t1")]: status("running") } });
+  after.lifecycle.start();
+  assert.deepEqual(elapsedOf(after), ["15 分 0 秒"]);
+  await after.clock.advance(MINUTE);
+  assert.deepEqual(elapsedOf(after), ["16 分 0 秒"]);
+});
+
+test("an ended task's elapsed time stops at its end; 重试 counts again from the new submission", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(90000);
+  env.routes[QUERY("t1")] = status("failed", { error: "x" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["失败：x"]);
+  assert.deepEqual(elapsedOf(env), ["1 分 32 秒"]);
+  await env.clock.advance(10 * MINUTE);
+  assert.deepEqual(elapsedOf(env), ["1 分 32 秒"]);
+
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  env.routes[QUERY("t2")] = status("queued");
+  await env.lifecycle.retry(rowOf(env).key);
+  assert.deepEqual(elapsedOf(env), ["0 秒"]);
+  await env.clock.advance(2000);
+  assert.deepEqual(elapsedOf(env), ["2 秒"]);
+});
+
+/** Elapsed time at the end and 10 minutes later: the two are the same once the task has ended. */
+async function elapsedStops(env) {
+  const atEnd = elapsedOf(env);
+  await env.clock.advance(10 * MINUTE);
+  return [atEnd, elapsedOf(env)];
+}
+
+test("every way into an ended state stops the elapsed time there, the restart's included", async (t) => {
+  const SUBMITTED_AT = 1_000_000;
+  const savedTask = (fields) => JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", submittedAt: SUBMITTED_AT, ...fields }]);
+
+  await t.test("an upload under way when Zotero quit fails at the restart", async () => {
+    const env = environment({ saved: savedTask({ taskId: null, state: "submitting" }), time: SUBMITTED_AT + 3 * MINUTE });
+    env.lifecycle.start();
+    assert.deepEqual(env.status(), ["失败：提交未完成，请重试"]);
+    assert.deepEqual(await elapsedStops(env), [["3 分 0 秒"], ["3 分 0 秒"]]);
+  });
+
+  await t.test("a pre-upgrade attaching task becomes attach_failed at the restart, then 取消 ends it here", async () => {
+    const env = environment({ saved: savedTask({ state: "attaching" }), time: SUBMITTED_AT + MINUTE });
+    env.lifecycle.start();
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["1 分 0 秒"], ["1 分 0 秒"]]);
+  });
+
+  await t.test("an upload the service refuses", async () => {
+    const env = environment({ routes: { [UPLOAD]: json(413, {}) } });
+    env.lifecycle.start();
+    await env.lifecycle.submit(SOURCE);
+    assert.match(env.status()[0], /^失败：/);
+    assert.deepEqual(await elapsedStops(env), [["0 秒"], ["0 秒"]]);
+  });
+
+  for (const [name, answer, shown] of [
+    ["the service says failed", status("failed", { error: "x" }), "失败：x"],
+    ["the service says cancelled", status("cancelled"), "已取消"],
+    ["the service no longer knows the task", json(404, {}), "失败：翻译服务中找不到该任务，请重试"],
+  ]) {
+    await t.test(name, async () => {
+      const env = await submitted({ [QUERY("t1")]: answer });
+      await env.clock.advance(2000);
+      assert.deepEqual(env.status(), [shown]);
+      assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+    });
+  }
+
+  await t.test("a cancel the service confirms", async () => {
+    const env = await submitted({ [QUERY("t1")]: status("queued"), [CANCEL("t1")]: cancelledAnswer("t1") });
+    await env.clock.advance(5000);
+    await env.lifecycle.cancel(rowOf(env).key);
+    assert.deepEqual(env.status(), ["已取消"]);
+    assert.deepEqual(await elapsedStops(env), [["5 秒"], ["5 秒"]]);
+  });
+
+  await t.test("both PDFs attached", async () => {
+    const env = await submitted(succeededRoutes("t1"));
+    await env.clock.advance(2000);
+    assert.deepEqual(env.status(), ["已挂回"]);
+    assert.deepEqual(await elapsedStops(env), [["2 秒"], ["2 秒"]]);
+  });
+});
+
+test("a task's end time is taken when it changes into the ended state, before anything else is awaited", async () => {
+  // Removing the temporary directory after both PDFs are attached takes 30 seconds.
+  const env = await submitted(succeededRoutes("t1"));
+  let removing = null;
+  env.removeHold = () => new Promise((resolve) => (removing = resolve));
+  await env.clock.advance(2000);
+  assert.ok(removing, "the removal is under way");
+  await env.clock.advance(30000);
+  removing();
+  await env.clock.advance(0);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(elapsedOf(env), ["2 秒"]);
+});
+
+test("a task saved by a plugin from before the submission time has no elapsed time", () => {
+  const saved = JSON.stringify([{ ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "running", disconnectedSince: null, generation: 0, attached: {}, importIntents: {} }]);
+  const env = environment({ saved, routes: { [QUERY("t1")]: status("running") } });
+  env.lifecycle.start();
+  assert.deepEqual(elapsedOf(env), [""]);
+});
+
+// ---- 取消要确认；已有译文再翻译一次 (ticket M4-10) ----
+
+test("取消 on a queued, running or waiting row asks first: the first press only asks, the second within 5 seconds cancels", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("queued"), [CANCEL("t1")]: cancelledAnswer("t1") });
+  await env.clock.advance(2000);
+  await env.lifecycle.requestCancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["排队中"]);
+  assert.equal(rowOf(env).canCancel, true);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.deepEqual(env.requests, [UPLOAD, QUERY("t1")]); // no cancel request yet
+
+  await env.clock.advance(4999);
+  await env.lifecycle.requestCancel(rowOf(env).key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.equal(env.requests.at(-1), CANCEL("t1"));
+});
+
+test("the ask goes away after 5 seconds without a second press, and the next press asks again", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  await env.clock.advance(5000);
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.status(), ["翻译中"]);
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.deepEqual(env.status(), ["翻译中"]);
+});
+
+test("a row that stops being cancellable drops the ask; another row's ask is a separate ask", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  await env.lifecycle.requestCancel(rowOf(env).key);
+  env.routes[QUERY("t1")] = status("failed", { error: "x" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["失败：x"]);
+  assert.equal(rowOf(env).confirmCancel, false);
+
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.submit(sourceNamed("B", 21));
+  const second = rowOf(env, 1).key;
+  await env.lifecycle.requestCancel(second);
+  assert.deepEqual([rowOf(env, 0).confirmCancel, rowOf(env, 1).confirmCancel], [false, true]);
+});
+
+// Ticket M4-16 item 3: 挂回中 and 挂回失败 ask first too (requirement 5 has no exception).
+test("取消 on 挂回失败 asks first: the first press only asks, the second within 5 seconds cancels without a cancel request", async () => {
+  const saved = JSON.stringify([
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attach_failed", error: "磁盘已满", attached: {}, importIntents: {} },
+  ]);
+  const env = environment({ saved });
+  env.lifecycle.start();
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+  assert.equal(rowOf(env).canCancel, true);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.equal(rowOf(env).canContinue, true); // 继续挂回 is still offered while it asks
+
+  await env.clock.advance(4999);
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.requests, []);
+});
+
+test("the ask on 挂回失败 goes away after 5 seconds, and the next press asks again", async () => {
+  const saved = JSON.stringify([
+    { ...SOURCE, serviceUrl: SERVICE, taskId: "t1", state: "attach_failed", error: "磁盘已满", attached: {}, importIntents: {} },
+  ]);
+  const env = environment({ saved });
+  env.lifecycle.start();
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  await env.clock.advance(5000);
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.deepEqual(env.status(), [ATTACH_FAILED("磁盘已满")]);
+});
+
+test("取消 on 挂回中 asks first; the second press cancels at once and nothing is imported", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  env.findHold = held();
+  await env.clock.advance(2000);
+  assert.equal(env.findHold.count, 1);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  const key = rowOf(env).key;
+
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  assert.equal(rowOf(env).confirmCancel, true);
+
+  await env.lifecycle.requestCancel(key);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.ok(!env.requests.includes(CANCEL("t1")));
+  env.findHold.answer();
+  await env.clock.advance(60000);
+  assert.deepEqual(env.status(), ["已取消"]);
+  assert.deepEqual(env.imports, []);
+});
+
+test("an ask made while translating does not carry over into 挂回中; once a PDF is being imported there is no ask", async () => {
+  const env = await submitted({ [QUERY("t1")]: status("running") });
+  await env.clock.advance(2000);
+  const key = rowOf(env).key;
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  Object.assign(env.routes, succeededRoutes("t1"));
+  env.findHold = held();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["挂回中"]);
+  assert.equal(rowOf(env).confirmCancel, false); // the question was about a translation under way
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  env.quitAfterImport = true; // the import starts and never returns
+  env.findHold.answer();
+  await env.clock.advance(2000);
+  assert.equal(rowOf(env).canCancel, false);
+  assert.equal(rowOf(env).confirmCancel, false);
+  await env.lifecycle.requestCancel(key); // nothing to cancel while importing
+  assert.equal(rowOf(env).confirmCancel, false);
+  assert.deepEqual(env.status(), ["挂回中"]);
+});
+
+test("取消 on a waiting-rerun row asks first too; only the second press sends the cancel", async () => {
+  const env = await submitted({
+    [QUERY("t1")]: status("waiting_rerun", { reruns_used: 1, reruns_max: 2, next_attempt_in_seconds: 300, error: "HTTP 500" }),
+    [CANCEL("t1")]: cancelledAnswer("t1"),
+  });
+  await env.clock.advance(2000);
+  assert.equal(rowOf(env).status, "等待自动重跑");
+  const key = rowOf(env).key;
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(rowOf(env).confirmCancel, true);
+  assert.equal(rowOf(env).status, "等待自动重跑");
+  assert.equal(env.requests.at(-1), QUERY("t1")); // no cancel request yet
+
+  await env.lifecycle.requestCancel(key);
+  assert.equal(env.requests.at(-1), CANCEL("t1"));
+  assert.deepEqual(env.status(), ["已取消"]);
+});
+
+const RESUBMIT_ASK = (title) => `${title}：已有译文，等待确认`;
+
+test("a paper that already has translations is asked about, and only 再翻译一次 uploads it", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  await env.lifecycle.submitBatch([{ ...SOURCE, translated: true }], asSource);
+  assert.deepEqual(env.requests, []); // nothing uploaded yet
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "没有提交", titles: [], reasons: [RESUBMIT_ASK("AutoDesign")] },
+    { outcome: "resubmit", titles: ["AutoDesign"], keys: [1] },
+  ]);
+  assert.deepEqual(env.lifecycle.notices, [RESUBMIT_ASK("AutoDesign")]);
+
+  await env.lifecycle.resubmit([1]);
+  assert.deepEqual(env.requests, [UPLOAD]);
+  assert.deepEqual(env.status(), ["排队中"]);
+  assert.deepEqual(env.announced.at(-1), { outcome: "submitted", headline: "已提交 1 篇", titles: ["AutoDesign"], reasons: [] });
+});
+
+test("a mixed batch submits the new papers and asks about the translated ones; the notice counts both", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  await env.lifecycle.submitBatch([{ ...SOURCE, translated: true }, sourceNamed("B", 21)], asSource);
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "已提交 1 篇", titles: ["B"], reasons: [RESUBMIT_ASK("AutoDesign")] },
+    { outcome: "resubmit", titles: ["AutoDesign"], keys: [1] },
+  ]);
+  // The papers asked about are not uploaded until the user says so.
+  assert.equal(env.requests.length, 1);
+  assert.deepEqual(env.lifecycle.tasks.map((t) => t.title), ["B"]);
+});
+
+test("a source lookup that throws skips that item with a reason; the rest of the batch goes on (ticket 16 round 2)", async () => {
+  const errors = [];
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) }, logError: (e) => errors.push(e.message) });
+  env.lifecycle.start();
+  const lookup = async (item) => {
+    if (item.title === "B") {
+      throw new TypeError("无法读取附件身份");
+    }
+    return item;
+  };
+  await env.lifecycle.submitBatch([SOURCE, sourceNamed("B", 21), sourceNamed("C", 22)], lookup);
+  assert.deepEqual(env.lifecycle.tasks.map((t) => t.title), ["AutoDesign", "C"]);
+  assert.deepEqual(errors, ["无法读取附件身份"]);
+  const reason = "B：读取条目出错，没有提交（无法读取附件身份）";
+  assert.deepEqual(env.announced.at(-1), { outcome: "submitted", headline: "已提交 2 篇", titles: ["AutoDesign", "C"], reasons: [reason] });
+  assert.deepEqual(env.lifecycle.notices, [reason]);
+});
+
+test("a PDF with an unfinished task is skipped before the 已有译文 ask; no PDF is skipped too", async () => {
+  const env = await submitted();
+  env.routes[UPLOAD] = json(201, { task_id: "t2" });
+  await env.lifecycle.submitBatch([{ ...SOURCE, translated: true }, NO_PDF("C"), { ...sourceNamed("D", 31), translated: true }], asSource);
+  assert.deepEqual(env.announced, [
+    {
+      outcome: "submitted",
+      headline: "没有提交",
+      titles: [],
+      reasons: [ALREADY_ACTIVE("AutoDesign"), NO_PDF("C"), RESUBMIT_ASK("D")],
+    },
+    { outcome: "resubmit", titles: ["D"], keys: [1] },
+  ]);
+});
+
+test("再翻译一次 does nothing after the plugin stopped or for a key never announced", async () => {
+  const env = environment();
+  env.lifecycle.start();
+  await env.lifecycle.submitBatch([{ ...SOURCE, translated: true }], asSource);
+  await env.lifecycle.resubmit([99]); // never announced
+  assert.deepEqual(env.requests, []);
+  await env.lifecycle.resubmit([1]);
+  assert.deepEqual(env.requests.map((r) => r), [UPLOAD]); // no route: the upload fails, but it was sent
+  env.lifecycle.stop();
+  const before = env.requests.length;
+  await env.lifecycle.resubmit([1]); // already used: no key left
+  assert.equal(env.requests.length, before);
+});
+
+test("a standalone PDF whose task attached both outputs counts as translated: submitting it again asks first", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+
+  await env.lifecycle.submit(standalone);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.equal(env.lifecycle.wasTranslated(30), true);
+  assert.equal(env.lifecycle.wasTranslated(31), false);
+
+  // The next submission carries what the plugin tells about the source: the
+  // task record, its outputs having no link back to a standalone PDF.
+  const again = { ...standalone, translated: env.lifecycle.wasTranslated(30) };
+  await env.lifecycle.submitBatch([again], asSource);
+  assert.deepEqual(env.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+  assert.equal(env.requests.filter((request) => request === UPLOAD).length, 1); // no second upload
+  assert.equal(env.lifecycle.tasks.length, 1);
+
+  // The record lasts for this Zotero session only: 清除已结束 removes it (and
+  // ended tasks are not saved for restarts), so after that a standalone PDF
+  // is submitted again without the ask.
+  env.lifecycle.clearEnded();
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+});
+
+// ---- 独立 PDF 跨重启也先询问 (ticket M4-13) ----
+
+test("attaching a standalone PDF's outputs makes the source and each output related items, both ways", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  env.lifecycle.start();
+  await env.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.relates, [
+    [30, 100],
+    [30, 101],
+  ]);
+});
+
+test("a paper with a parent item gets no related-item links: its attachments say it was translated", async () => {
+  const env = await submitted(succeededRoutes("t1"));
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.relates, []);
+});
+
+test("outputs attached earlier, with no relations, are related when they are found: nothing is imported again", async () => {
+  // A task saved before the relations existed: both outputs attached already.
+  const saved = JSON.stringify([
+    {
+      sourceItemID: 30,
+      itemID: null,
+      title: "Standalone",
+      sourceFileName: "standalone.pdf",
+      serviceUrl: SERVICE,
+      taskId: "t1",
+      state: "attaching",
+      generation: 0,
+      attached: {},
+      importIntents: {},
+    },
+  ]);
+  const library = [
+    { id: 7, target: { libraryID: 1, collections: [] }, title: "中文译文", text: "mono pdf", addedAt: 0, identity: "t1/mono", deleted: false },
+    { id: 8, target: { libraryID: 1, collections: [] }, title: "双语对照", text: "dual pdf", addedAt: 0, identity: "t1/dual", deleted: false },
+  ];
+  const env = environment({ saved, library });
+  env.lifecycle.start();
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(env.imports, []);
+  assert.deepEqual(env.relates, [
+    [30, 7],
+    [30, 8],
+  ]);
+});
+
+test("a relation that cannot be saved is logged; the task is done with both PDFs attached", async () => {
+  const errors = [];
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") },
+    logError: (e) => errors.push(e.message),
+  });
+  env.failRelate = "关联没有保存";
+  env.lifecycle.start();
+  await env.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(
+    env.attached().map(([title]) => title),
+    ["中文译文", "双语对照"],
+  );
+  assert.deepEqual(errors, ["关联没有保存", "关联没有保存"]);
+});
+
+// ---- item 5 of ticket M4-16: the identity file knows the source, so the ask survives lost relations ----
+
+/** What zotero-translate.js reads from the identity file for a standalone PDF: an undeleted output naming it as source. */
+const recordedSource = (env, sourceItemID) => env.library.some((a) => a.source === sourceItemID && !a.deleted);
+
+test("the outputs of a standalone PDF are identified with their source PDF; a paper with a parent item names none", async () => {
+  const standalone = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  standalone.lifecycle.start();
+  await standalone.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await standalone.clock.advance(2000);
+  assert.deepEqual(standalone.status(), ["已挂回"]);
+  assert.deepEqual(standalone.library.map((a) => [a.identity, a.source]), [["t1/mono", 30], ["t1/dual", 30]]);
+
+  const parented = await submitted(succeededRoutes("t1"));
+  await parented.clock.advance(2000);
+  assert.deepEqual(parented.library.map((a) => [a.identity, a.source]), [["t1/mono", null], ["t1/dual", null]]);
+});
+
+test("with both relations lost, a standalone PDF is still asked about after 清除已结束 and after a restart", async () => {
+  const errors = [];
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") },
+    logError: (e) => errors.push(e.message),
+  });
+  env.failRelate = "关联没有保存";
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  await env.lifecycle.submit(standalone);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(errors, ["关联没有保存", "关联没有保存"]);
+  const related = []; // neither output is related to the source: no relation was saved
+  const sourceNow = (lifecycle) => async () => lifecycleSource({
+    ...standalone,
+    taskRecord: lifecycle.wasTranslated(30),
+    related,
+    recorded: recordedSource(env, 30),
+  });
+
+  // After 清除已结束 the task record is gone; the identity file's source is not.
+  env.lifecycle.clearEnded();
+  assert.deepEqual(env.lifecycle.tasks, []);
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+  const uploads = () => env.requests.filter((request) => request === UPLOAD).length;
+  await env.lifecycle.submitBatch([standalone], sourceNow(env.lifecycle));
+  assert.equal(uploads(), 1); // no second task
+  assert.deepEqual(env.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+  assert.deepEqual(env.lifecycle.tasks, []);
+
+  // A restart: a new lifecycle over the same library, with no saved tasks (ended tasks are not saved).
+  const restarted = environment({ saved: env.saved, library: env.library, routes: { [UPLOAD]: json(201, { task_id: "t2" }) } });
+  restarted.lifecycle.start();
+  assert.deepEqual(restarted.lifecycle.tasks, []);
+  await restarted.lifecycle.submitBatch(
+    [standalone],
+    async () => lifecycleSource({ ...standalone, taskRecord: restarted.lifecycle.wasTranslated(30), related, recorded: recordedSource(env, 30) }),
+  );
+  assert.deepEqual(restarted.requests, []);
+  assert.deepEqual(restarted.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+
+  // Both outputs deleted by the user: nothing says it was translated any more.
+  for (const attachment of env.library) {
+    attachment.deleted = true;
+  }
+  assert.equal(recordedSource(env, 30), false);
+});
+
+test("a standalone PDF with no task record but a related translation output is asked about", async () => {
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) } });
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  // After a restart or "清除已结束" the record is gone: the relation is all
+  // that is left (the relations were made when the outputs were attached).
+  const translated = lifecycleSource({
+    ...standalone,
+    taskRecord: env.lifecycle.wasTranslated(30),
+    related: [{ title: "中文译文", deleted: false }],
+  }).translated;
+  await env.lifecycle.submitBatch([{ ...standalone, translated }], asSource);
+  assert.deepEqual(env.requests, []); // nothing uploaded
+  assert.deepEqual(env.announced, [
+    { outcome: "submitted", headline: "没有提交", titles: [], reasons: [RESUBMIT_ASK("Standalone")] },
+    { outcome: "resubmit", titles: ["Standalone"], keys: [1] },
+  ]);
 });

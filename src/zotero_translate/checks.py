@@ -10,6 +10,8 @@ short Chinese reasons. An empty list means the translation passes.
   often. Thousands separators are ignored; a percentage must stay a
   percentage. Digits joined to letters (``3D``, ``1st``, ``GPT-4``) are not
   numbers: they are literals or ordinary words.
+- Empty text: a translation that is empty or only whitespace fails (M4
+  ticket 15, from ticket 14); adopted, it would clear the paragraph.
 - Formula placeholders: the translation has the same placeholders, each as
   often as the source (same count, same ids).
 - Literals: URLs, e-mail addresses, code identifiers (``snake_case``,
@@ -78,6 +80,8 @@ def problems(source: str, translation: str, translated_terms: frozenset[str] = f
     ``translated_terms`` are lower-case spellings the paper's glossary
     translates into Chinese; they are not checked as literals.
     """
+    if not translation.strip():
+        return ["译文为空"]
     found: list[str] = []
     source_formulas = collections.Counter(_FORMULA.findall(source))
     target_formulas = collections.Counter(_FORMULA.findall(translation))

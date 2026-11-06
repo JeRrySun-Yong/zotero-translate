@@ -56,6 +56,9 @@ TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 # The environment variable that carries a task process's process marker
 # "<task_id>:<attempt>" (spec section 2).
 MARK_ENV = "ZT_PROCESS_MARK"
+# The environment variable that names the default model profiles directory
+# (M4 ticket 02); the fixtures point it at the test's own.
+PROFILES_DIR_ENV = "ZT_PROFILES_DIR"
 # The test processes ``pytest -n auto`` starts: each runs at most one paper
 # task at a time, about 2 GB.
 PARALLEL_PROCESSES = 3
@@ -173,6 +176,7 @@ def launch_service(
     argon_concurrency: int | None = None,
     env: dict[str, str] | None = None,
     hedging: bool = True,
+    profiles_dir: Path | None = None,
 ) -> ServiceClient:
     """Start the service subprocess on a random port with its data under ``root``.
 
@@ -184,9 +188,12 @@ def launch_service(
     both endpoints, and ``argon_concurrency`` to replace argon's limit of 16.
     ``env`` adds environment variables to the service's (the ``ZT_TEST_``
     settings). ``hedging=False`` starts it with ``--no-hedging``. The
-    client's ``output`` collects the service's whole standard output.
+    client's ``output`` collects the service's whole standard output. The
+    model profiles directory is ``profiles_dir``, by default ``root/profiles``,
+    the same for every service of a test (``client.profiles_dir``).
     """
     data_dir = data_dir or root / f"data-{uuid.uuid4().hex[:6]}"
+    profiles_dir = profiles_dir or root / "profiles"
     _assert_random_task_ids(data_dir)
     if env_file is None:
         base_url = model if isinstance(model, str) else model.base_url
@@ -199,6 +206,7 @@ def launch_service(
         )
     process = subprocess.Popen(
         serve_command(env_file, argon_env_file, data_dir, concurrency=concurrency)
+        + ["--profiles-dir", str(profiles_dir)]
         + ([] if hedging else ["--no-hedging"]),
         stdout=subprocess.PIPE,
         text=True,
@@ -216,7 +224,9 @@ def launch_service(
         target=lambda: output.extend(line.rstrip("\n") for line in process.stdout),
         daemon=True,
     ).start()
-    return ServiceClient(json.loads(line)["url"], process, data_dir, output)
+    client = ServiceClient(json.loads(line)["url"], process, data_dir, output)
+    client.profiles_dir = profiles_dir
+    return client
 
 
 def _assert_random_task_ids(data_dir: Path) -> None:
@@ -376,6 +386,11 @@ def pytest_configure(config) -> None:
     default_data_dir = tempfile.mkdtemp(prefix="zt-test-data-")
     os.environ["ZT_DATA_DIR"] = default_data_dir
     config.add_cleanup(lambda: shutil.rmtree(default_data_dir, ignore_errors=True))
+    # Likewise the model profiles directory: never the user's
+    # ~/.config/zotero-translate/profiles, which holds API keys.
+    default_profiles_dir = tempfile.mkdtemp(prefix="zt-test-profiles-")
+    os.environ[PROFILES_DIR_ENV] = default_profiles_dir
+    config.add_cleanup(lambda: shutil.rmtree(default_profiles_dir, ignore_errors=True))
 
 
 @pytest.hookimpl(tryfirst=True)  # before pytest-xdist's own, whichever loaded first
@@ -390,8 +405,10 @@ def pytest_xdist_auto_num_workers(config) -> int:
 
 @pytest.fixture(autouse=True)
 def own_default_data_dir(tmp_path, monkeypatch):
-    """A test's subprocesses default to a data directory, and model cache, of its own."""
+    """A test's subprocesses default to a data directory, model cache and
+    model profiles directory of its own."""
     monkeypatch.setenv("ZT_DATA_DIR", str(tmp_path / "default-data-dir"))
+    monkeypatch.setenv(PROFILES_DIR_ENV, str(tmp_path / "default-profiles"))
 
 
 @pytest.fixture
@@ -403,7 +420,7 @@ def fake_model():
 @pytest.fixture
 def start_service(tmp_path):
     """Return ``start(fake_model, concurrency=4, data_dir=None, request_timeout=None, argon=None,
-    argon_concurrency=None, env=None, hedging=True)``; see ``launch_service``."""
+    argon_concurrency=None, env=None, hedging=True, profiles_dir=None)``; see ``launch_service``."""
     started: list[ServiceClient] = []
 
     def start(
@@ -415,6 +432,7 @@ def start_service(tmp_path):
         argon_concurrency: int | None = None,
         env: dict[str, str] | None = None,
         hedging: bool = True,
+        profiles_dir: Path | None = None,
     ) -> ServiceClient:
         client = launch_service(
             model,
@@ -426,6 +444,7 @@ def start_service(tmp_path):
             argon_concurrency=argon_concurrency,
             env=env,
             hedging=hedging,
+            profiles_dir=profiles_dir,
         )
         started.append(client)
         return client

@@ -14,10 +14,20 @@
  * or a 404 for the task or one of its PDFs, fails the task. An upload that
  * cannot reach the service fails at once, naming the service address.
  *
- * "取消" on a queued, running or waiting task (also while disconnected) first saves
- * the cancel intent and makes the task `cancelling`, which ends whatever
+ * "取消" on a queued, running or waiting task (also while disconnected) first
+ * saves the cancel intent and makes the task `cancelling`, which ends whatever
  * operation the task has under way: its request is aborted, and its answer,
- * whenever it comes, is dropped. The cancel request goes out at once; the
+ * whenever it comes, is dropped. The task window does not call cancel()
+ * directly: requestCancel() asks first (the row shows "确认取消？"), and only a
+ * second press within CANCEL_CONFIRM_MS cancels; an ask that is not answered
+ * in time goes away. A task that stops being cancellable meanwhile drops the
+ * ask. Attaching and attach_failed ask first as well (M4 ticket 16; requirement
+ * 5 has no exception, and an attach_failed row loses its "继续挂回" with the
+ * cancel): the second press ends the task here, without a cancel request (the
+ * service has already succeeded; nothing is lost but a download). An ask
+ * does not carry over from one kind of cancel to the other (translating ->
+ * attaching), nor into a PDF being imported. Once
+ * confirmed, the cancel request goes out at once; the
  * task is no longer queried. 200, 409 or 404 make it `cancelled`, and
  * nothing is attached; a 503 shows the service's reason, and a 503 or no
  * answer sends it again every 10 seconds, also after Zotero restarts.
@@ -25,6 +35,23 @@
  * new generation, with nothing of the old task's. An operation's result
  * counts only while the operation is the task's current one, of the same
  * generation and task ID; so an old task's answers never change the new one.
+ *
+ * submitBatch() asks before translating a paper that already has a
+ * translation output (the source's `translated`, set by the plugin: a
+ * translation output among a regular item's attachments, or for a standalone
+ * PDF, whose outputs have no link back, a task of this session with both
+ * outputs attached, wasTranslated(), or one of the PDF's related items being
+ * an undeleted translation output: attaching a standalone PDF's outputs
+ * links each of them to it as a related item, both ways, and that outlives
+ * the task records; or an undeleted output that the plugin's identity file
+ * records with the PDF as its source, which holds when the links could not
+ * be saved either; an output counts under any title once the plugin has
+ * attached it): the paper is not submitted; the batch's
+ * submission notice counts it among the skipped, with the reason, and a
+ * second notice (outcome "resubmit", with `keys`) asks "再翻译一次？".
+ * resubmit(keys) submits the papers that notice listed, then announces their
+ * own submission notice. The ask is never repeated automatically: without a
+ * click nothing is submitted.
  *
  * Attaching handles the two PDFs one after the other, each in this order:
  * look for the attachment with its identity (service task ID + output,
@@ -37,9 +64,10 @@
  * output's title, added no earlier than the intent's start, is claimed
  * (its identity written) instead of importing again. A local error makes
  * the task `attach_failed` with the reason; "继续挂回" handles the PDFs
- * again in the same way. "取消" while downloading or waiting to download,
- * or on `attach_failed`, makes the task `cancelled` at once (the service
- * has already succeeded; no cancel request): the download under way is
+ * again in the same way. "取消" (confirmed, like the others) while
+ * downloading or waiting to download, or on `attach_failed`, makes the task
+ * `cancelled` (the service has already succeeded; no cancel request): the
+ * download under way is
  * aborted, and nothing comes after it; attachments already added stay.
  * While a PDF is being imported, the row offers no "取消". An `attaching`
  * task saved by a plugin from before these records (no `attached`) cannot
@@ -52,7 +80,8 @@
  * - fetch(url, options): the network request (the global fetch in Zotero);
  *   options carry an AbortSignal that is aborted when the time limit passes;
  * - clock: {now(), setTimeout(fn, ms), clearTimeout(id)}: current time and timers;
- * - serviceUrl(): the service address currently set;
+ * - serviceUrl(): the service address currently set (a new task goes there; a
+ *   retry goes to the address its task recorded, M4 ticket 16);
  * - readSource(task): the source PDF's bytes; throws with the reason when unreadable;
  * - attachTarget(task): where the task's PDFs go (the original item, or the
  *   standalone source PDF's library and collections), resolved once before
@@ -62,11 +91,27 @@
  * - importAttachment(target, {path, title}): import one PDF file as an
  *   attachment at that target; returns the attachment (an ID, saved with the task);
  * - attachments: {find(target, identity), mark(attachment, identity),
- *   unmarked(target, {title, since})}, where identity is {taskId, output}:
+ *   unmarked(target, {title, since})}, where identity is {taskId, output},
+ *   and for a standalone PDF's output also sourceItemID (the PDF; mark
+ *   records its key as the output's source, M4 ticket 16):
  *   the attachment with that identity that the user has not deleted, or
  *   null; write the identity on an attachment; the attachment at the target
  *   with no identity, that title, added at or after the clock time `since`, or null;
+ * - relate(sourceItemID, outputID): link a standalone PDF and one of its
+ *   outputs as related items, both ways (zotero-translate.js): the sign that
+ *   the paper was translated, kept in Zotero and through restarts. A failure
+ *   is logged (logError) and attaching goes on; the outputs are attached
+ *   either way, and a later attaching tries the links again;
  * - store: {load(), save(value)}: the saved tasks, as a JSON string;
+ * - announce({outcome, row}): tell the user, outside the task window, that a
+ *   task has just ended: outcome "done" (both PDFs attached; the row's
+ *   `results` name them) or "failed" (failed or attach_failed; the row's
+ *   status has the reason). Once per change into that state, after the
+ *   change is saved: a state restored after a restart is no change, so no
+ *   notice comes again (done and failed tasks are not even saved). A state
+ *   that restoring itself changes (an upload under way at quit fails) is
+ *   one, measured from the saved state. Also, at the end of submitBatch(),
+ *   {outcome: "submitted", headline, titles, reasons}. Never after stop();
  * - debug(message), logError(error): logging.
  *
  * Zotero loads this file with Services.scriptloader.loadSubScript after
@@ -91,6 +136,8 @@ var ZoteroTranslateLifecycle = (() => {
   // More than the up to 15 seconds (10 after the termination signal, 5 after
   // the forced kill) the service takes to reap the task's processes before it answers.
   const CANCEL_LIMIT_MS = 30000;
+  // How long an asked "取消" waits for its second press.
+  const CANCEL_CONFIRM_MS = 5000;
   const DOWNLOAD_LIMIT_MS = 120000; // each PDF
   // Task states in the service's answers that the plugin acts on; any other
   // answer counts as one that cannot be read (a disconnection).
@@ -108,6 +155,10 @@ var ZoteroTranslateLifecycle = (() => {
   const LOCALLY_CANCELLABLE_STATES = ["attaching", "attach_failed"];
   // States whose rows offer "重试".
   const RETRYABLE_STATES = ["failed", "cancelled"];
+  // Ended states: the plugin has nothing more to do for the task; "清除已结束" removes their rows.
+  const ENDED_STATES = ["done", "failed", "cancelled"];
+  // States announced when a task changes into them -> the notice's outcome.
+  const ANNOUNCED_OUTCOMES = { done: "done", failed: "failed", attach_failed: "failed" };
   // Task fields saved for restarts.
   const SAVED_FIELDS = [
     "sourceItemID",
@@ -117,13 +168,20 @@ var ZoteroTranslateLifecycle = (() => {
     "serviceUrl",
     "taskId",
     "state",
+    "submittedAt",
     "disconnectedSince",
     "generation",
     "error",
     "attached",
     "importIntents",
+    "profile",
   ];
   const UPGRADE_ATTACH_ERROR = "升级前的挂回进度不明：请先检查原条目下的附件，再选择继续挂回或取消";
+
+  /** Why a source PDF with an unfinished task was not submitted again. */
+  const activeNotice = (title) => `${title}：已有未结束的翻译任务，本次提交已忽略`;
+  /** Why a paper that already has a translation output was not submitted: it waits for "再翻译一次". */
+  const resubmitAsk = (title) => `${title}：已有译文，等待确认`;
 
   /** The service could not be reached, did not answer in full within the
    *  time limit, or gave an answer that cannot be read. */
@@ -138,13 +196,22 @@ var ZoteroTranslateLifecycle = (() => {
     tempFiles,
     importAttachment,
     attachments,
+    relate,
     store,
+    announce,
     debug,
     logError,
   }) {
     let nextKey = 1;
     let savedValue = null;
     let started = false;
+    // The cancel asked about and waiting for its second press: {key, timer}, or null.
+    let cancelConfirm = null;
+    // Key -> source of a paper waiting for "再翻译一次" (the resubmission notice's keys).
+    const resubmissions = new Map();
+    let nextResubmissionKey = 1;
+    // Task key -> the task's state when it was last looked at for a notice.
+    const announcedStates = new Map();
     // Task key -> the timer of the task's next operation. A task's next
     // operation is set only when its current one has finished, so a task
     // never has two operations at once; a cancel ends the current one first.
@@ -154,7 +221,12 @@ var ZoteroTranslateLifecycle = (() => {
 
     const lifecycle = {
       // Tasks, oldest first: {key, sourceItemID, itemID (parent item, or null for a
-      // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, stage,
+      // standalone PDF), title, sourceFileName, serviceUrl, taskId, state, submittedAt
+      // (clock time the upload of this submission or retry started; the row's elapsed
+      // time counts from it, core.js), profile ({id, name}: the model profile the
+      // service recorded for the task, from its answers; null until one answers, and
+      // saved so a retry names it), endedAt (clock time the task changed into an
+      // ended state, set by setState, or null; not saved, ended tasks are not), stage,
       // progress, attempt, rerunsUsed, rerunsMax, nextAttemptInSeconds, queuePosition, error,
       // keptSourceParagraphs, keptSourceAlgorithms, disconnectedSince (clock time when the
       // service stopped answering, or null), generation (0 for a new task, one more for
@@ -185,6 +257,7 @@ var ZoteroTranslateLifecycle = (() => {
           clock.clearTimeout(timer);
         }
         timers.clear();
+        clearCancelConfirm();
       },
 
       /** A new submission: the notices of the previous one go away. */
@@ -199,10 +272,12 @@ var ZoteroTranslateLifecycle = (() => {
       },
 
       /** Upload a source PDF, {sourceItemID, itemID, title, sourceFileName},
-       *  unless it already has an unfinished task. */
+       *  unless it already has an unfinished task. Returns the new task once
+       *  the upload has ended (its taskId set when the service took it, or
+       *  failed), or null when the PDF was skipped. */
       async submit(source) {
         if (skippedAsActive(source.sourceItemID, source.title)) {
-          return;
+          return null;
         }
         const task = {
           key: nextKey++,
@@ -214,10 +289,129 @@ var ZoteroTranslateLifecycle = (() => {
         };
         lifecycle.tasks.push(task);
         await upload(task);
+        return task;
+      },
+
+      /** "翻译为中文" on several items: submit them one after another
+       *  (`sourceOf(item)`: the item's source, or why it has none, a string,
+       *  also shown in the task window), then announce the submission notice
+       *  (core.js submissionNotice) with this batch's own titles and reasons;
+       *  none once stop() has come meanwhile. An item whose `sourceOf` throws
+       *  is logged and skipped, with a reason (M4 ticket 16): the others go on.
+       *
+       *  A source that already has a translation output (`translated`) is not
+       *  submitted: it is counted among the skipped, and a second notice
+       *  (outcome "resubmit") asks whether to translate it again. */
+      async submitBatch(items, sourceOf) {
+        lifecycle.clearNotices();
+        const submitted = [];
+        const skipped = [];
+        const asking = []; // sources waiting for "再翻译一次"
+        for (const item of items) {
+          let source;
+          try {
+            source = await sourceOf(item);
+          } catch (e) {
+            // One item the plugin cannot read must not stop the others.
+            logError(e);
+            source = `${item?.title ?? item?.getDisplayTitle?.() ?? "条目"}：读取条目出错，没有提交（${e.message}）`;
+          }
+          if (typeof source === "string") {
+            lifecycle.notice(source);
+            skipped.push(source);
+            continue;
+          }
+          if (source.translated) {
+            if (skippedAsActive(source.sourceItemID, source.title)) {
+              skipped.push(activeNotice(source.title));
+            } else {
+              lifecycle.notice(resubmitAsk(source.title));
+              skipped.push(resubmitAsk(source.title));
+              asking.push(source);
+            }
+            continue;
+          }
+          const task = await lifecycle.submit(source);
+          if (!task) {
+            skipped.push(activeNotice(source.title));
+          } else if (task.taskId) {
+            submitted.push(task.title);
+          }
+        }
+        const confirmation = asking.length
+          ? {
+              outcome: "resubmit",
+              titles: asking.map((source) => source.title),
+              keys: asking.map((source) => {
+                const key = nextResubmissionKey++;
+                resubmissions.set(key, source);
+                return key;
+              }),
+            }
+          : null;
+        const notice = Core.submissionNotice({ submitted, skipped });
+        if (!started) {
+          return;
+        }
+        for (const payload of [notice && { outcome: "submitted", ...notice }, confirmation].filter(Boolean)) {
+          try {
+            announce(payload);
+          } catch (e) {
+            logError(e);
+          }
+        }
+      },
+
+      /** The "再翻译一次" of the 已有译文 notice: submit the papers it listed
+       *  (lifecycle.js submitBatch), then announce their submission notice.
+       *  Unknown or already used keys are ignored; nothing after stop(). */
+      async resubmit(keys) {
+        const sources = keys.map((key) => resubmissions.get(key)).filter(Boolean);
+        for (const key of keys) {
+          resubmissions.delete(key);
+        }
+        if (!started || !sources.length) {
+          return;
+        }
+        const submitted = [];
+        const skipped = [];
+        for (const source of sources) {
+          const task = await lifecycle.submit(source);
+          if (!task) {
+            skipped.push(activeNotice(source.title));
+          } else if (task.taskId) {
+            submitted.push(task.title);
+          }
+        }
+        const notice = Core.submissionNotice({ submitted, skipped });
+        if (!started || !notice) {
+          return;
+        }
+        try {
+          announce({ outcome: "submitted", ...notice });
+        } catch (e) {
+          logError(e);
+        }
+      },
+
+      /** The "清除已结束" button: remove the done, failed and cancelled
+       *  tasks (never saved; nothing more to do for them); the unfinished
+       *  ones stay as they are. */
+      clearEnded() {
+        const ended = lifecycle.tasks.filter((task) => ENDED_STATES.includes(task.state));
+        if (!ended.length) {
+          return;
+        }
+        for (const task of ended) {
+          announcedStates.delete(task.key);
+        }
+        lifecycle.tasks = lifecycle.tasks.filter((task) => !ENDED_STATES.includes(task.state));
+        changed();
       },
 
       /** The "重试" button of a failed or cancelled row: submit the same
-       *  source PDF again, as a new task of a new generation. */
+       *  source PDF again, as a new task of a new generation, to the service
+       *  the task was submitted to (see upload). */
       async retry(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (!task || !RETRYABLE_STATES.includes(task.state)) {
@@ -230,13 +424,46 @@ var ZoteroTranslateLifecycle = (() => {
         await upload(task);
       },
 
+      /** The task window's "取消", which asks first on a queued, running,
+       *  waiting, attaching or attach_failed task: the first press only shows
+       *  "确认取消？" on the row, and a second press within CANCEL_CONFIRM_MS
+       *  cancels (cancel()); after that the ask is gone and the next press
+       *  asks again. A task that stops being cancellable, or changes from
+       *  one kind of cancel to the other, drops its ask. */
+      async requestCancel(key) {
+        const task = lifecycle.tasks.find((t) => t.key === key);
+        if (!task || !(CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task))) {
+          return;
+        }
+        if (cancelConfirm?.key === key) {
+          clearCancelConfirm();
+          await lifecycle.cancel(key);
+          return;
+        }
+        clearCancelConfirm();
+        cancelConfirm = {
+          key,
+          timer: clock.setTimeout(() => {
+            if (cancelConfirm?.key !== key) {
+              return;
+            }
+            cancelConfirm = null;
+            changed();
+          }, CANCEL_CONFIRM_MS),
+        };
+        changed();
+      },
+
       /** The "取消" button, no confirmation: end the task's operation under
        *  way; while attaching or attach_failed, the task is cancelled at once,
-       *  with no cancel request; otherwise save the cancel intent and send the cancel at once. */
+       *  with no cancel request; otherwise save the cancel intent and send the cancel at once.
+       *  The task window calls requestCancel() instead, which asks first (also
+       *  while attaching and attach_failed). */
       async cancel(key) {
         const task = lifecycle.tasks.find((t) => t.key === key);
         if (task && cancelsLocally(task)) {
-          Object.assign(task, { state: "cancelled", error: null, disconnectedSince: null });
+          setState(task, "cancelled");
+          Object.assign(task, { error: null, disconnectedSince: null });
           changed(); // saved first: the task is no longer unfinished, so no restart attaches it
           endOperation(task);
           return;
@@ -244,7 +471,8 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || !CANCELLABLE_STATES.includes(task.state)) {
           return;
         }
-        Object.assign(task, { state: "cancelling", cleanupError: null });
+        setState(task, "cancelling");
+        task.cleanupError = null;
         endOperation(task);
         changed(); // the intent is saved before the request goes out
         if (started) {
@@ -259,7 +487,8 @@ var ZoteroTranslateLifecycle = (() => {
         if (!task || task.state !== "attach_failed") {
           return;
         }
-        Object.assign(task, { state: "attaching", error: null });
+        setState(task, "attaching");
+        task.error = null;
         changed();
         if (started) {
           await run(task);
@@ -269,29 +498,71 @@ var ZoteroTranslateLifecycle = (() => {
       /** Rows for the task window; `key` identifies the task for "重试", "取消" and "继续挂回". */
       rows() {
         const now = clock.now();
-        return lifecycle.tasks.map((task) => ({
-          ...Core.taskRow(task, now),
-          key: task.key,
-          canRetry: RETRYABLE_STATES.includes(task.state),
-          canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
-          canContinue: task.state === "attach_failed",
-        }));
+        return lifecycle.tasks.map((task) => rowOf(task, now));
+      },
+
+      /** Whether a task of this source PDF has already attached both
+       *  outputs: for a regular item that shows in its attachments, but a
+       *  standalone PDF's outputs are standalone attachments with no link
+       *  back, so its task record is one sign that it was translated. The
+       *  records last for the Zotero session only: ended tasks are not
+       *  saved, and "清除已结束" removes them; the related items attaching
+       *  makes (the `relate` dependency) stay. */
+      wasTranslated(sourceItemID) {
+        return lifecycle.tasks.some(
+          (task) =>
+            task.sourceItemID === sourceItemID && Core.OUTPUTS.every((output) => task.attached?.[output.file] != null),
+        );
       },
     };
+
+    /** A task's row; `results` ({mono, dual}: the two attachments) only once
+     *  both PDFs are attached, for "打开译文", "打开双语" and "在库中显示";
+     *  `ended` for the rows "清除已结束" removes. */
+    function rowOf(task, now) {
+      return {
+        ...Core.taskRow(task, now),
+        key: task.key,
+        canRetry: RETRYABLE_STATES.includes(task.state),
+        canCancel: CANCELLABLE_STATES.includes(task.state) || cancelsLocally(task),
+        confirmCancel: cancelConfirm?.key === task.key,
+        canContinue: task.state === "attach_failed",
+        ended: ENDED_STATES.includes(task.state),
+        results: task.state === "done" ? { mono: task.attached.mono, dual: task.attached.dual } : null,
+      };
+    }
 
     /** A source PDF with an unfinished task is not submitted again; the notice says so. */
     function skippedAsActive(sourceItemID, title) {
       const active = lifecycle.tasks.some((t) => t.sourceItemID === sourceItemID && ACTIVE_STATES.includes(t.state));
       if (active) {
-        lifecycle.notice(`${title}：已有未结束的翻译任务，本次提交已忽略`);
+        lifecycle.notice(activeNotice(title));
       }
       return active;
+    }
+
+    /** Drop the cancel asked about, if any: its timer goes with it. */
+    function clearCancelConfirm() {
+      if (cancelConfirm) {
+        clock.clearTimeout(cancelConfirm.timer);
+        cancelConfirm = null;
+      }
     }
 
     /** Whether "取消" ends the task here: attaching, but not while a PDF is
      *  being imported; or attach_failed. */
     function cancelsLocally(task) {
       return LOCALLY_CANCELLABLE_STATES.includes(task.state) && !task.importing;
+    }
+
+    /** Which kind of cancel a task in `state` has: "service" (a cancel request
+     *  goes out), "local" (the task ends here), or null (none). An ask holds
+     *  only while the kind stays the same. */
+    function cancelKind(state) {
+      if (CANCELLABLE_STATES.includes(state)) {
+        return "service";
+      }
+      return LOCALLY_CANCELLABLE_STATES.includes(state) ? "local" : null;
     }
 
     /** Set the task's next operation: 2 seconds from now, or 10 while the
@@ -355,12 +626,26 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    /** Send the task's source PDF to the service address currently set. */
+    /** Send the task's source PDF to the service: for a new task, the
+     *  address currently set; for a retry, the address the task recorded
+     *  (`serviceUrl`), because the profile it names (below) is the one of
+     *  that service, and another service may know it under the same ID with
+     *  other settings; a task saved without an address (by an older plugin)
+     *  takes the one currently set. When the original service cannot be
+     *  reached, the row says so (naming it) and the paper is submitted
+     *  again, as a new task, to the current one. A retry names the profile
+     *  its task recorded (`profile`), so it keeps that profile whatever is
+     *  current by then; a new task names none. The service's answer names
+     *  the profile the task recorded, which is kept from then on (also if
+     *  the task is cancelled before its first query); a refusal's reason is
+     *  what the row shows. */
     async function upload(task) {
       Object.assign(task, {
-        serviceUrl: serviceUrl(),
+        serviceUrl: task.serviceUrl || serviceUrl(),
         taskId: null,
         state: "submitting",
+        submittedAt: clock.now(),
+        endedAt: null,
         stage: null,
         progress: null,
         attempt: null,
@@ -378,22 +663,30 @@ var ZoteroTranslateLifecycle = (() => {
       });
       changed();
       try {
-        const body = Core.uploadRequest(await readSource(task), task.sourceFileName);
+        const body = Core.uploadRequest(await readSource(task), task.sourceFileName, task.profile?.id);
         const answer = await exchange(
           Core.serviceUrl(task.serviceUrl, "tasks"),
-          { method: "POST", headers: { "Content-Type": body.contentType }, body: body.body },
+          { method: "POST", headers: { "Content-Type": body.contentType }, body: body.body, bodyStatuses: [409, 422] },
           UPLOAD_LIMIT_MS,
-          readTaskId,
+          readSubmission,
         ).catch((e) => {
           throw e instanceof Unreachable ? new Error(`${e.message}（服务地址：${task.serviceUrl}）`) : e;
         });
         if (answer.status !== 201) {
-          throw new Error(`翻译服务拒绝了提交（HTTP ${answer.status}，服务地址：${task.serviceUrl}）`);
+          const reason = answer.body?.error;
+          throw new Error(
+            reason
+              ? `翻译服务拒绝了提交：${reason}`
+              : `翻译服务拒绝了提交（HTTP ${answer.status}，服务地址：${task.serviceUrl}）`,
+          );
         }
-        task.taskId = answer.body;
-        task.state = "queued";
+        task.taskId = answer.body.taskId;
+        if (answer.body.profile) {
+          task.profile = answer.body.profile; // recorded even if the task is cancelled before any query
+        }
+        setState(task, "queued");
       } catch (e) {
-        task.state = "failed";
+        setState(task, "failed");
         task.error = e.message;
       }
       changed();
@@ -426,8 +719,9 @@ var ZoteroTranslateLifecycle = (() => {
         error: status.error,
         keptSourceParagraphs: status.kept_source_paragraphs,
         keptSourceAlgorithms: status.kept_source_algorithms,
+        ...(status.profile ? { profile: status.profile } : {}),
       });
-      task.state = status.state === "succeeded" ? "attaching" : status.state;
+      setState(task, status.state === "succeeded" ? "attaching" : status.state);
       changed();
       if (task.state === "attaching") {
         await attachOutputs(task, operation);
@@ -470,7 +764,13 @@ var ZoteroTranslateLifecycle = (() => {
         return;
       }
       if ([200, 409, 404].includes(answer.status)) {
-        Object.assign(task, { state: "cancelled", disconnectedSince: null, cleanupError: null });
+        setState(task, "cancelled");
+        Object.assign(task, {
+          disconnectedSince: null,
+          cleanupError: null,
+          // The cancel answer is the task's own too: it names the profile a retry keeps.
+          ...(answer.body?.profile ? { profile: answer.body.profile } : {}),
+        });
       } else if (answer.status === 503) {
         Object.assign(task, { disconnectedSince: null, cleanupError: answer.body.cleanup_error });
       } else {
@@ -509,7 +809,12 @@ var ZoteroTranslateLifecycle = (() => {
         if (!isCurrent(task, operation)) {
           return;
         }
-        const identity = { taskId: task.taskId, output: output.file };
+        // A standalone PDF's output records the PDF, for the "already translated" check.
+        const identity = {
+          taskId: task.taskId,
+          output: output.file,
+          ...(task.itemID == null ? { sourceItemID: task.sourceItemID } : {}),
+        };
         let attachment = await attachments.find(target, identity);
         if (!isCurrent(task, operation)) {
           return;
@@ -554,6 +859,9 @@ var ZoteroTranslateLifecycle = (() => {
             [output.file]: { taskId: task.taskId, output: output.file, startedAt: clock.now() },
           };
           task.importing = true;
+          if (cancelConfirm?.key === task.key) {
+            clearCancelConfirm(); // no 取消 while importing: nor an ask for it
+          }
           changed(); // the intent is saved before the import
           try {
             attachment = await importAttachment(target, { path, title: output.title });
@@ -566,10 +874,28 @@ var ZoteroTranslateLifecycle = (() => {
         const { [output.file]: _done, ...otherIntents } = task.importIntents;
         task.importIntents = otherIntents; // the other PDF's intent stays until that one is handled
         changed();
+        if (task.itemID == null) {
+          // The output is recorded already: a link that cannot be saved does
+          // not hold the attaching back, and the next one tries it again.
+          await relateOutput(task, attachment);
+        }
       }
       if (isCurrent(task, operation)) {
-        task.state = "done";
+        setState(task, "done");
         task.disconnectedSince = null;
+      }
+    }
+
+    /** Link a standalone PDF and one of its outputs as related items (both
+     *  ways, by the `relate` dependency): a standalone PDF's outputs are
+     *  standalone attachments with no link back, and this is what says the
+     *  paper was translated after the task record is gone (a Zotero restart,
+     *  "清除已结束"). A failure is logged; attaching goes on. */
+    async function relateOutput(task, attachmentID) {
+      try {
+        await relate(task.sourceItemID, attachmentID);
+      } catch (e) {
+        logError(e);
       }
     }
 
@@ -620,12 +946,19 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
-    async function readTaskId(response) {
-      const { task_id: taskId } = await response.json();
-      if (typeof taskId !== "string") {
+    /** The answer to a submission: {taskId, profile} for 201 (`profile` is
+     *  null from a service that does not name it), {error} for a refusal
+     *  (409, 422), whose reason then shows on the row. */
+    async function readSubmission(response) {
+      const body = await response.json();
+      if (response.status !== 201) {
+        return { error: typeof body?.error === "string" ? body.error : null };
+      }
+      if (typeof body?.task_id !== "string") {
         throw new Error("没有任务号");
       }
-      return taskId;
+      const profile = body.profile && typeof body.profile.id === "string" ? body.profile : null;
+      return { taskId: body.task_id, profile };
     }
 
     /** The service's answer about a task; one without a state the plugin
@@ -659,14 +992,14 @@ var ZoteroTranslateLifecycle = (() => {
 
     /** The task has failed for good: only "重试" goes on. */
     function fail(task, reason) {
-      task.state = "failed";
+      setState(task, "failed");
       task.error = reason;
       task.disconnectedSince = null;
     }
 
     /** Attaching hit a local error: "继续挂回" or "取消" go on. */
     function attachFailed(task, reason) {
-      task.state = "attach_failed";
+      setState(task, "attach_failed");
       task.error = reason;
       task.disconnectedSince = null;
     }
@@ -693,6 +1026,7 @@ var ZoteroTranslateLifecycle = (() => {
         key: nextKey++,
       }));
       lifecycle.tasks.forEach((task, i) => {
+        announcedStates.set(task.key, task.state); // as saved: no notice for it
         if (task.state === "submitting") {
           fail(task, "提交未完成，请重试");
         } else if (task.state === "attaching" && !saved[i].attached) {
@@ -700,6 +1034,7 @@ var ZoteroTranslateLifecycle = (() => {
         }
       });
       saveTasks();
+      announceEnded();
     }
 
     /** Save the unfinished tasks, when they change. */
@@ -714,8 +1049,50 @@ var ZoteroTranslateLifecycle = (() => {
       }
     }
 
+    /** Announce each task whose state has changed into done, failed or
+     *  attach_failed since it was last looked at; called after saving.
+     *  Nothing after stop(): a request that comes back once the plugin is
+     *  shut down brings no notice. */
+    function announceEnded() {
+      if (!started) {
+        return;
+      }
+      const now = clock.now();
+      for (const task of lifecycle.tasks) {
+        const before = announcedStates.get(task.key);
+        announcedStates.set(task.key, task.state);
+        const outcome = ANNOUNCED_OUTCOMES[task.state];
+        if (outcome && before !== task.state) {
+          try {
+            announce({ outcome, row: rowOf(task, now) });
+          } catch (e) {
+            logError(e);
+          }
+        }
+      }
+    }
+
+    /** Every change of a task's state after its upload began goes through
+     *  here: into an ended state (done, failed, cancelled) it takes the end
+     *  time, which stops the row's elapsed time (core.js); out of one (only
+     *  attach_failed after done, when removing the temporary directory fails)
+     *  it clears it. The upload sets submittedAt and clears endedAt itself. */
+    function setState(task, state) {
+      if (cancelConfirm?.key === task.key && cancelKind(state) !== cancelKind(task.state)) {
+        clearCancelConfirm(); // no longer cancellable, or the other kind of cancel
+      }
+      const ended = ENDED_STATES.includes(state);
+      if (ended && !(ENDED_STATES.includes(task.state) && task.endedAt != null)) {
+        task.endedAt = clock.now();
+      } else if (!ended) {
+        task.endedAt = null;
+      }
+      task.state = state;
+    }
+
     function changed() {
       saveTasks();
+      announceEnded();
       for (const listener of lifecycle.listeners) {
         try {
           listener();
