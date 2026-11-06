@@ -144,19 +144,26 @@ curl -s http://127.0.0.1:8920/health
 - **经 Zotero（建议，走完整链路）：** 请用户选一篇带 PDF 的论文，右键“翻译为中文”。完成时右下角提示“翻译完成”，原条目下多出“中文译文”和“双语对照”两个附件；任务窗口里状态是“已挂回”。
 - **命令行：** 不经过 Zotero，只验证服务端的翻译。选项以 `.venv/bin/zotero-translate run --help` 为准：
 
+  每次用一个新的输出目录，免得读到上一次留下的报告：
+
   ```sh
-  .venv/bin/zotero-translate run <PDF> --output-dir ~/zotero-translate-smoke \
+  OUT=~/zotero-translate-smoke-$(date +%Y%m%d-%H%M%S)
+  .venv/bin/zotero-translate run <PDF> --output-dir "$OUT" \
     --env-file ~/.config/zotero-translate/model.env \
     --argon-env-file ~/.config/zotero-translate/argon.env
-  .venv/bin/python -c 'import json, sys; r = json.load(open(sys.argv[1])); print(r["state"], r["error"])' ~/zotero-translate-smoke/report.json
+  echo "exit=$?"
   ```
 
-  退出码 0 成功，1 论文任务失败，2 环境文件缺失或不全。
+  退出码 0 成功，1 论文任务失败，2 环境文件缺失或不全。退出码是 0 或 1 时，再读报告：
+
+  ```sh
+  .venv/bin/python -c 'import json, sys; r = json.load(open(sys.argv[1])); print(r["state"], r["error"])' "$OUT/report.json"
+  ```
 
 完成：
 
 - 经 Zotero：用户确认两个附件已挂回，并能打开；
-- 命令行：退出码 0，上面最后一条命令打印 `succeeded None`，`~/zotero-translate-smoke/` 里有 `mono.pdf` 和 `dual.pdf`。
+- 命令行：打印 `exit=0`，读报告的命令打印 `succeeded None`，`$OUT` 里有 `mono.pdf` 和 `dual.pdf`。
 
 失败时停下，把 `report.json` 的 `error` 和 `failed_batches`、任务窗口里的失败原因告诉用户，再对照下表。服务里的任务，报告在 `~/Library/Application Support/zotero-translate/tasks/<任务号>/report.json`，日志在同目录的 `task.log`。
 
