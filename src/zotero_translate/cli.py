@@ -3,7 +3,9 @@
 ``serve`` starts the translation service. ``run`` runs one paper task on a
 PDF directly, without Zotero or the service, and writes ``mono.pdf``,
 ``dual.pdf``, ``dossier.json``, ``terms.json``, ``report.json`` and
-``requests.jsonl`` (the request records) into the output directory; as it
+``requests.jsonl`` (the request records) into the output directory
+(``--user-profile-rules``, for development: with the prompt rules of a user
+model profile's task, M4 ticket 15); as it
 exits, ``report.json``'s ``requests`` is brought up to date with
 ``requests.jsonl``. Both share the
 model response cache in the data directory.
@@ -54,6 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("pdf", type=Path)
     run.add_argument("--output-dir", type=Path, required=True)
     _add_model_options(run)
+    run.add_argument(
+        "--user-profile-rules",
+        action="store_true",
+        help="for development: the prompt rules a user model profile's task has "
+        "(M4 ticket 15); the built-in Gemini has none",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -118,6 +126,7 @@ def _run(args) -> int:
             args.concurrency,
             s.model_cache_dir(args.data_dir),
             hedging=not args.no_hedging,
+            user_profile_rules=args.user_profile_rules,
         )
     except s.SettingsError as e:
         print(e, file=sys.stderr)

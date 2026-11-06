@@ -9,7 +9,8 @@ It records the model profile of a service task, with the model each role
 used (``profile``; ADR 0005), the time spent in each stage with the requests sent and the
 timeouts in it by model name, the pipeline model clients' counters (in
 total: HTTP requests sent, cache hits, retries, timeouts; the requests
-forwarded from flash to argon with their pages; for each endpoint: model,
+forwarded from flash to argon with their pages; whether the prompts had
+the rules for user profiles, ``user_profile_rules``; for each endpoint: model,
 concurrency limit, i.e. the size of its endpoint's budget, requests,
 timeouts and the maximum number of its requests in flight; when flash and
 argon share one endpoint, ``shared_budget`` gives the budget's size, the
@@ -70,6 +71,8 @@ class TaskReport:
         # their pages (closure ticket 15, ``zotero_translate.lost_text``); None
         # until the mono PDF is written.
         self.lost_text: list[dict] | None = None
+        # The prompt rules for user profiles only (M4 ticket 15).
+        self.user_profile_rules = False
 
     def enter_stage(self, stage: str) -> None:
         if self.models.request_log is not None:
@@ -136,6 +139,9 @@ class TaskReport:
                     "after_seconds": self.models.flash.hedge_after_seconds,
                     "copies": self.models.flash.hedge_count,
                 },
+                # The prompt rules for user profiles only (M4 ticket 15,
+                # ``zotero_translate.profile_rules``): False for Gemini.
+                "user_profile_rules": self.user_profile_rules,
                 "endpoints": {
                     name: {
                         "model": c.model,

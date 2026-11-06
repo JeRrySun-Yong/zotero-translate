@@ -58,7 +58,7 @@ PROMPT_TEMPLATE = Template(
 - Numbers (decimals, percentages, values with units), URLs, code identifiers, model names and dataset names: keep them exactly as in the input.
 - JSON keys or structure.
 
-$glossary_usage_rules_block$first_mention_rules_block$key_concept_heading_rules_block
+$glossary_usage_rules_block$first_mention_rules_block$key_concept_heading_rules_block$batch_extra_rules_block
 ## Output Format
 Return a JSON array of the same length.  
 For each item:
@@ -1220,6 +1220,12 @@ class ILTranslatorLLMOnly:
             key_concept_heading_rules_block=KEY_CONCEPT_HEADING_TRANSLATION_RULES
             if has_key_concept_headings
             else "",
+            # A user model profile's rules (M4 ticket 15); none for the
+            # built-in profile, whose prompt stays as it was.
+            batch_extra_rules_block=getattr(
+                self.translation_config, "batch_extra_rules", None
+            )
+            or "",
             contextual_hints_block=contextual_hints_block,
             json_input_str=json_input_str,
             glossary_tables_block=glossary_tables_block,

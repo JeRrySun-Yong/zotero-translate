@@ -17,6 +17,10 @@ A blank review text fails the checks (译文为空) and gives way to the draft;
 a blank or non-text draft is not sent to the review at all: the engine
 redoes it alone with its simple one-paragraph prompt (M4 ticket 15).
 
+A user model profile's review prompt has one more rules block after the
+instructions (``zotero_translate.profile_rules``); the built-in profile's is
+as it was.
+
 A review answer from the response cache is judged the same way. A review
 request that gets no answer at all (network errors, HTTP errors, timeouts)
 fails like a translation request: it is raised to the engine as
@@ -109,8 +113,12 @@ class BatchReviewer:
     ``glossary_entries`` are the batch's ``(source term, target term)`` pairs.
     """
 
-    def __init__(self, client: ModelClient, dossier: dict, kept: KeptSource):
+    def __init__(
+        self, client: ModelClient, dossier: dict, kept: KeptSource, extra_rules: str | None = None
+    ):
         self.client = client
+        # A user model profile's rules, after the instructions (M4 ticket 15).
+        self.extra_rules = extra_rules
         self.condensed_dossier = condense(dossier)
         self.kept = kept
         self._lock = threading.Lock()
@@ -183,6 +191,8 @@ class BatchReviewer:
         parts = [INSTRUCTIONS]
         if any(KEY_CONCEPT_HEADING_FIELD in item for item in items):
             parts.append(KEY_CONCEPT_HEADING_REVIEW_RULES)
+        if self.extra_rules:
+            parts.append(self.extra_rules)
         parts.append("## Paper dossier (condensed)\n" + self.condensed_dossier)
         if glossary_entries:
             rows = "\n".join(f"| {s} | {t} |" for s, t in sorted(glossary_entries))
