@@ -1187,8 +1187,9 @@ class TaskQueue:
             *model_options,
             "--profile-id",
             profile["id"],
-            "--profile-name",
-            profile["name"],
+            # One argument with its value: apart from its option, a name that
+            # starts with "-" is taken for an option of its own.
+            f"--profile-name={profile['name']}",
             "--cache-dir",
             str(self.cache_dir),
         ]

@@ -22,7 +22,9 @@ otherwise with ``ZT_PROFILE_NAME`` (M5 ticket 02; ``load_builtin_profile_name``)
 Only the display name changes, never the profile's id ``gemini`` or a
 model request; a name a user profile's name could not be (over 60
 characters, a control character) makes ``serve`` and ``run`` exit at
-startup, and a worker fail with a settings error. A user profile (ADR 0005,
+startup. Only those two read it: a service shows the name it read when it
+started (a worker gets it as ``--profile-name``), so a later edit of the
+file fails no task and no listing. A user profile (ADR 0005,
 ``zotero_translate.profiles``) is one such file for both roles, in
 ``DEFAULT_PROFILES_DIR`` (``load_profile_settings``).
 
@@ -97,6 +99,7 @@ DEFAULT_PROFILES_DIR = Path(
 )
 
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+_LINE_ENDS = re.compile(r"\r\n|\n|\r")  # where ``load_builtin_profile_name`` cuts the file into lines
 
 
 class SettingsError(Exception):
@@ -134,11 +137,15 @@ def read_env_file(path: Path) -> dict[str, str]:
             continue
         match = _ENV_LINE.match(line)
         if match:
-            value = match.group(2)
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            values[match.group(1)] = value
+            values[match.group(1)] = _unquote(match.group(2))
     return values
+
+
+def _unquote(value: str) -> str:
+    """``value`` without the matching quotes around it, if it has them."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
 
 
 @dataclass(frozen=True)
@@ -202,7 +209,6 @@ def load_model_settings(
     timeout; tests use it to make timeouts happen in a few seconds.
     """
     values = _read_endpoint_file(env_file, "找不到管线模型的环境文件")
-    builtin_profile_name(values, env_file)  # a bad name is a settings error, not a surprise later
     return _endpoint_settings(env_file, values, DEFAULT_MODEL, concurrency, cache_dir)
 
 
@@ -211,17 +217,37 @@ def load_builtin_profile_name(env_file: Path) -> str:
 
     ``ZT_PROFILE_NAME`` with its spaces at both ends removed; "Gemini" when
     the file has no such line or its value is empty. Raise ``SettingsError``
-    when the file is missing or incomplete (as ``load_model_settings`` does)
-    or the name has more than 60 characters or a control character, the
-    limits of a user profile's name.
+    when the file is missing, unreadable or incomplete (as
+    ``load_model_settings`` does), when the name has more than 60 characters
+    or a control character, the limits of a user profile's name, or when its
+    quote is not closed in its line.
+
+    Only ``serve`` and ``run`` call it, once at startup: loading the model
+    settings (a worker, the listing) does not look at the name.
+
+    The name's line is found here, not through ``read_env_file``: that cuts
+    the file with ``str.splitlines``, which also ends a line at a vertical
+    tab, form feed, NEL and the like, and would hand over the name cut short
+    where the check for control characters never sees them. A line ends here
+    at a line feed or carriage return only.
     """
-    values = _read_endpoint_file(env_file, "找不到管线模型的环境文件")
-    return builtin_profile_name(values, env_file)
-
-
-def builtin_profile_name(values: dict[str, str], env_file: Path) -> str:
-    """``load_builtin_profile_name`` for the values of the file already read."""
-    name = values.get(PROFILE_NAME_SETTING, "").strip()
+    _read_endpoint_file(env_file, "找不到管线模型的环境文件")
+    try:
+        text = Path(env_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise SettingsError(f"读不了环境文件 {env_file}：{type(e).__name__}") from e
+    value = ""
+    for line in _LINE_ENDS.split(text):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ENV_LINE.match(line)
+        if match and match.group(1) == PROFILE_NAME_SETTING:
+            value = match.group(2)  # the last line wins, as in read_env_file
+    if value[:1] in ("'", '"') and not (len(value) >= 2 and value[-1] == value[0]):
+        raise SettingsError(
+            f"环境文件 {env_file} 中的 {PROFILE_NAME_SETTING} 的引号没有配对（值要写在一行里）"
+        )
+    name = _unquote(value).strip()
     if not name:
         return DEFAULT_BUILTIN_NAME
     if len(name) > MAX_PROFILE_NAME_LENGTH:

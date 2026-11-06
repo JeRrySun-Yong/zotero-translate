@@ -12,6 +12,7 @@ this file that need ``heavy.sh``.
 """
 
 import json
+import os
 import subprocess
 import sys
 
@@ -27,6 +28,7 @@ from tests.conftest import serve_command
 from tests.conftest import stop_service
 from tests.conftest import write_env_file
 from tests.fake_model import FakeModel
+from tests.test_model_profile_tasks import _apply_new_profile
 from tests.test_model_profiles import OTHER_KEY
 from tests.test_model_profiles import _create
 from tests.test_model_profiles import _profiles
@@ -218,8 +220,16 @@ def test_a_task_from_before_profiles_has_the_builtin_profile_of_now(tmp_path):
 
 @pytest.mark.parametrize(
     "name, reason",
-    [("n" * 61, "60"), ("two\tparts", "控制字符"), ("zero\u200bwidth", "控制字符")],
-    ids=["too-long", "tab", "zero-width-space"],
+    [
+        ("n" * 61, "60"),
+        ("two\tparts", "控制字符"),
+        ("zero\u200bwidth", "控制字符"),
+        # Characters ``str.splitlines`` takes for line ends: the file parser used to cut the value there.
+        ("vertical\x0btab", "控制字符"),
+        ("form\x0cfeed", "控制字符"),
+        ("next\x85line", "控制字符"),
+    ],
+    ids=["too-long", "tab", "zero-width-space", "vertical-tab", "form-feed", "next-line"],
 )
 def test_serve_and_run_refuse_a_bad_name_at_startup(tmp_path, name, reason):
     with FakeModel() as model:
@@ -272,15 +282,46 @@ def test_the_name_has_the_limits_of_a_user_profiles_name(tmp_path):
         except profiles.ProfileError:
             return False
 
-    samples = [LONGEST, LONGEST + "n", "名" * 60, "名" * 61, "a\tb", "a\u200bb", "a b", "GPT-5 Mini", "a  b"]
+    samples = [
+        LONGEST, LONGEST + "n", "名" * 60, "名" * 61, "a\tb", "a\u200bb", "a\xa0b", "GPT-5 Mini", "a  b",
+        # Inside the name: what ``str.splitlines`` takes for line ends (and U+2028, U+2029, which are not
+        # control characters, so both accept them) must not shorten the name before it is checked.
+        "a\x0bb", "a\x0cb", "a\x1cb", "a\x1db", "a\x1eb", "a\x85b", "a\u2028b", "a\u2029b",
+        # At the ends they are spaces: both strip them.
+        "\x0bab", "ab\x85", "\x0c ab \u2028",
+    ]
     for name in samples:
         assert builtin_accepts(name) == user_profile_accepts(name), repr(name)
     assert builtin_accepts(LONGEST) and not builtin_accepts(LONGEST + "n")
 
 
-def test_a_missing_or_unreadable_file_has_no_name_to_read(tmp_path):
-    with pytest.raises(SettingsError, match="找不到"):
-        zt_settings.load_builtin_profile_name(tmp_path / "missing.env")
+@pytest.mark.parametrize("case", ["missing", "not-utf8", "no-permission"])
+def test_a_missing_or_unreadable_file_has_no_name_to_read(tmp_path, case):
+    path = tmp_path / "model.env"
+    if case == "not-utf8":
+        path.write_bytes(b"OPENAI_BASE_URL=http://127.0.0.1:9/v1\nZT_PROFILE_NAME=\xff\xfe\n")
+    elif case == "no-permission":
+        path.write_text("OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\n", encoding="utf-8")
+        path.chmod(0o000)
+        if os.access(path, os.R_OK):
+            pytest.skip("the file is readable anyway (running as root)")
+    try:
+        with pytest.raises(SettingsError, match="找不到" if case == "missing" else "读不了"):
+            zt_settings.load_builtin_profile_name(path)
+    finally:
+        if path.exists():
+            path.chmod(0o600)
+
+
+def test_a_name_whose_quote_is_not_closed_is_refused_not_cut(tmp_path):
+    path = tmp_path / "model.env"
+    # A quoted value that goes on in the next line is not a name this reader can take whole.
+    path.write_text(
+        'OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\nZT_PROFILE_NAME="two\nlines"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(SettingsError, match="引号"):
+        zt_settings.load_builtin_profile_name(path)
 
 
 # -- the name stays out of the model requests -----------------------------------
@@ -366,3 +407,75 @@ def test_a_task_after_a_rename_reports_the_name_and_hits_the_cache_of_before(tmp
     assert report_2["profile"]["models"] == report_1["profile"]["models"]
     assert records and {r["result"] for r in records} == {"cache_hit"}
     assert report_2["model"]["user_profile_rules"] is False
+
+
+# -- the name is shown, not used: it can neither fail a task nor break a worker ---------
+
+
+def _settled(service, task_id: str, timeout: float = 120) -> dict:
+    """The task once an attempt has ended: done, or failed and waiting for its rerun."""
+    return service.wait_for(
+        task_id, lambda s: s["state"] in ("succeeded", "failed", "cancelled", "waiting_rerun"), timeout
+    )
+
+
+def test_a_name_changed_to_a_bad_one_while_the_service_runs_changes_nothing(tmp_path):
+    """The service reads the name when it starts. A bad name in the file
+    afterwards is no concern of its workers or its listing: the shown name
+    stays, and the task succeeds under the name it recorded."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model)
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            original = env_file.read_text("utf-8")
+            assert NAME_LINE in original
+            listings = []
+            for bad in ("n" * 61, "a\x0bb", "a\tb"):
+                env_file.write_text(original.replace(NAME_LINE, f'ZT_PROFILE_NAME="{bad}"\n'), encoding="utf-8")
+                listings.append(_builtin(service))
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+            current = _profiles(service)["current"]
+        finally:
+            stop_service(service)
+
+    assert [(b["name"], b.get("error")) for b in listings] == [(NAME, None)] * 3
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": "gemini", "name": NAME}
+    assert report["profile"]["name"] == NAME and report["profile"]["id"] == "gemini"
+    assert current == "gemini"
+
+
+def test_a_builtin_name_that_starts_with_a_dash_runs_a_task(tmp_path):
+    """The worker gets the name as ``--profile-name=<name>``: as a separate
+    argument, a name like ``-custom`` is taken for an option of its own."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, "ZT_PROFILE_NAME=-custom\n")
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": "gemini", "name": "-custom"}
+    assert report["profile"]["name"] == "-custom"
+
+
+def test_a_user_profile_name_that_starts_with_a_dash_runs_a_task(tmp_path):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path)
+        try:
+            profile = _apply_new_profile(service, model, name="-custom")
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": profile["id"], "name": "-custom"}
+    assert report["profile"]["name"] == "-custom" and report["profile"]["id"] == profile["id"]

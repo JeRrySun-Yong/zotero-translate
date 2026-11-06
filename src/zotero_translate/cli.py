@@ -157,6 +157,7 @@ def _run(args) -> int:
                 s.model_cache_dir(args.data_dir),
                 hedging=not args.no_hedging,
             )
+            s.load_builtin_profile_name(args.env_file)  # a bad name stops the run here (M5 ticket 02)
     except s.SettingsError as e:
         print(e, file=sys.stderr)
         return 2

@@ -73,62 +73,26 @@ FORBIDDEN = re.compile(
     re.IGNORECASE,
 )
 
-# The one place the package may name Gemini: the settings page's example
-# profile name says DeepSeek Fast's quality is below Gemini's (user decision
-# 2026-11-05, M4 tickets 06 and 14). It is a note for the user, not a model
-# name or a translation parameter.
-QUALITY_NOTE = "（质量低于 Gemini）"
-
-
-# Where it is let through: the placeholder of the name input, bound to the
-# input by its id, in the settings page, once. Anywhere else (another file,
-# element or attribute, or a second copy) the scan still sees it.
-QUALITY_NOTE_FILE = "content/preferences.xhtml"
-QUALITY_NOTE_PLACE = f'id="zotero-translate-name" type="text" placeholder="例如 DeepSeek Fast{QUALITY_NOTE}"'
-
-
-def scannable(name: str, text: str) -> str:
-    """The text of package file ``name`` that the forbidden-word scan reads:
-    the file as it is, but for the quality note in its one allowed place."""
-    if name != QUALITY_NOTE_FILE:
-        return text
-    return text.replace(QUALITY_NOTE_PLACE, QUALITY_NOTE_PLACE.replace(QUALITY_NOTE, ""), 1)
-
-
 def test_package_holds_no_credentials_or_translation_parameters(xpi):
     profile_fields = re.compile(r"api[_-]?key|concurrency", re.IGNORECASE)
     assert SETTINGS_PAGE <= set(xpi.namelist())
     for name in xpi.namelist():
         text = xpi.read(name).decode("utf-8", "replace")
-        assert not FORBIDDEN.search(scannable(name, text)), name
+        assert not FORBIDDEN.search(text), name
         if name not in SETTINGS_PAGE:
             assert not profile_fields.search(text), name
 
 
-NAME_INPUT = '<html:input id="zotero-translate-name" type="text" placeholder="例如 DeepSeek Fast（质量低于 Gemini）"/>'
-
-
-@pytest.mark.parametrize(
-    ("name", "text"),
-    [
-        ("content/core.js", 'const label = "DeepSeek Fast（质量低于 Gemini）";'),
-        ("content/preferences.js", 'input.placeholder = "例如 DeepSeek Fast（质量低于 Gemini）";'),
-        ("content/preferences.xhtml",
-         '<html:input id="zotero-translate-model" type="text" placeholder="例如 DeepSeek Fast（质量低于 Gemini）"/>'),
-        ("content/preferences.xhtml",
-         '<html:input id="zotero-translate-name" type="text" title="（质量低于 Gemini）" placeholder="例如 DeepSeek Fast"/>'),
-        ("content/preferences.xhtml", "<html:p class=\"zt-note\">DeepSeek Fast（质量低于 Gemini）</html:p>"),
-        ("content/preferences.xhtml", NAME_INPUT + "\n" + NAME_INPUT),  # a second copy is not the one input
-    ],
-    ids=["other-js-file", "settings-script", "other-input", "other-attribute", "text-content", "second-copy"],
-)
-def test_quality_note_is_let_through_nowhere_else(name, text):
-    assert FORBIDDEN.search(scannable(name, text))
-
-
-def test_quality_note_is_let_through_in_the_name_inputs_placeholder():
-    page = f"<html:div>\n  {NAME_INPUT}\n</html:div>"
-    assert not FORBIDDEN.search(scannable("content/preferences.xhtml", page))
+def test_the_package_names_gemini_nowhere(xpi):
+    # The scan above reads every file: the settings page's example for a
+    # profile's name used to be let through it (it said DeepSeek Fast's
+    # quality is below Gemini's); since the user's decision of 2026-11-06
+    # the name field has no example, and nothing in the package says so.
+    assert FORBIDDEN.search("例如 DeepSeek Fast（质量低于 Gemini）")
+    for name in xpi.namelist():
+        text = xpi.read(name).decode("utf-8", "replace")
+        assert "质量低于" not in text, name
+        assert "gemini" not in text.lower(), name
 
 
 def test_package_leaves_out_tests_and_dev_tools(xpi):
@@ -150,11 +114,20 @@ def test_package_has_no_test_switch(xpi):
 
 def test_settings_page_suggests_deepseek_fast_only(xpi):
     # User decision 2026-11-05 (M4 tickets 06 and 14): of Command Code's
-    # DeepSeek models only DeepSeek Fast is offered, with a name that says its
-    # quality is below Gemini's; the form's examples name it, and no longer
-    # the plain flash model.
+    # DeepSeek models only DeepSeek Fast is offered; the form's examples name
+    # it, and no longer the plain flash model. User decision 2026-11-06 (M5
+    # ticket 02): the name field gives no example at all.
     page = xpi.read("content/preferences.xhtml").decode("utf-8")
     placeholders = dict(re.findall(r'<html:input id="([^"]+)"[^>]*\bplaceholder="([^"]*)"', page))
     assert placeholders["zotero-translate-model"] == "例如 deepseek/deepseek-v4.1-flash-fast"
-    assert placeholders["zotero-translate-name"] == f"例如 DeepSeek Fast{QUALITY_NOTE}"
     assert not re.search(r"deepseek-v4\.1-flash(?!-fast)", page)
+
+
+def test_the_name_field_has_no_placeholder(xpi):
+    page = xpi.read("content/preferences.xhtml").decode("utf-8")
+    [name_input] = re.findall(r"<html:input[^>]*\bid=\"zotero-translate-name\"[^>]*>", page)
+    assert "placeholder" not in name_input
+    # No script puts a hint into it either.
+    for name in ("content/preferences.js", "content/profiles.js"):
+        script = xpi.read(name).decode("utf-8")
+        assert not re.search(r"FIELDS\.name\)?\.placeholder|zotero-translate-name[^\n]*placeholder", script), name
