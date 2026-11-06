@@ -25,6 +25,7 @@ these tests check. A 401 still fails the task at once.
 """
 
 import collections
+import dataclasses
 import json
 import logging
 import re
@@ -40,6 +41,8 @@ from zotero_translate.model_client import REDACTED
 from zotero_translate.model_client import ModelCallError
 from zotero_translate.model_client import ModelClient
 from zotero_translate.paper_task import DOSSIER_STAGE
+from zotero_translate.review import BatchReviewer
+from zotero_translate.review import KeptSource
 from zotero_translate.settings import ModelSettings
 
 from tests.conftest import EXCERPT
@@ -49,6 +52,7 @@ from tests.conftest import FAKE_MODEL_NAME
 from tests.conftest import launch_service
 from tests.conftest import stop_service
 from tests.conftest import write_env_file
+from tests.fake_model import FAKE_DOSSIER
 from tests.fake_model import REJECTION_BODY
 from tests.fake_model import REJECTION_MESSAGE
 from tests.fake_model import FakeModel
@@ -433,3 +437,76 @@ def test_a_term_list_echoing_the_key_leaves_it_out_of_the_log_the_reports_and_th
         for key in (FAKE_API_KEY, FAKE_ARGON_API_KEY):
             assert key.encode() not in service.http.get(path).content, path
     assert REDACTED in json.dumps(service.report(task_id), ensure_ascii=False)
+
+
+# -- M4 ticket 16 round 2: the data a rejection keeps from the answer ----------
+
+
+@dataclasses.dataclass
+class _Held:
+    text: str
+    more: list
+
+
+class _RejectionWithParts(ValueError):
+    """A check's rejection that carries parts of the answer, as terms.py and review.py's do."""
+
+    def __init__(self, reason: str, parts: dict, held: _Held, *, cause: Exception):
+        super().__init__(reason)
+        self.parts = parts
+        self.held = held
+        self.pair = ("fine", f"pair {parts['text']}")
+        self.__cause__ = cause
+
+
+def test_the_parts_of_an_answer_a_rejection_keeps_are_scrubbed_of_the_key_too(tmp_path):
+    key = FAKE_API_KEY
+    with FakeModel() as fake:
+        fake.respond("other", lambda body: f"meta-harness {key}")
+        client = _client(fake, tmp_path)
+
+        def validate(content: str) -> None:
+            raise _RejectionWithParts(
+                "还有条目不合格",
+                {"text": content, 1: [f"nested {content}", {"deep": content}], "key": "plain"},
+                _Held(content, [content, (content,)]),
+                cause=KeyError(f"原文 {content}"),
+            )
+
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                client.complete([{"role": "user", "content": "hi"}], validate=validate)
+        finally:
+            client.close()
+
+    assert len(failure.value.rejections) == 2
+    for rejection in failure.value.rejections:
+        assert isinstance(rejection, _RejectionWithParts)
+        kept = repr((rejection.args, rejection.parts, rejection.held, rejection.pair, str(rejection.__cause__)))
+        assert key not in kept, kept
+        assert rejection.parts["text"] == f"meta-harness {REDACTED}"
+        assert rejection.parts[1] == [f"nested meta-harness {REDACTED}", {"deep": f"meta-harness {REDACTED}"}]
+        assert rejection.parts["key"] == "plain"
+        assert rejection.held == _Held(f"meta-harness {REDACTED}", [f"meta-harness {REDACTED}", (f"meta-harness {REDACTED}",)])
+        assert rejection.pair == ("fine", f"pair meta-harness {REDACTED}")
+
+
+def test_a_review_answer_echoing_the_key_in_a_kept_verdict_leaves_it_out_of_the_result_and_the_report(tmp_path):
+    items = [
+        {"id": 0, "source": "It has 3 parts.", "draft": "它有几个部分。", "page": 2},
+        {"id": 1, "source": "It runs 7 steps.", "draft": "它运行几步。", "page": 2},
+    ]
+    # Item 0 passes the checks with the key in its text; item 1 fails them, so the answer is rejected.
+    answer = [{"id": 0, "output": f"它分 3 个部分，{FAKE_API_KEY}"}, {"id": 1, "output": "它运行几步。"}]
+    with FakeModel() as fake:
+        fake.respond("review", lambda body: json.dumps(answer, ensure_ascii=False))
+        client = _client(fake, tmp_path)
+        try:
+            reviewer = BatchReviewer(client, FAKE_DOSSIER, KeptSource())
+            result = reviewer(items, [])
+        finally:
+            client.close()
+
+    assert result[1] is None
+    assert result[0] == f"它分 3 个部分，{REDACTED}"
+    assert FAKE_API_KEY not in json.dumps([result, reviewer.report(), reviewer.kept.paragraphs], ensure_ascii=False)

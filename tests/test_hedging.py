@@ -464,6 +464,34 @@ def test_a_hedged_request_resent_after_a_rejection_with_the_key_echoed_logs_it_r
     assert argon.requests == []
 
 
+def test_the_parts_of_a_hedged_answer_a_rejection_keeps_are_scrubbed_of_both_keys(tmp_path):
+    class Rejection(ValueError):
+        def __init__(self, parts: dict):
+            super().__init__("还有条目不合格")
+            self.parts = parts
+
+    with FakeModel() as flash, FakeModel() as argon:
+        flash.respond("other", _later(HEDGE * 2, f"flash {FAKE_API_KEY}"))
+        argon.respond("other", lambda body: f"argon {FAKE_ARGON_API_KEY}")
+        models, _ = _models(
+            flash, argon, tmp_path, flash_changes={"max_retries": 1}, argon_changes={"max_retries": 1}
+        )
+
+        def validate(content: str) -> None:
+            raise Rejection({"answer": [content]})
+
+        try:
+            with pytest.raises(ModelCallError) as failure:
+                models.flash.complete(MESSAGES, validate=validate, kind="review")
+        finally:
+            models.close()
+
+    assert [r.parts for r in failure.value.rejections] == [
+        {"answer": [f"flash {REDACTED}"]},
+        {"answer": [f"argon {REDACTED}"]},
+    ]
+
+
 # Spec section 8: when every candidate fails, the review falls back as it
 # would without hedging (on the verdicts of the last parsed answer by send).
 REVIEW_ITEMS = [  # both drafts fail the number check
