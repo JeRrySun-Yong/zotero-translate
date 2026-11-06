@@ -129,10 +129,9 @@ def test_package_holds_no_credentials_or_translation_parameters(xpi):
             assert not profile_fields.search(text), name
 
 
-def test_the_package_no_longer_says_a_model_is_below_gemini(xpi):
-    # The settings page's example for a profile's name used to say DeepSeek
-    # Fast's quality is below Gemini's; since the user's decision of
-    # 2026-11-06 the name field has no example, and that sentence is nowhere.
+def test_the_package_does_not_rank_one_model_below_another(xpi):
+    # The name field gives no example, and no text in the package ranks a
+    # model's quality below Gemini's.
     sentence = re.compile(r"质量低于\s*Gemini", re.IGNORECASE)
     for name in xpi.namelist():
         assert not sentence.search(xpi.read(name).decode("utf-8", "replace")), name
@@ -179,10 +178,8 @@ def test_test_switch_pattern_matches_the_switch_file_itself():
 
 
 def test_settings_page_suggests_deepseek_fast_only(xpi):
-    # User decision 2026-11-05 (M4 tickets 06 and 14): of Command Code's
-    # DeepSeek models only DeepSeek Fast is offered; the form's examples name
-    # it, and no longer the plain flash model. User decision 2026-11-06 (M5
-    # ticket 02): the name field gives no example at all.
+    # The model field's example is DeepSeek Fast's model ID, not the plain
+    # flash model; the name field gives no example at all.
     page = xpi.read("content/preferences.xhtml").decode("utf-8")
     placeholders = dict(re.findall(r'<html:input id="([^"]+)"[^>]*\bplaceholder="([^"]*)"', page))
     assert placeholders["zotero-translate-model"] == "例如 deepseek/deepseek-v4.1-flash-fast"

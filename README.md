@@ -121,7 +121,7 @@ ZT_PROFILE_NAME=我的模型
 | `OPENAI_BASE_URL` | 是 | 端点地址，程序在它后面加 `/chat/completions`。例如 `https://api.openai.com/v1` |
 | `OPENAI_API_KEY` | 是 | 密钥 |
 | `AI_DEFAULT_MODEL` | 建议总是写 | 模型 ID，填端点提供方给出的那个。不写时用程序里的默认值（`model.env` 是 `gemini-3.8-flash-high`，`argon.env` 是 `gemini-4-argon-high`），只有端点提供这个 ID 时才能用 |
-| `ZT_PROFILE_NAME` | 否 | 只写在 `model.env` 里。这份“内置配置”在右键菜单、设置页、任务窗口里显示的名字，最长 60 个字符；不写就叫 Gemini |
+| `ZT_PROFILE_NAME` | 否 | 只写在 `model.env` 里。这份“内置配置”在右键菜单、设置页、任务窗口里显示的名字，最长 60 个字符；不写就叫 Gemini。翻译服务只在启动时读它，改了以后要重启服务；已经提交的任务保留提交时的名字 |
 | `ZT_REQUEST_TIMEOUT_SECONDS` | 否 | 单个请求的超时秒数，默认 480。回答特别慢的模型可以写 900 |
 | `ZT_STREAM` | 否 | 写 `1` 则用流式请求。思考很久的模型，有的端点会在请求等了约两分钟还没有回答时断开连接（HTTP 524），这时打开 |
 | `ZT_CONCURRENCY` | 否 | 只写在 `argon.env` 里：副模型同时发出的请求上限，默认 16 |
