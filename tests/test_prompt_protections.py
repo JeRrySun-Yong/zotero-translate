@@ -142,6 +142,23 @@ def test_a_user_profile_appends_the_literal_values_rule_to_the_review_prompt_onl
     assert user.replace(block + "\n\n", "", 1) == builtin
 
 
+SCOPE_RULES = (
+    "Never move, copy or repeat text from one item into another",
+    "around the same text as in the draft",
+)
+
+
+def test_a_user_profile_appends_the_scope_of_the_revision_to_the_review_prompt_only():
+    builtin = sample_prompts.review_prompt()
+    block = profile_rules.REVIEW_RULES
+    user = sample_prompts.review_prompt(extra_rules=block)
+    for rule in SCOPE_RULES:
+        assert rule in block
+        assert rule not in builtin
+        assert rule not in profile_rules.BATCH_RULES
+    assert user.replace(block + "\n\n", "", 1) == builtin
+
+
 # Values of the three acceptance papers: a rule's examples must not come from
 # them (they would bias the papers the rules are judged on).
 ACCEPTANCE_PAPER_VALUES = ("pass, fail", "uncertain", "scored", "evaluation_status")

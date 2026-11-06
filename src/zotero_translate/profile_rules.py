@@ -12,7 +12,9 @@ user profile's prompt is Gemini's plus these blocks, nothing else.
   (``BatchReviewer``'s ``extra_rules``).
 
 They fix what the DeepSeek diagnosis found (ticket 14): a value of a set
-or a JSON string translated. The examples are generic; an example taken
+or a JSON string translated (both prompts); a review that moved text
+between paragraphs or moved a bold span out of its style tag (the review
+prompt's scope of the revision). The examples are generic; an example taken
 from the acceptance papers would bias the papers the rules are judged on.
 
 ``PipelineSettings.user_profile_rules`` turns them on: every user profile's
@@ -29,4 +31,15 @@ LITERAL_VALUES_RULE = (
 
 BATCH_RULES = "## Literal Values\n" + LITERAL_VALUES_RULE.replace("WHERE", "input") + "\n\n"
 
-REVIEW_RULES = "## Literal values\n" + LITERAL_VALUES_RULE.replace("WHERE", "source")
+# A review that moved text between items, or a bold span out of its tag
+# (the DeepSeek diagnosis, ticket 14).
+SCOPE_OF_THE_REVISION_RULES = """## Scope of the revision
+- Revise each input item on its own: its output rewrites that item's draft only. Never move, copy or repeat text from one item into another; never merge two items and never split one item.
+- Keep every style tag (e.g. <style id='1'>…</style>) around the same text as in the draft: never move a tag to another position, and never move text into or out of a tag."""
+
+REVIEW_RULES = (
+    "## Literal values\n"
+    + LITERAL_VALUES_RULE.replace("WHERE", "source")
+    + "\n\n"
+    + SCOPE_OF_THE_REVISION_RULES
+)
