@@ -68,15 +68,23 @@ def test_the_only_zotero_setting_is_the_service_address(xpi):
 SETTINGS_PAGE = {"content/profiles.js", "content/preferences.js", "content/preferences.xhtml"}
 
 
+# The one place the package may name Gemini: the settings page's example
+# profile name says DeepSeek Fast's quality is below Gemini's (user decision
+# 2026-11-05, M4 tickets 06 and 14). It is a note for the user, not a model
+# name or a translation parameter; only this exact phrase is let through.
+QUALITY_NOTE = "（质量低于 Gemini）"
+
+
 def test_package_holds_no_credentials_or_translation_parameters(xpi):
     forbidden = re.compile(
         r"OPENAI_|AI_DEFAULT_MODEL|ZT_CONCURRENCY|Bearer|sk-[A-Za-z0-9]|gemini|temperature|reasoning",
         re.IGNORECASE,
     )
+    assert forbidden.search(QUALITY_NOTE.replace("（质量低于 ", "")), "Gemini outside the note must still fail"
     profile_fields = re.compile(r"api[_-]?key|concurrency", re.IGNORECASE)
     assert SETTINGS_PAGE <= set(xpi.namelist())
     for name in xpi.namelist():
-        text = xpi.read(name).decode("utf-8", "replace")
+        text = xpi.read(name).decode("utf-8", "replace").replace(QUALITY_NOTE, "")
         assert not forbidden.search(text), name
         if name not in SETTINGS_PAGE:
             assert not profile_fields.search(text), name
@@ -101,10 +109,11 @@ def test_package_has_no_test_switch(xpi):
 
 def test_settings_page_suggests_deepseek_fast_only(xpi):
     # User decision 2026-11-05 (M4 tickets 06 and 14): of Command Code's
-    # DeepSeek models only DeepSeek Fast is offered; the form's examples name
-    # it, and no longer the plain flash model.
+    # DeepSeek models only DeepSeek Fast is offered, with a name that says its
+    # quality is below Gemini's; the form's examples name it, and no longer
+    # the plain flash model.
     page = xpi.read("content/preferences.xhtml").decode("utf-8")
     placeholders = dict(re.findall(r'<html:input id="([^"]+)"[^>]*\bplaceholder="([^"]*)"', page))
     assert placeholders["zotero-translate-model"] == "例如 deepseek/deepseek-v4.1-flash-fast"
-    assert placeholders["zotero-translate-name"] == "例如 DeepSeek Fast"
+    assert placeholders["zotero-translate-name"] == f"例如 DeepSeek Fast{QUALITY_NOTE}"
     assert not re.search(r"deepseek-v4\.1-flash(?!-fast)", page)
