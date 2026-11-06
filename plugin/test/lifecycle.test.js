@@ -180,7 +180,9 @@ function environment({ routes = {}, saved = null, time = 0, library = [], announ
         if (env.failMark) {
           throw new Error(env.failMark);
         }
-        env.library.find((a) => a.id === id).identity = identityOf(identity);
+        const attachment = env.library.find((a) => a.id === id);
+        attachment.identity = identityOf(identity);
+        attachment.source = identity.sourceItemID ?? null; // zotero-translate.js records its key (ticket M4-16)
         if (env.quitAfterMark) {
           return never();
         }
@@ -2454,6 +2456,73 @@ test("a relation that cannot be saved is logged; the task is done with both PDFs
     ["中文译文", "双语对照"],
   );
   assert.deepEqual(errors, ["关联没有保存", "关联没有保存"]);
+});
+
+// ---- item 5 of ticket M4-16: the identity file knows the source, so the ask survives lost relations ----
+
+/** What zotero-translate.js reads from the identity file for a standalone PDF: an undeleted output naming it as source. */
+const recordedSource = (env, sourceItemID) => env.library.some((a) => a.source === sourceItemID && !a.deleted);
+
+test("the outputs of a standalone PDF are identified with their source PDF; a paper with a parent item names none", async () => {
+  const standalone = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") } });
+  standalone.lifecycle.start();
+  await standalone.lifecycle.submit({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" });
+  await standalone.clock.advance(2000);
+  assert.deepEqual(standalone.status(), ["已挂回"]);
+  assert.deepEqual(standalone.library.map((a) => [a.identity, a.source]), [["t1/mono", 30], ["t1/dual", 30]]);
+
+  const parented = await submitted(succeededRoutes("t1"));
+  await parented.clock.advance(2000);
+  assert.deepEqual(parented.library.map((a) => [a.identity, a.source]), [["t1/mono", null], ["t1/dual", null]]);
+});
+
+test("with both relations lost, a standalone PDF is still asked about after 清除已结束 and after a restart", async () => {
+  const errors = [];
+  const env = environment({
+    routes: { [UPLOAD]: json(201, { task_id: "t1" }), ...succeededRoutes("t1") },
+    logError: (e) => errors.push(e.message),
+  });
+  env.failRelate = "关联没有保存";
+  env.lifecycle.start();
+  const standalone = { sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "standalone.pdf" };
+  await env.lifecycle.submit(standalone);
+  await env.clock.advance(2000);
+  assert.deepEqual(env.status(), ["已挂回"]);
+  assert.deepEqual(errors, ["关联没有保存", "关联没有保存"]);
+  const related = []; // neither output is related to the source: no relation was saved
+  const sourceNow = (lifecycle) => async () => lifecycleSource({
+    ...standalone,
+    taskRecord: lifecycle.wasTranslated(30),
+    related,
+    recorded: recordedSource(env, 30),
+  });
+
+  // After 清除已结束 the task record is gone; the identity file's source is not.
+  env.lifecycle.clearEnded();
+  assert.deepEqual(env.lifecycle.tasks, []);
+  assert.equal(env.lifecycle.wasTranslated(30), false);
+  const uploads = () => env.requests.filter((request) => request === UPLOAD).length;
+  await env.lifecycle.submitBatch([standalone], sourceNow(env.lifecycle));
+  assert.equal(uploads(), 1); // no second task
+  assert.deepEqual(env.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+  assert.deepEqual(env.lifecycle.tasks, []);
+
+  // A restart: a new lifecycle over the same library, with no saved tasks (ended tasks are not saved).
+  const restarted = environment({ saved: env.saved, library: env.library, routes: { [UPLOAD]: json(201, { task_id: "t2" }) } });
+  restarted.lifecycle.start();
+  assert.deepEqual(restarted.lifecycle.tasks, []);
+  await restarted.lifecycle.submitBatch(
+    [standalone],
+    async () => lifecycleSource({ ...standalone, taskRecord: restarted.lifecycle.wasTranslated(30), related, recorded: recordedSource(env, 30) }),
+  );
+  assert.deepEqual(restarted.requests, []);
+  assert.deepEqual(restarted.announced.at(-1), { outcome: "resubmit", titles: ["Standalone"], keys: [1] });
+
+  // Both outputs deleted by the user: nothing says it was translated any more.
+  for (const attachment of env.library) {
+    attachment.deleted = true;
+  }
+  assert.equal(recordedSource(env, 30), false);
 });
 
 test("a standalone PDF with no task record but a related translation output is asked about", async () => {

@@ -29,24 +29,28 @@ var ZoteroTranslateCore = (() => {
   const NO_PDF_SUFFIX = "（没有 PDF）";
 
   /** The source PDF among an item's attachments, given in Zotero's best-first
-   *  order as {isPDF, title}: the first PDF that is not a translation output. */
+   *  order as {isPDF, title, identified}: the first PDF that is not a
+   *  translation output (see isTranslationOutput). */
   function pickSourcePdf(candidates) {
-    return candidates.find((c) => c.isPDF && !OUTPUT_TITLES.has(c.title)) || null;
+    return candidates.find((c) => c.isPDF && !isTranslationOutput(c.title, c.identified)) || null;
   }
 
-  /** Whether an attachment title is one of the two translation outputs: the
-   *  plugin's way of telling that a paper already has a translation. */
-  function isTranslationOutput(title) {
-    return OUTPUT_TITLES.has(title);
+  /** Whether an attachment is one of the plugin's translation outputs: the
+   *  plugin's way of telling that a paper already has a translation. It is
+   *  one when its title is one of the two fixed titles, or when `identified`
+   *  says the plugin's identity file records it (the plugin attached it; a
+   *  user who renamed it has not changed that). */
+  function isTranslationOutput(title, identified = false) {
+    return Boolean(identified) || OUTPUT_TITLES.has(title);
   }
 
-  /** Whether any of `related` ({title, deleted}) is an undeleted translation
-   *  output: for a standalone PDF, whose outputs are standalone attachments
-   *  with no link back, the plugin links them to it as related items when it
-   *  attaches them (both ways), and this is what says the paper was
-   *  translated after a Zotero restart or "清除已结束". */
+  /** Whether any of `related` ({title, deleted, identified}) is an undeleted
+   *  translation output: for a standalone PDF, whose outputs are standalone
+   *  attachments with no link back, the plugin links them to it as related
+   *  items when it attaches them (both ways), and this is what says the
+   *  paper was translated after a Zotero restart or "清除已结束". */
   function relatedTranslation(related) {
-    return related.some((item) => !item.deleted && isTranslationOutput(item.title));
+    return related.some((item) => !item.deleted && isTranslationOutput(item.title, item.identified));
   }
 
   /** The source the lifecycle translates, for one source PDF:
@@ -54,9 +58,11 @@ var ZoteroTranslateCore = (() => {
    *  says the paper already has a translation output, so submitting it again
    *  asks first: `parentTranslated` for a paper with a parent item (an
    *  output among its attachments); for a standalone PDF (`itemID` null),
-   *  this session's task record (`taskRecord`: both outputs attached) or one
-   *  of its `related` items (see relatedTranslation). The relation is the one
-   *  that outlives the record. */
+   *  this session's task record (`taskRecord`: both outputs attached), one
+   *  of its `related` items (see relatedTranslation), or `recorded`: the
+   *  identity file names it as the `source` of an undeleted output. The
+   *  relation and the identity file outlive the record; the file also
+   *  covers the case that no relation could be saved. */
   function lifecycleSource({
     sourceItemID,
     itemID,
@@ -65,13 +71,16 @@ var ZoteroTranslateCore = (() => {
     parentTranslated = false,
     taskRecord = false,
     related = [],
+    recorded = false,
   }) {
     return {
       sourceItemID,
       itemID,
       title,
       sourceFileName,
-      translated: Boolean(parentTranslated) || (itemID == null && (Boolean(taskRecord) || relatedTranslation(related))),
+      translated:
+        Boolean(parentTranslated) ||
+        (itemID == null && (Boolean(taskRecord) || Boolean(recorded) || relatedTranslation(related))),
     };
   }
 

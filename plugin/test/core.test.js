@@ -343,3 +343,36 @@ test("the menu's label keeps the current profile's name, and adds （没有 PDF�
     label: `翻译为中文（Gemini）${core.NO_PDF_SUFFIX}`,
   });
 });
+
+// ---- M4 ticket 16 items 4 and 5: a renamed output is still an output ----
+
+test("an attachment the plugin attached counts as a translation output under any title", () => {
+  assert.equal(core.isTranslationOutput("我的译文", true), true);
+  assert.equal(core.isTranslationOutput("中文译文", false), true);
+  assert.equal(core.isTranslationOutput("Full Text PDF", false), false);
+  assert.equal(core.isTranslationOutput("Full Text PDF"), false);
+});
+
+test("a renamed output the plugin attached is never chosen as the source", () => {
+  const renamed = { isPDF: true, title: "AutoDesign 中文", identified: true };
+  assert.equal(core.pickSourcePdf([renamed, pdf("Full Text PDF")]).title, "Full Text PDF");
+  assert.equal(core.pickSourcePdf([renamed]), null);
+  // The same title without the plugin's identity is an ordinary PDF.
+  assert.equal(core.pickSourcePdf([{ ...renamed, identified: false }]).title, "AutoDesign 中文");
+});
+
+test("a standalone PDF's renamed related output counts as translated unless it is in the trash", () => {
+  const source = (extra) => ({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "s.pdf", ...extra });
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "我的译文", deleted: false, identified: true }] })).translated, true);
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "我的译文", deleted: true, identified: true }] })).translated, false);
+  assert.equal(core.lifecycleSource(source({ related: [{ title: "我的译文", deleted: false, identified: false }] })).translated, false);
+});
+
+test("a standalone PDF with a recorded, undeleted output of its own counts as translated (the identity file's source)", () => {
+  const source = (extra) => ({ sourceItemID: 30, itemID: null, title: "Standalone", sourceFileName: "s.pdf", ...extra });
+  assert.equal(core.lifecycleSource(source({ recorded: true })).translated, true);
+  assert.equal(core.lifecycleSource(source({ recorded: false })).translated, false);
+  // A paper with a parent item is judged by its attachments only.
+  const paper = { sourceItemID: 11, itemID: 10, title: "AutoDesign", sourceFileName: "a.pdf" };
+  assert.equal(core.lifecycleSource({ ...paper, recorded: true }).translated, false);
+});

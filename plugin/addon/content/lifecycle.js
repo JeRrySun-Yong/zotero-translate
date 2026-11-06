@@ -43,7 +43,10 @@
  * outputs attached, wasTranslated(), or one of the PDF's related items being
  * an undeleted translation output: attaching a standalone PDF's outputs
  * links each of them to it as a related item, both ways, and that outlives
- * the task records): the paper is not submitted; the batch's
+ * the task records; or an undeleted output that the plugin's identity file
+ * records with the PDF as its source, which holds when the links could not
+ * be saved either; an output counts under any title once the plugin has
+ * attached it): the paper is not submitted; the batch's
  * submission notice counts it among the skipped, with the reason, and a
  * second notice (outcome "resubmit", with `keys`) asks "再翻译一次？".
  * resubmit(keys) submits the papers that notice listed, then announces their
@@ -87,7 +90,9 @@
  * - importAttachment(target, {path, title}): import one PDF file as an
  *   attachment at that target; returns the attachment (an ID, saved with the task);
  * - attachments: {find(target, identity), mark(attachment, identity),
- *   unmarked(target, {title, since})}, where identity is {taskId, output}:
+ *   unmarked(target, {title, since})}, where identity is {taskId, output},
+ *   and for a standalone PDF's output also sourceItemID (the PDF; mark
+ *   records its key as the output's source, M4 ticket 16):
  *   the attachment with that identity that the user has not deleted, or
  *   null; write the identity on an attachment; the attachment at the target
  *   with no identity, that title, added at or after the clock time `since`, or null;
@@ -787,7 +792,12 @@ var ZoteroTranslateLifecycle = (() => {
         if (!isCurrent(task, operation)) {
           return;
         }
-        const identity = { taskId: task.taskId, output: output.file };
+        // A standalone PDF's output records the PDF, for the "already translated" check.
+        const identity = {
+          taskId: task.taskId,
+          output: output.file,
+          ...(task.itemID == null ? { sourceItemID: task.sourceItemID } : {}),
+        };
         let attachment = await attachments.find(target, identity);
         if (!isCurrent(task, operation)) {
           return;

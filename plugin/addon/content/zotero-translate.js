@@ -15,8 +15,16 @@
  *
  * An attachment's identity (service task ID + output) is kept in the file
  * zotero-translate/attachments.json in the Zotero data directory,
- * {"<task ID>/<output>": {libraryID, key}}, written whole by an atomic
- * rename. Not as an item relation, which would be hidden too: the Zotero
+ * {"<task ID>/<output>": {libraryID, key, source}}, written whole by an atomic
+ * rename; `source` (M4 ticket 16) is the key of the standalone PDF the output
+ * was made from, and is left out for a paper with a parent item and in
+ * entries from before it existed. The file is also what says that an
+ * attachment is a translation output whatever its title: an attachment
+ * recorded in it counts as one after the user renames it (also among a
+ * parent item's attachments, among a standalone PDF's related items, and
+ * when the source PDF is picked), and a standalone PDF with an undeleted
+ * output naming it as `source` counts as translated even when no relation
+ * could be saved. Not as an item relation, which would be hidden too: the Zotero
  * sync server accepts only its own relation predicates (dc:relation,
  * owl:sameAs, dc:replaces with Zotero item URIs; Mendeley's), so an
  * attachment with any other relation could never sync (M3 ticket 10).
@@ -326,7 +334,10 @@ var ZoteroTranslate = {
    *  that attached both outputs, or one of its related items being an
    *  undeleted translation output — the plugin links the outputs to the
    *  source both ways when it attaches them, and the relations stay after a
-   *  restart or "清除已结束" remove the task records (core.lifecycleSource). */
+   *  restart or "清除已结束" remove the task records, or an undeleted output
+   *  that the identity file records with the PDF as its `source`, which
+   *  holds even when no relation could be saved (core.lifecycleSource).
+   *  An output counts under any title once the plugin has attached it. */
   async _sourceOf(item) {
     const source = await this.sourcePdf(item);
     if (!source) {
@@ -340,18 +351,28 @@ var ZoteroTranslate = {
       sourceFileName: source.attachmentFilename,
       ...(parent
         ? { parentTranslated: await this._hasTranslation(parent) }
-        : { taskRecord: this.lifecycle.wasTranslated(source.id), related: await this._relatedItems(source) }),
+        : {
+            taskRecord: this.lifecycle.wasTranslated(source.id),
+            related: await this._relatedItems(source),
+            recorded: await this.attachmentIdentities.hasOutputOf(source),
+          }),
     });
   },
 
-  /** A standalone PDF's related items, as {title, deleted}, for the "already
-   *  translated" check (core.lifecycleSource): `relatedItems` are item keys
-   *  in the same library. */
+  /** A standalone PDF's related items, as {title, deleted, identified}, for
+   *  the "already translated" check (core.lifecycleSource): `relatedItems`
+   *  are item keys in the same library; `identified` says the plugin
+   *  attached the item (the identity file records it), whatever its title. */
   async _relatedItems(source) {
+    const attached = await this.attachmentIdentities.attachedKeys();
     const items = await Promise.all(
       source.relatedItems.map((key) => Zotero.Items.getByLibraryAndKeyAsync(source.libraryID, key)),
     );
-    return items.filter(Boolean).map((item) => ({ title: item.getField("title"), deleted: item.deleted }));
+    return items.filter(Boolean).map((item) => ({
+      title: item.getField("title"),
+      deleted: item.deleted,
+      identified: attached.has(this.attachmentIdentities._itemKey(item)),
+    }));
   },
 
   /** Link a standalone PDF and one of its outputs as related items, both
@@ -377,13 +398,20 @@ var ZoteroTranslate = {
    *  lifecycle's task records instead. */
   async _hasTranslation(item) {
     const attachments = await Zotero.Items.getAsync(item.getAttachments());
+    const attached = await this.attachmentIdentities.attachedKeys();
     return attachments.some(
-      (attachment) => !attachment.deleted && ZoteroTranslateCore.isTranslationOutput(attachment.getField("title")),
+      (attachment) =>
+        !attachment.deleted &&
+        ZoteroTranslateCore.isTranslationOutput(
+          attachment.getField("title"),
+          attached.has(this.attachmentIdentities._itemKey(attachment)),
+        ),
     );
   },
 
   /** The PDF to translate: the selected attachment itself, or the item's best
-   *  PDF attachment; never an earlier translation output. */
+   *  PDF attachment; never an earlier translation output (by its title, or
+   *  because the identity file records it: also after a rename). */
   async sourcePdf(item) {
     if (!item.isRegularItem()) {
       return this._asSource(item);
@@ -392,14 +420,16 @@ var ZoteroTranslate = {
     return this._pick(attachments);
   },
 
-  _asSource(attachment) {
+  async _asSource(attachment) {
     return attachment.isAttachment() ? this._pick([attachment]) : null;
   },
 
-  _pick(attachments) {
+  async _pick(attachments) {
+    const attached = await this.attachmentIdentities.attachedKeys();
     const candidates = attachments.map((attachment) => ({
       isPDF: attachment.isPDFAttachment(),
       title: attachment.getField("title"),
+      identified: attached.has(this.attachmentIdentities._itemKey(attachment)),
       attachment,
     }));
     return ZoteroTranslateCore.pickSourcePdf(candidates)?.attachment || null;
@@ -452,6 +482,42 @@ var ZoteroTranslate = {
     _key: ({ taskId, output }) => `${taskId}/${output}`,
     _itemKey: ({ libraryID, key }) => `${libraryID}/${key}`,
 
+    /** "<libraryID>/<key>" of every attachment the file records: the
+     *  plugin's outputs, whatever their titles now are. The file only
+     *  helps to recognise outputs, so one that cannot be read is logged and
+     *  counts as empty: the item menu and a submission must not fail on it. */
+    async attachedKeys() {
+      try {
+        return new Set(Object.values(await this._load()).map(this._itemKey));
+      } catch (e) {
+        Zotero.logError(e);
+        return new Set();
+      }
+    },
+
+    /** Whether the file records an output of the standalone PDF `source` (a
+     *  Zotero item) that still exists and is not in the trash: an entry whose
+     *  `source` is its key. Entries from before `source` have none. */
+    async hasOutputOf(source) {
+      let entries;
+      try {
+        entries = Object.values(await this._load());
+      } catch (e) {
+        Zotero.logError(e);
+        return false;
+      }
+      for (const entry of entries) {
+        if (entry.source !== source.key || entry.libraryID !== source.libraryID) {
+          continue;
+        }
+        const output = await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key);
+        if (output && !output.deleted) {
+          return true;
+        }
+      }
+      return false;
+    },
+
     async find(target, identity) {
       const entry = (await this._load())[this._key(identity)];
       const item = entry && (await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key));
@@ -459,12 +525,16 @@ var ZoteroTranslate = {
     },
 
     /** Write the identity; the file is replaced only after the new one is
-     *  written in full, and the identity counts only once it is. */
+     *  written in full, and the identity counts only once it is. For the
+     *  output of a standalone PDF (`identity.sourceItemID`) the entry also
+     *  records the PDF's key as its `source`. */
     async mark(id, identity) {
       const written = this._writing.then(async () => {
         const byIdentity = await this._load();
         const item = await Zotero.Items.getAsync(id);
-        const next = { ...byIdentity, [this._key(identity)]: { libraryID: item.libraryID, key: item.key } };
+        const source = identity.sourceItemID != null ? await Zotero.Items.getAsync(identity.sourceItemID) : null;
+        const entry = { libraryID: item.libraryID, key: item.key, ...(source ? { source: source.key } : {}) };
+        const next = { ...byIdentity, [this._key(identity)]: entry };
         await IOUtils.makeDirectory(PathUtils.parent(this._path));
         await IOUtils.writeJSON(this._path, next, { tmpPath: `${this._path}.tmp` });
         this._byIdentity = next;
