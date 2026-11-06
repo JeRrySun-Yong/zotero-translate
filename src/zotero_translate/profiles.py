@@ -25,6 +25,15 @@ when its file is gone or unreadable, or it is no longer tested: checked
 when the service starts, and whenever the current profile is read (each
 listing, submission, apply).
 
+A task records its profile at submission, and a profile in use cannot be
+deleted. The two must not interleave (M4 ticket 16): the service holds
+``ProfileStore.exclusive()`` from the moment a submission takes its profile
+until its task is saved, and a delete over its count of the tasks that use
+the profile and the removal. So of a submission and a delete that race, the
+delete is refused (the task is counted) or the submission is (the profile is
+gone, 422), never both let through, which would leave a task whose profile
+file does not exist.
+
 No API key leaves this module except to the worker, through the file:
 answers give ``{"set": true, "last4": ...}``, and the log callback gets the
 profile id, name and a reason, never a key.
@@ -127,6 +136,11 @@ class ProfileStore:
         self.concurrency = concurrency
         self._log = log
         self._lock = threading.RLock()
+
+    def exclusive(self):
+        """The store's lock, as a context manager (re-entrant: the store's own
+        methods take it too): see the module docstring."""
+        return self._lock
 
     # -- reading -------------------------------------------------------------
 

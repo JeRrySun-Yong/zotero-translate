@@ -13,6 +13,8 @@ import json
 import os
 import socket
 import stat
+import threading
+import time
 
 import httpx
 import pytest
@@ -579,3 +581,94 @@ def test_an_error_building_the_client_is_redacted(monkeypatch):
     )
     assert check.result == "invalid_address"
     assert KEY not in check.message and model_client.REDACTED in check.message
+
+
+# -- M4 ticket 16 item 7: deleting a profile and submitting a task do not interleave --
+
+PAUSE_AFTER_PROFILE_CHOSEN = "ZT_TEST_PAUSE_AFTER_PROFILE_CHOSEN"
+PAUSE_AFTER_PROFILE_COUNT = "ZT_TEST_PAUSE_AFTER_PROFILE_COUNT"
+PAUSE_AFTER_MARKER = "ZT_TEST_PAUSE_AFTER_MARKER"  # keeps a started task's worker from running the paper
+
+
+def _post_task(service, profile: str | None = None) -> httpx.Response:
+    data = {"filename": EXCERPT.name, **({"profile": profile} if profile else {})}
+    files = {"file": (EXCERPT.name, EXCERPT.read_bytes(), "application/pdf")}
+    return service.http.post("/tasks", files=files, data=data)
+
+
+def _in_thread(results: dict, name: str, call) -> threading.Thread:
+    def run():
+        try:
+            results[name] = call()
+        except Exception as e:  # noqa: BLE001 - the test reads it
+            results[name] = e
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def _the_flag(directory, timeout: float = 60.0):
+    """The one ``.paused`` file the service creates in ``directory`` at a pause point."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        flags = list(directory.glob("*.paused"))
+        if flags:
+            [flag] = flags
+            return flag
+        time.sleep(0.02)
+    raise AssertionError(f"no pause in {directory} after {timeout}s")
+
+
+def _tested_and_applied(service, model) -> dict:
+    profile = _create(service, model)
+    assert _write(service, "POST", f"/profiles/{profile['id']}/test").json()["ok"]
+    assert _write(service, "POST", f"/profiles/{profile['id']}/apply").status_code == 200
+    return profile
+
+
+def test_a_delete_during_a_submission_that_holds_the_profile_is_refused(start_service, tmp_path):
+    chosen, held = tmp_path / "chosen", tmp_path / "held"
+    chosen.mkdir()
+    held.mkdir()
+    with FakeModel() as model:
+        service = start_service(model, env={PAUSE_AFTER_PROFILE_CHOSEN: str(chosen), PAUSE_AFTER_MARKER: str(held)})
+        profile = _tested_and_applied(service, model)
+        results = {}
+        submit = _in_thread(results, "submit", lambda: _post_task(service))
+        flag = _the_flag(chosen)  # the submission has the profile; its task is not saved yet
+        delete = _in_thread(results, "delete", lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"))
+        # Without the lock the delete answers at once, with the task unseen; with it, it waits.
+        delete.join(timeout=2)
+        flag.unlink()
+        submit.join(timeout=30)
+        delete.join(timeout=30)
+        submitted, deleted = results["submit"], results["delete"]
+        assert not (submitted.status_code == 201 and deleted.status_code == 200), (submitted.text, deleted.text)
+        assert (submitted.status_code, deleted.status_code) == (201, 409), (submitted.text, deleted.text)
+        # The profile is still there for the task that recorded it.
+        assert (service.profiles_dir / f"{profile['id']}.env").exists()
+        assert service.status(submitted.json()["task_id"])["profile"]["id"] == profile["id"]
+
+
+def test_a_submission_naming_a_profile_during_its_delete_is_refused(start_service, tmp_path):
+    counted, held = tmp_path / "counted", tmp_path / "held"
+    counted.mkdir()
+    held.mkdir()
+    with FakeModel() as model:
+        service = start_service(model, env={PAUSE_AFTER_PROFILE_COUNT: str(counted), PAUSE_AFTER_MARKER: str(held)})
+        profile = _create(service, model)
+        assert _write(service, "POST", f"/profiles/{profile['id']}/test").json()["ok"]
+        results = {}
+        delete = _in_thread(results, "delete", lambda: _write(service, "DELETE", f"/profiles/{profile['id']}"))
+        flag = _the_flag(counted)  # no task uses it, as the delete counted; the file is still there
+        submit = _in_thread(results, "submit", lambda: _post_task(service, profile["id"]))  # a retry names it
+        submit.join(timeout=2)
+        flag.unlink()
+        delete.join(timeout=30)
+        submit.join(timeout=30)
+        submitted, deleted = results["submit"], results["delete"]
+        assert not (submitted.status_code == 201 and deleted.status_code == 200), (submitted.text, deleted.text)
+        assert (submitted.status_code, deleted.status_code) == (422, 200), (submitted.text, deleted.text)
+        assert not (service.profiles_dir / f"{profile['id']}.env").exists()
+        assert not list((service.data_dir / "tasks").glob("*"))  # the refused submission left no task
