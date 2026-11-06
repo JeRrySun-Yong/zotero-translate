@@ -33,8 +33,19 @@ HTTP interface (the contract with the translation plugin):
 - The task query also gives ``profile``, ``{"id", "name"}``: the model
   profile the task recorded when it was submitted.
 
-Model profiles (M4 ticket 02, ADR 0005; ``zotero_translate.profiles``). A
-profile object: ``id`` (``"gemini"`` for the built-in one, else 12 hex
+Model profiles (M4 ticket 02, ADR 0005; ``zotero_translate.profiles``). In
+this header "Gemini" is the built-in profile, whose id is always
+``gemini``; its ``name`` is ``ZT_PROFILE_NAME`` in ``--env-file`` (M5 ticket
+02), "Gemini" when there is none. The service reads the name when it starts
+(a change of the file needs a restart; ``settings.load_builtin_profile_name``)
+and exits with 2, writing the reason to stderr, when the name is over 60
+characters or has a control character, the limits of a user profile's name.
+The name shows in the profile object, the name a task records
+(``task.json`` ``profile_name``, ``profile`` of the task query and the
+submission answer, the task report), the 409 messages about the built-in
+profile and the log event 当前配置改回 <name>; it is in no model request, so
+the built-in profile's request bodies and cache keys are as they were.
+A profile object: ``id`` (``"gemini"`` for the built-in one, else 12 hex
 digits), ``name``, ``builtin``, ``current`` (bool), ``tested`` (its last
 connection test succeeded, for its present settings; always true for
 Gemini), ``base_url``, ``model``; a user profile also has ``concurrency``,
@@ -268,6 +279,8 @@ from zotero_translate.profiles import ProfileError
 from zotero_translate.profiles import ProfileStore
 from zotero_translate.request_log import load_records
 from zotero_translate.settings import DEFAULT_PROFILES_DIR
+from zotero_translate.settings import SettingsError
+from zotero_translate.settings import load_builtin_profile_name
 from zotero_translate.settings import model_cache_dir
 
 HOST = "127.0.0.1"
@@ -337,7 +350,9 @@ _PROFILE_EVENTS = {
     "deleted": "删除配置",
     "tested": "测试连接",  # the reason is the outcome
     "applied": "应用配置",
-    "current_reset": "当前配置改回 Gemini",  # its file is gone, or it is no longer tested
+    # Its file is gone, or it is no longer tested. {builtin} is the built-in
+    # profile's name (Gemini unless model.env's ZT_PROFILE_NAME says otherwise).
+    "current_reset": "当前配置改回 {builtin}",
 }
 
 
@@ -356,6 +371,7 @@ class TaskQueue:
         concurrency: int,
         hedging: bool = True,
         profiles_dir: Path = DEFAULT_PROFILES_DIR,
+        builtin_name: str = BUILTIN_NAME,
     ):
         self.tasks_dir = Path(data_dir) / "tasks"
         self.cache_dir = model_cache_dir(data_dir)
@@ -364,7 +380,7 @@ class TaskQueue:
         self.concurrency = concurrency
         self.hedging = hedging  # False: each worker gets ``--no-hedging``
         self.profiles = ProfileStore(
-            profiles_dir, data_dir, env_file, argon_env_file, concurrency, self._log_profile
+            profiles_dir, data_dir, env_file, argon_env_file, concurrency, self._log_profile, builtin_name
         )
         # Waiting tasks: task ID -> (rank of its queue class, *sort key).
         self._waiting: dict[str, tuple] = {}
@@ -705,7 +721,7 @@ class TaskQueue:
         """One service log line about a model profile; never its key (``ProfileStore``)."""
         line = (
             f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')}"
-            f" profile={profile_id} event={_PROFILE_EVENTS[event]}"
+            f" profile={profile_id} event={_PROFILE_EVENTS[event].format(builtin=self.profiles.builtin_name)}"
             f" name={json.dumps(name, ensure_ascii=False)}"
         )
         if reason:
@@ -775,7 +791,7 @@ class TaskQueue:
         state = status["state"]
         due = status.get("next_attempt_at")
         try:
-            profile = _task_profile(directory)
+            profile = _task_profile(directory, self.profiles.builtin_name)
         except (OSError, ValueError):
             profile = None
         return {
@@ -809,7 +825,7 @@ class TaskQueue:
             for status_file in self.tasks_dir.glob(f"*/{td.STATUS_FILE}"):
                 try:
                     unfinished = td.read_status(status_file.parent)["state"] not in td.TERMINAL_STATES
-                    if unfinished and _task_profile(status_file.parent)["id"] == profile_id:
+                    if unfinished and _task_profile(status_file.parent, self.profiles.builtin_name)["id"] == profile_id:
                         users += 1
                 except (OSError, ValueError, KeyError):
                     continue
@@ -1146,7 +1162,7 @@ class TaskQueue:
         as it is now (an edit since, e.g. a new key, reaches the attempt).
         """
         directory = self.tasks_dir / task_id
-        profile = _task_profile(directory)
+        profile = _task_profile(directory, self.profiles.builtin_name)
         if profile["id"] == BUILTIN_ID:
             model_options = [
                 "--env-file",
@@ -1232,12 +1248,13 @@ def _submitted_at(directory: Path) -> float:
     return float(json.loads((directory / "task.json").read_text("utf-8"))["submitted_at"])
 
 
-def _task_profile(directory: Path) -> dict:
-    """``{"id", "name"}`` of the model profile the task recorded; Gemini for a task from before M4."""
+def _task_profile(directory: Path, builtin_name: str) -> dict:
+    """``{"id", "name"}`` of the model profile the task recorded; for a task
+    from before M4, the built-in profile, under ``builtin_name`` (its name now)."""
     task = json.loads((directory / "task.json").read_text("utf-8"))
     return {
         "id": task.get("profile_id") or BUILTIN_ID,
-        "name": task.get("profile_name") or BUILTIN_NAME,
+        "name": task.get("profile_name") or builtin_name,
     }
 
 
@@ -1495,6 +1512,11 @@ def serve(
     Return 1 at once, touching no task, when another service holds the data
     directory or the port is taken.
     """
+    try:  # a name the user profiles would refuse stops the service here (``cli`` too)
+        builtin_name = load_builtin_profile_name(env_file)
+    except SettingsError as e:
+        print(e, file=sys.stderr)
+        return 2
     data_dir = Path(data_dir)
     lock = _lock_data_dir(data_dir)
     if lock is None:
@@ -1503,7 +1525,9 @@ def serve(
             file=sys.stderr,
         )
         return 1
-    queue = TaskQueue(data_dir, env_file, argon_env_file, concurrency, hedging, profiles_dir)
+    queue = TaskQueue(
+        data_dir, env_file, argon_env_file, concurrency, hedging, profiles_dir, builtin_name
+    )
     try:
         server = ThreadingHTTPServer((HOST, port), make_handler(queue))
     except OSError as e:

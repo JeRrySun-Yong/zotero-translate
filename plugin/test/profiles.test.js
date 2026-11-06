@@ -233,6 +233,15 @@ test("the service status says it runs and which profile is current", () => {
   });
 });
 
+test("the settings page shows the built-in profile under the name the service gives it (M5 ticket 02)", () => {
+  const renamed = { ...BUILTIN, id: "gemini", name: "GPT-5 Mini" };
+  const listing = { current: "gemini", profiles: [renamed, SAVED] };
+  assert.equal(profiles.profileRows(listing)[0].name, "GPT-5 Mini");
+  assert.equal(profiles.profileRows(listing)[0].id, "gemini");
+  assert.equal(profiles.statusView({ listing }).text, "翻译服务在运行，当前配置：GPT-5 Mini（model-main）");
+  assert.equal(profiles.formFromProfile(renamed).name, "GPT-5 Mini");
+});
+
 test("an unreachable service says how to start it and where its address is set", () => {
   const view = profiles.statusView({ unreachable: true, serviceUrl: SERVICE });
   assert.equal(view.running, false);

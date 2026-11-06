@@ -16,10 +16,15 @@ also set ``ZT_CONCURRENCY``, its limit of requests in flight; flash's limit
 comes from the ``--concurrency`` option. When both files name the same
 address and key, the two are one endpoint with one budget of flash's limit,
 and argon's ``ZT_CONCURRENCY`` is ignored (``PipelineModels``). The plugin
-cannot change any of these settings: they are the built-in model profile
-"Gemini". A user profile (ADR 0005, ``zotero_translate.profiles``) is one
-such file for both roles, in ``DEFAULT_PROFILES_DIR``
-(``load_profile_settings``).
+cannot change any of these settings: they are the built-in model profile,
+named "Gemini" unless ``model.env`` (flash's file, ``--env-file``) says
+otherwise with ``ZT_PROFILE_NAME`` (M5 ticket 02; ``load_builtin_profile_name``).
+Only the display name changes, never the profile's id ``gemini`` or a
+model request; a name a user profile's name could not be (over 60
+characters, a control character) makes ``serve`` and ``run`` exit at
+startup, and a worker fail with a settings error. A user profile (ADR 0005,
+``zotero_translate.profiles``) is one such file for both roles, in
+``DEFAULT_PROFILES_DIR`` (``load_profile_settings``).
 
 ``ZT_STREAM=1`` in an endpoint file (M4 ticket 12) makes its requests
 streamed (``ModelSettings.stream``); ``0`` or no line, as for Gemini's two
@@ -49,6 +54,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -61,6 +67,11 @@ DEFAULT_ARGON_MODEL = "gemini-4-argon-high"
 DEFAULT_ARGON_CONCURRENCY = 16
 DEFAULT_PROFILE_CONCURRENCY = 16  # a user profile's, when it gives none (ADR 0005)
 DEFAULT_PORT = 8920
+# The built-in profile's name when ``model.env`` has no ``ZT_PROFILE_NAME``
+# (M5 ticket 02), and the longest name any profile may have.
+DEFAULT_BUILTIN_NAME = "Gemini"
+PROFILE_NAME_SETTING = "ZT_PROFILE_NAME"
+MAX_PROFILE_NAME_LENGTH = 60
 HEDGE_AFTER_SECONDS = 400.0  # a flash send this old with no end gets an argon copy
 HEDGE_AFTER_SETTING = "ZT_TEST_HEDGE_AFTER_SECONDS"  # test only: replaces it
 DEFAULT_DATA_DIR = Path(
@@ -191,7 +202,43 @@ def load_model_settings(
     timeout; tests use it to make timeouts happen in a few seconds.
     """
     values = _read_endpoint_file(env_file, "找不到管线模型的环境文件")
+    builtin_profile_name(values, env_file)  # a bad name is a settings error, not a surprise later
     return _endpoint_settings(env_file, values, DEFAULT_MODEL, concurrency, cache_dir)
+
+
+def load_builtin_profile_name(env_file: Path) -> str:
+    """The built-in profile's name in flash's environment file (M5 ticket 02).
+
+    ``ZT_PROFILE_NAME`` with its spaces at both ends removed; "Gemini" when
+    the file has no such line or its value is empty. Raise ``SettingsError``
+    when the file is missing or incomplete (as ``load_model_settings`` does)
+    or the name has more than 60 characters or a control character, the
+    limits of a user profile's name.
+    """
+    values = _read_endpoint_file(env_file, "找不到管线模型的环境文件")
+    return builtin_profile_name(values, env_file)
+
+
+def builtin_profile_name(values: dict[str, str], env_file: Path) -> str:
+    """``load_builtin_profile_name`` for the values of the file already read."""
+    name = values.get(PROFILE_NAME_SETTING, "").strip()
+    if not name:
+        return DEFAULT_BUILTIN_NAME
+    if len(name) > MAX_PROFILE_NAME_LENGTH:
+        raise SettingsError(
+            f"环境文件 {env_file} 中的 {PROFILE_NAME_SETTING} 太长："
+            f"最多 {MAX_PROFILE_NAME_LENGTH} 个字符，现有 {len(name)} 个"
+        )
+    if has_control_character(name):
+        raise SettingsError(
+            f"环境文件 {env_file} 中的 {PROFILE_NAME_SETTING} 含控制字符（制表符、换行、零宽字符等）"
+        )
+    return name
+
+
+def has_control_character(text: str) -> bool:
+    """Whether ``text`` has a character of a Unicode ``C`` category (control, format, ...)."""
+    return any(unicodedata.category(c).startswith("C") for c in text)
 
 
 def load_argon_settings(env_file: Path, cache_dir: Path | None = None) -> ModelSettings:

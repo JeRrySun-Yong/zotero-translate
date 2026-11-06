@@ -15,11 +15,13 @@ worker gets it, ADR 0005; ``--concurrency`` replaces the file's limit). The
 prompt rules for user profiles (M4 ticket 15) are on exactly with
 ``--profile-file``.
 
-``serve`` exits with 2 when an environment file is missing or incomplete
-and 1 when another service holds the data directory or the port is taken.
+``serve`` exits with 2 when an environment file is missing or incomplete,
+or ``--env-file``'s ``ZT_PROFILE_NAME`` (the built-in profile's name, M5
+ticket 02) is over 60 characters or has a control character, and 1 when
+another service holds the data directory or the port is taken.
 ``run`` exits with 0 when the paper task succeeds, 1 when it fails (the
 task report's ``state`` is ``failed`` and its ``error`` says why) and 2 when
-an environment file is missing or incomplete. It ends the process itself
+an environment file is missing or incomplete or has such a name. It ends the process itself
 (``zotero_translate.process_exit``) once the paper task is over and
 ``report.json`` is up to date, skipping native libraries' exit handlers,
 which sometimes hang (``main`` does not return for ``run``). A script that
