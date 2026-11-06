@@ -1,0 +1,592 @@
+"""The built-in model profile's name comes from ``model.env`` (M5 ticket 02).
+
+``ZT_PROFILE_NAME`` in the flash environment file (``--env-file``) names the
+built-in profile; without it, or with an empty value, it is still "Gemini".
+Only the name changes: its id stays ``gemini``, and the name never reaches a
+model request, so the request bodies and cache keys are as before. A name
+the user profiles would refuse (over 60 characters, a control character)
+stops ``serve`` and ``run`` at startup.
+
+The tests that run a paper task use the fake model; they are the only ones in
+this file that need ``heavy.sh``.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+
+from tests import sample_prompts
+from tests.conftest import ARGON_MODEL_NAME
+from tests.conftest import EXCERPT
+from tests.conftest import FAKE_API_KEY
+from tests.conftest import FAKE_ARGON_API_KEY
+from tests.conftest import FAKE_MODEL_NAME
+from tests.conftest import launch_service
+from tests.conftest import serve_command
+from tests.conftest import stop_service
+from tests.conftest import write_env_file
+from tests.fake_model import FakeModel
+from tests.test_model_profile_tasks import _apply_new_profile
+from tests.test_model_profiles import OTHER_KEY
+from tests.test_model_profiles import _create
+from tests.test_model_profiles import _profiles
+from tests.test_model_profiles import _write
+from zotero_translate import profiles
+from zotero_translate import settings as zt_settings
+from zotero_translate.model_client import ModelClient
+from zotero_translate.model_client import ResponseCache
+from zotero_translate.request_log import REQUESTS_FILE
+from zotero_translate.request_log import load_records
+from zotero_translate.service import _task_profile
+from zotero_translate.settings import SettingsError
+from zotero_translate.settings import load_pipeline_settings
+from zotero_translate.settings import read_env_file
+
+NAME = "GPT-5 Mini"
+NAME_LINE = f"ZT_PROFILE_NAME={NAME}\n"
+LONGEST = "n" * 60
+
+
+def _env_file(root, model, line: str = NAME_LINE):
+    """The flash environment file ``launch_service`` would write, plus ``line``."""
+    path = write_env_file(root, model.base_url, FAKE_API_KEY, FAKE_MODEL_NAME)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(line)
+    return path
+
+
+def _argon_env_file(root, model):
+    return write_env_file(root, model.base_url, FAKE_ARGON_API_KEY)
+
+
+def _builtin(service) -> dict:
+    [builtin] = [p for p in _profiles(service)["profiles"] if p["builtin"]]
+    return builtin
+
+
+# -- the name in the service ---------------------------------------------------
+
+
+def test_the_env_file_names_the_builtin_profile_and_its_id_stays_gemini(tmp_path):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path, env_file=_env_file(tmp_path, model))
+        try:
+            listing = _profiles(service)
+            one = service.http.get("/profiles/gemini")
+            applied = _write(service, "POST", "/profiles/gemini/apply")
+        finally:
+            stop_service(service)
+
+    assert listing["current"] == "gemini"
+    [builtin] = listing["profiles"]
+    assert builtin["id"] == "gemini" and builtin["name"] == NAME
+    assert builtin["builtin"] and builtin["current"] and builtin["tested"]
+    assert one.status_code == 200 and one.json() == builtin
+    assert applied.status_code == 200, applied.text
+    assert applied.json() == {"current": "gemini", "name": NAME}
+    assert "Gemini" not in json.dumps(listing)
+
+
+def test_a_submitted_task_records_the_name(tmp_path):
+    pause = tmp_path / "pause"
+    pause.mkdir()
+    with FakeModel() as model:
+        service = launch_service(
+            model,
+            tmp_path,
+            env_file=_env_file(tmp_path, model),
+            env={"ZT_TEST_PAUSE_AFTER_MARKER": str(pause)},  # no task gets past its process marker
+        )
+        try:
+            task_id = service.submit()
+            named = service.http.post(
+                "/tasks",
+                files={"file": ("paper.pdf", EXCERPT.read_bytes(), "application/pdf")},
+                data={"filename": "paper.pdf", "profile": "gemini"},
+            )
+            status = service.status(task_id)
+            recorded = json.loads((service.data_dir / "tasks" / task_id / "task.json").read_text("utf-8"))
+        finally:
+            stop_service(service)
+
+    assert status["profile"] == {"id": "gemini", "name": NAME}
+    assert named.status_code == 201, named.text
+    assert named.json()["profile"] == {"id": "gemini", "name": NAME}
+    assert (recorded["profile_id"], recorded["profile_name"]) == ("gemini", NAME)
+
+
+def test_the_errors_about_the_builtin_profile_name_it(tmp_path):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path, env_file=_env_file(tmp_path, model))
+        try:
+            refused = [
+                _write(service, "DELETE", "/profiles/gemini"),
+                _write(service, "PUT", "/profiles/gemini", {"name": "x"}),
+                _write(service, "POST", "/profiles/gemini/test"),
+            ]
+        finally:
+            stop_service(service)
+
+    assert [r.status_code for r in refused] == [409, 409, 409]
+    for response in refused:
+        assert NAME in response.json()["error"], response.text
+        assert "Gemini" not in response.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["", "ZT_PROFILE_NAME=\n", 'ZT_PROFILE_NAME=""\n', 'ZT_PROFILE_NAME="   "\n'],
+    ids=["no-key", "empty", "empty-quoted", "blank-quoted"],
+)
+def test_without_a_name_the_builtin_profile_is_still_gemini(tmp_path, line):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path, env_file=_env_file(tmp_path, model, line))
+        try:
+            builtin = _builtin(service)
+            refused = _write(service, "DELETE", "/profiles/gemini")
+        finally:
+            stop_service(service)
+
+    assert (builtin["id"], builtin["name"]) == ("gemini", "Gemini")
+    assert refused.status_code == 409
+    assert refused.json()["error"] == "内置配置 Gemini 不能删除"
+
+
+def test_the_quoted_name_and_its_spaces_are_taken_as_written(tmp_path):
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, f'ZT_PROFILE_NAME="  {NAME}  "\n')
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            assert _builtin(service)["name"] == NAME  # stripped, as a user profile's name is
+        finally:
+            stop_service(service)
+
+
+def test_the_name_shows_where_the_current_profile_goes_back_to_the_builtin_one(tmp_path):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path, env_file=_env_file(tmp_path, model))
+        try:
+            profile = _create(service, model)
+            assert _write(service, "POST", f"/profiles/{profile['id']}/test").json()["ok"]
+            assert _write(service, "POST", f"/profiles/{profile['id']}/apply").status_code == 200
+            # A new key is untested: the current profile goes back to the built-in one.
+            assert _write(service, "PUT", f"/profiles/{profile['id']}", {"api_key": OTHER_KEY}).status_code == 200
+            assert _profiles(service)["current"] == "gemini"
+        finally:
+            stop_service(service)
+
+    [reset] = [line for line in service.output if "event=当前配置改回" in line]
+    assert f"event=当前配置改回 {NAME} " in reset and f"profile={profile['id']}" in reset
+
+
+def test_a_rename_between_runs_keeps_the_current_user_profile(tmp_path):
+    with FakeModel() as model:
+        first = launch_service(model, tmp_path)
+        try:
+            profile = _create(first, model)
+            assert _write(first, "POST", f"/profiles/{profile['id']}/test").json()["ok"]
+            assert _write(first, "POST", f"/profiles/{profile['id']}/apply").status_code == 200
+            assert _builtin(first)["name"] == "Gemini"
+        finally:
+            stop_service(first)
+        second = launch_service(
+            model, tmp_path, data_dir=first.data_dir, env_file=_env_file(tmp_path, model)
+        )
+        try:
+            listing = _profiles(second)
+        finally:
+            stop_service(second)
+
+    assert listing["current"] == profile["id"]  # model-profiles.json is by id
+    names = {p["id"]: p["name"] for p in listing["profiles"]}
+    assert names == {"gemini": NAME, profile["id"]: "DeepSeek"}
+    assert not any("event=当前配置改回" in line for line in second.output)
+
+
+def test_a_task_from_before_profiles_has_the_builtin_profile_of_now(tmp_path):
+    directory = tmp_path / "task"
+    directory.mkdir()
+    (directory / "task.json").write_text(json.dumps({"submitted_at": 1.0}), encoding="utf-8")
+    assert _task_profile(directory, NAME) == {"id": "gemini", "name": NAME}
+    (directory / "task.json").write_text(
+        json.dumps({"profile_id": "gemini", "profile_name": "Gemini"}), encoding="utf-8"
+    )
+    assert _task_profile(directory, NAME) == {"id": "gemini", "name": "Gemini"}  # as recorded
+
+
+# -- the name's rules ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, reason",
+    [
+        ("n" * 61, "60"),
+        ("two\tparts", "控制字符"),
+        ("zero\u200bwidth", "控制字符"),
+        # Characters ``str.splitlines`` takes for line ends: the file parser used to cut the value there.
+        ("vertical\x0btab", "控制字符"),
+        ("form\x0cfeed", "控制字符"),
+        ("next\x85line", "控制字符"),
+    ],
+    ids=["too-long", "tab", "zero-width-space", "vertical-tab", "form-feed", "next-line"],
+)
+def test_serve_and_run_refuse_a_bad_name_at_startup(tmp_path, name, reason):
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, f'ZT_PROFILE_NAME="{name}"\n')
+        argon_env_file = _argon_env_file(tmp_path, model)
+        serve = subprocess.run(
+            serve_command(env_file, argon_env_file, tmp_path / "data")
+            + ["--profiles-dir", str(tmp_path / "profiles")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        run = subprocess.run(
+            [
+                sys.executable, "-m", "zotero_translate", "run", str(EXCERPT),
+                "--output-dir", str(tmp_path / "out"),
+                "--env-file", str(env_file),
+                "--argon-env-file", str(argon_env_file),
+                "--data-dir", str(tmp_path / "run-data"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    for command in (serve, run):
+        assert command.returncode == 2, (command.args, command.stdout, command.stderr)
+        assert "ZT_PROFILE_NAME" in command.stderr and reason in command.stderr
+        assert str(env_file) in command.stderr
+    assert not (tmp_path / "data" / "service.lock").exists()  # the service never started
+    assert not (tmp_path / "out" / "source.pdf").exists()  # no task started
+    assert model.requests == []
+
+
+def test_the_name_has_the_limits_of_a_user_profiles_name(tmp_path):
+    def builtin_accepts(name: str) -> bool:
+        path = tmp_path / "endpoint.env"
+        path.write_text(
+            f'OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\nZT_PROFILE_NAME="{name}"\n',
+            encoding="utf-8",
+        )
+        try:
+            return zt_settings.load_builtin_profile_name(path) == name.strip() != ""
+        except SettingsError:
+            return False
+
+    def user_profile_accepts(name: str) -> bool:
+        try:
+            return profiles._validate({"name": name}, required=()) == {"name": name.strip()}
+        except profiles.ProfileError:
+            return False
+
+    samples = [
+        LONGEST, LONGEST + "n", "名" * 60, "名" * 61, "a\tb", "a\u200bb", "a\xa0b", "GPT-5 Mini", "a  b",
+        # Inside the name: what ``str.splitlines`` takes for line ends (and U+2028, U+2029, which are not
+        # control characters, so both accept them) must not shorten the name before it is checked.
+        "a\x0bb", "a\x0cb", "a\x1cb", "a\x1db", "a\x1eb", "a\x85b", "a\u2028b", "a\u2029b",
+        # At the ends they are spaces: both strip them.
+        "\x0bab", "ab\x85", "\x0c ab \u2028",
+    ]
+    for name in samples:
+        assert builtin_accepts(name) == user_profile_accepts(name), repr(name)
+    assert builtin_accepts(LONGEST) and not builtin_accepts(LONGEST + "n")
+
+
+@pytest.mark.parametrize("case", ["missing", "not-utf8", "no-permission"])
+def test_a_missing_or_unreadable_file_has_no_name_to_read(tmp_path, case):
+    path = tmp_path / "model.env"
+    if case == "not-utf8":
+        path.write_bytes(b"OPENAI_BASE_URL=http://127.0.0.1:9/v1\nZT_PROFILE_NAME=\xff\xfe\n")
+    elif case == "no-permission":
+        path.write_text("OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\n", encoding="utf-8")
+        path.chmod(0o000)
+        if os.access(path, os.R_OK):
+            pytest.skip("the file is readable anyway (running as root)")
+    try:
+        with pytest.raises(SettingsError, match="找不到" if case == "missing" else "读不了"):
+            zt_settings.load_builtin_profile_name(path)
+    finally:
+        if path.exists():
+            path.chmod(0o600)
+
+
+def test_a_name_whose_quote_is_not_closed_is_refused_not_cut(tmp_path):
+    path = tmp_path / "model.env"
+    # A quoted value that goes on in the next line is not a name this reader can take whole.
+    path.write_text(
+        'OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\nZT_PROFILE_NAME="two\nlines"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(SettingsError, match="引号"):
+        zt_settings.load_builtin_profile_name(path)
+
+
+# -- the name stays out of the model requests -----------------------------------
+
+MESSAGES_OF = {
+    "batch": sample_prompts.batch_prompt(batch_extra_rules=None),
+    "review": sample_prompts.review_prompt(),
+}
+
+
+def _flash_bodies(env_file, argon_env_file) -> dict[str, dict]:
+    """The request bodies of the sample paragraph's batch and review prompts, as the flash client builds them."""
+    settings = load_pipeline_settings(env_file, argon_env_file)
+    assert settings.user_profile_rules is False
+    client = ModelClient(settings.flash)
+    try:
+        return {kind: client._body([{"role": "user", "content": text}]) for kind, text in MESSAGES_OF.items()}
+    finally:
+        client.close()
+
+
+def test_a_rename_changes_no_request_body_and_no_cache_key(tmp_path):
+    def endpoint(name: str, line: str):
+        path = tmp_path / name
+        path.write_text(f"OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\n{line}", encoding="utf-8")
+        return path
+
+    plain, renamed = endpoint("plain.env", ""), endpoint("renamed.env", NAME_LINE)
+    argon = endpoint("argon.env", "")
+    before, after = _flash_bodies(plain, argon), _flash_bodies(renamed, argon)
+
+    assert load_pipeline_settings(plain, argon) == load_pipeline_settings(renamed, argon)
+    for kind in MESSAGES_OF:
+        # The bytes on the wire (httpx's JSON of the body), and the key of the cache.
+        wire = lambda body: json.dumps(body, ensure_ascii=False, separators=(",", ":"))  # noqa: E731
+        assert wire(before[kind]) == wire(after[kind])
+        assert NAME not in wire(after[kind])
+        assert ResponseCache.key(before[kind]) == ResponseCache.key(after[kind])
+    # And they are the keys pinned for the built-in profile before M5.
+    from tests.test_prompt_protections import GEMINI_BATCH_KEY
+    from tests.test_prompt_protections import GEMINI_REVIEW_KEY
+
+    assert ResponseCache.key(after["batch"]) == GEMINI_BATCH_KEY
+    assert ResponseCache.key(after["review"]) == GEMINI_REVIEW_KEY
+
+
+# -- a paper task with the fake model (heavy.sh) ---------------------------------
+
+
+def test_a_task_after_a_rename_reports_the_name_and_hits_the_cache_of_before(tmp_path):
+    """The same paper before and after the rename: the second run finds every
+    answer in the first run's cache, so its requests are byte for byte the
+    first's; its report and status name the profile as renamed."""
+    with FakeModel() as model:
+        first = launch_service(model, tmp_path)
+        try:
+            task_1 = first.submit()
+            final_1 = first.wait(task_1)
+            report_1 = first.report(task_1)
+        finally:
+            stop_service(first)
+        sent = len(model.requests)
+
+        second = launch_service(
+            model, tmp_path, data_dir=first.data_dir, env_file=_env_file(tmp_path, model)
+        )
+        try:
+            task_2 = second.submit()
+            final_2 = second.wait(task_2)
+            report_2 = second.report(task_2)
+            records = load_records(second.data_dir / "tasks" / task_2 / "attempts" / "1" / REQUESTS_FILE)
+        finally:
+            stop_service(second)
+
+        assert final_1["state"] == final_2["state"] == "succeeded", (final_1["error"], final_2["error"])
+        assert sent > 2
+        assert len(model.requests) == sent, "the renamed run sent a request the first run had not"
+
+    assert final_1["profile"] == {"id": "gemini", "name": "Gemini"}
+    assert final_2["profile"] == {"id": "gemini", "name": NAME}
+    assert report_1["profile"]["name"] == "Gemini" and report_1["profile"]["id"] == "gemini"
+    assert report_2["profile"]["name"] == NAME and report_2["profile"]["id"] == "gemini"
+    assert report_2["profile"]["models"] == report_1["profile"]["models"]
+    assert records and {r["result"] for r in records} == {"cache_hit"}
+    assert report_2["model"]["user_profile_rules"] is False
+
+
+# -- the name is shown, not used: it can neither fail a task nor break a worker ---------
+
+
+def _settled(service, task_id: str, timeout: float = 120) -> dict:
+    """The task once an attempt has ended: done, or failed and waiting for its rerun."""
+    return service.wait_for(
+        task_id, lambda s: s["state"] in ("succeeded", "failed", "cancelled", "waiting_rerun"), timeout
+    )
+
+
+def test_a_name_changed_to_a_bad_one_while_the_service_runs_changes_nothing(tmp_path):
+    """The service reads the name when it starts. A bad name in the file
+    afterwards is no concern of its workers or its listing: the shown name
+    stays, and the task succeeds under the name it recorded."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model)
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            original = env_file.read_text("utf-8")
+            assert NAME_LINE in original
+            listings = []
+            for bad in ("n" * 61, "a\x0bb", "a\tb"):
+                env_file.write_text(original.replace(NAME_LINE, f'ZT_PROFILE_NAME="{bad}"\n'), encoding="utf-8")
+                listings.append(_builtin(service))
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+            current = _profiles(service)["current"]
+        finally:
+            stop_service(service)
+
+    assert [(b["name"], b.get("error")) for b in listings] == [(NAME, None)] * 3
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": "gemini", "name": NAME}
+    assert report["profile"]["name"] == NAME and report["profile"]["id"] == "gemini"
+    assert current == "gemini"
+
+
+def test_a_builtin_name_that_starts_with_a_dash_runs_a_task(tmp_path):
+    """The worker gets the name as ``--profile-name=<name>``: as a separate
+    argument, a name like ``-custom`` is taken for an option of its own."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, "ZT_PROFILE_NAME=-custom\n")
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": "gemini", "name": "-custom"}
+    assert report["profile"]["name"] == "-custom"
+
+
+def test_a_user_profile_name_that_starts_with_a_dash_runs_a_task(tmp_path):
+    with FakeModel() as model:
+        service = launch_service(model, tmp_path)
+        try:
+            profile = _apply_new_profile(service, model, name="-custom")
+            task_id = service.submit()
+            final = _settled(service, task_id)
+            report = service.report(task_id) if final["state"] == "succeeded" else None
+        finally:
+            stop_service(service)
+
+    assert final["state"] == "succeeded", final["error"]
+    assert final["profile"] == {"id": profile["id"], "name": "-custom"}
+    assert report["profile"]["name"] == "-custom" and report["profile"]["id"] == profile["id"]
+
+
+# -- the name's line is one line for every reader of the file ---------------------------
+
+# ``str.splitlines`` ends a line at these as well as at a line feed; the env
+# file's readers end it at a line feed or carriage return only (round 2).
+INJECTED_NAMES = {
+    "u2028-model": "Friendly\u2028AI_DEFAULT_MODEL=changed",
+    "vt-timeout": "Friendly\x0bZT_REQUEST_TIMEOUT_SECONDS=bad",
+    "ff-key": "Friendly\x0cOPENAI_API_KEY=sk-other",
+    "nel-url": "Friendly\x85OPENAI_BASE_URL=http://127.0.0.1:1/v1",
+    "u2029-concurrency": "Friendly\u2029ZT_CONCURRENCY=0",
+}
+
+
+def _old_read_env_file(text: str) -> dict[str, str]:
+    """``read_env_file`` as it was before M5 ticket 02 (lines cut by ``splitlines``)."""
+    from zotero_translate.settings import _ENV_LINE
+
+    values = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ENV_LINE.match(line)
+        if match:
+            value = match.group(2)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            values[match.group(1)] = value
+    return values
+
+
+ORDINARY_FILES = {
+    "lf": "OPENAI_BASE_URL=http://a/v1\nOPENAI_API_KEY=k\nAI_DEFAULT_MODEL=m\n",
+    "crlf": "OPENAI_BASE_URL=http://a/v1\r\nOPENAI_API_KEY=k\r\nAI_DEFAULT_MODEL=m\r\n",
+    "cr-only": "OPENAI_BASE_URL=http://a/v1\rOPENAI_API_KEY=k\rAI_DEFAULT_MODEL=m\r",
+    "no-final-newline": "OPENAI_BASE_URL=http://a/v1\nOPENAI_API_KEY=k",
+    "comments-blanks-export": "# a comment\n\n  export OPENAI_BASE_URL = http://a/v1  \n  # another\nOPENAI_API_KEY='k'\n\n",
+    "quotes-and-repeats": 'ZT_PROFILE_NAME="one"\nZT_PROFILE_NAME=\'two words\'\nA="x y"\nB=\n',
+    "tabs-and-trailing-space": "A=1\t\nB = 2 \n\tC=3\n",
+    "unicode": "ZT_PROFILE_NAME=名称 ☃\nOPENAI_API_KEY=k\n",
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize("name", ORDINARY_FILES)
+def test_the_other_keys_of_an_ordinary_env_file_parse_as_before(tmp_path, name):
+    path = tmp_path / "ordinary.env"
+    path.write_bytes(ORDINARY_FILES[name].encode("utf-8"))
+    assert read_env_file(path) == _old_read_env_file(path.read_text("utf-8"))
+
+
+@pytest.mark.parametrize("name", INJECTED_NAMES)
+def test_a_name_line_is_one_line_it_sets_no_model_setting(tmp_path, name):
+    """A character that only ``splitlines`` takes for a line end stays in the
+    name's line: it starts no setting of its own, so the model, the timeout,
+    the key, the address and the request body (and its cache key) are those
+    of the file without the name."""
+    base = "OPENAI_BASE_URL=http://127.0.0.1:9/v1\nOPENAI_API_KEY=sk-x\n"
+    plain, injected = tmp_path / "plain.env", tmp_path / "injected.env"
+    argon = tmp_path / "argon.env"
+    plain.write_text(base, encoding="utf-8")
+    injected.write_bytes((base + f"ZT_PROFILE_NAME={INJECTED_NAMES[name]}\n").encode("utf-8"))
+    argon.write_text(base, encoding="utf-8")
+
+    assert set(read_env_file(injected)) == {"OPENAI_BASE_URL", "OPENAI_API_KEY", "ZT_PROFILE_NAME"}
+    assert load_pipeline_settings(injected, argon) == load_pipeline_settings(plain, argon)
+    before, after = _flash_bodies(plain, argon), _flash_bodies(injected, argon)
+    for kind in MESSAGES_OF:
+        assert before[kind] == after[kind]
+        assert ResponseCache.key(before[kind]) == ResponseCache.key(after[kind])
+
+
+def _models(model: FakeModel) -> set[str]:
+    return {r.body["model"] for r in model.requests}
+
+
+def test_a_name_with_a_setting_inside_changes_no_model_setting_in_the_service(tmp_path):
+    """A name Friendly<U+2028>AI_DEFAULT_MODEL=changed is a legal name (U+2028
+    is no control character), and the service started under it sends the
+    model of the file; the same name written into the file while the service
+    runs, or one with a vertical tab and a bad timeout in it, breaks neither
+    the listing nor the next task."""
+    with FakeModel() as model:
+        env_file = _env_file(tmp_path, model, f"ZT_PROFILE_NAME={INJECTED_NAMES['u2028-model']}\n")
+        service = launch_service(model, tmp_path, env_file=env_file)
+        try:
+            first_listing = _builtin(service)
+            first_id = service.submit()
+            first = _settled(service, first_id)
+            original = env_file.read_text("utf-8")
+            listings = []
+            for key in ("vt-timeout", "ff-key", "nel-url", "u2029-concurrency"):
+                line = f"ZT_PROFILE_NAME={INJECTED_NAMES[key]}\n"
+                env_file.write_bytes(original.replace(f"ZT_PROFILE_NAME={INJECTED_NAMES['u2028-model']}\n", line).encode())
+                listings.append(_builtin(service))
+            second_id = service.submit()
+            second = _settled(service, second_id)
+        finally:
+            stop_service(service)
+
+    assert first_listing["name"] == INJECTED_NAMES["u2028-model"]
+    assert first_listing["model"] == FAKE_MODEL_NAME and "error" not in first_listing
+    assert [(b["name"], b["model"], b.get("error")) for b in listings] == [
+        (INJECTED_NAMES["u2028-model"], FAKE_MODEL_NAME, None)
+    ] * 4
+    assert first["state"] == second["state"] == "succeeded", (first["error"], second["error"])
+    assert first["profile"]["name"] == second["profile"]["name"] == INJECTED_NAMES["u2028-model"]
+    assert _models(model) <= {FAKE_MODEL_NAME, ARGON_MODEL_NAME}, _models(model)

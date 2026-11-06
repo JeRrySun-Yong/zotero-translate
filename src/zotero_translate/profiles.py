@@ -1,8 +1,14 @@
 """Model profiles (ADR 0005): which endpoint and model each role of a paper task uses.
 
-The built-in profile ``gemini`` ("Gemini") is the two endpoints of the
-service's ``--env-file`` and ``--argon-env-file``; it cannot be edited or
-deleted, and needs no connection test. A user profile has one endpoint for
+The built-in profile ``gemini`` is the two endpoints of the service's
+``--env-file`` and ``--argon-env-file``; it cannot be edited or deleted, and
+needs no connection test. Its id is always ``gemini``; its name is
+``ZT_PROFILE_NAME`` in the ``--env-file`` (M5 ticket 02, read once when the
+service starts and kept until it restarts), "Gemini" without it. The name
+is for display only (answers, the name a task records, the task report, the
+messages and log lines below): no model request carries it.
+
+A user profile has one endpoint for
 both roles; its settings and API key live in ``<profiles dir>/<id>.env``
 (mode 600, the directory 700), in the format of the endpoint files
 (``zotero_translate.settings.load_profile_settings``) plus
@@ -20,7 +26,8 @@ makes the profile untested. Its name and concurrency limit are not part
 of it.
 
 Only a profile whose last test succeeded can be applied. The current
-profile goes back to Gemini, with an event log line (当前配置改回 Gemini),
+profile goes back to the built-in one, with an event log line (当前配置改回
+<the built-in profile's name>),
 when its file is gone or unreadable, or it is no longer tested: checked
 when the service starts, and whenever the current profile is read (each
 listing, submission, apply).
@@ -47,7 +54,6 @@ import json
 import os
 import threading
 import time
-import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -56,22 +62,25 @@ from pathlib import Path
 
 from zotero_translate import task_dir as td
 from zotero_translate.model_client import REDACTED
+from zotero_translate.settings import DEFAULT_BUILTIN_NAME
 from zotero_translate.settings import DEFAULT_PROFILE_CONCURRENCY
+from zotero_translate.settings import MAX_PROFILE_NAME_LENGTH
 from zotero_translate.settings import ModelSettings
 from zotero_translate.settings import SettingsError
 from zotero_translate.settings import base_url_problem
+from zotero_translate.settings import has_control_character
 from zotero_translate.settings import load_pipeline_settings
 from zotero_translate.settings import read_env_file
 from zotero_translate.settings import stream_setting
 
 BUILTIN_ID = "gemini"
-BUILTIN_NAME = "Gemini"
+BUILTIN_NAME = DEFAULT_BUILTIN_NAME  # the built-in profile's name unless ``model.env`` gives one
 STATE_FILE = "model-profiles.json"  # in the data directory
 MAX_CONCURRENCY = 256
 MAX_REQUEST_TIMEOUT_SECONDS = 3600
 _FIELDS = ("name", "base_url", "api_key", "model", "concurrency", "request_timeout_seconds", "stream")
 _REQUIRED = ("name", "base_url", "api_key", "model")
-_LENGTHS = {"name": 60, "base_url": 500, "api_key": 500, "model": 200}
+_LENGTHS = {"name": MAX_PROFILE_NAME_LENGTH, "base_url": 500, "api_key": 500, "model": 200}
 # The connection settings a test is valid for (see the module docstring).
 _TESTED_FIELDS = ("base_url", "api_key", "model", "request_timeout_seconds")
 
@@ -129,6 +138,7 @@ class ProfileStore:
         argon_env_file: Path,
         concurrency: int,
         log: LogProfileEvent,
+        builtin_name: str = BUILTIN_NAME,
     ):
         self.profiles_dir = Path(profiles_dir)
         self.state_file = Path(data_dir) / STATE_FILE
@@ -136,6 +146,7 @@ class ProfileStore:
         self.argon_env_file = Path(argon_env_file)
         self.concurrency = concurrency
         self._log = log
+        self.builtin_name = builtin_name  # ``load_builtin_profile_name``; for display only
         self._lock = threading.RLock()
 
     @contextlib.contextmanager
@@ -174,18 +185,18 @@ class ProfileStore:
                 self._save(state)
                 self._log(old, "current_reset", profile.name if profile else None, reason)
                 profile = None
-            return (profile.id, profile.name) if profile else (BUILTIN_ID, BUILTIN_NAME)
+            return (profile.id, profile.name) if profile else (BUILTIN_ID, self.builtin_name)
 
     def for_submission(self, profile_id: str | None) -> tuple[str, str]:
         """``(id, name)`` of the profile a new task records: the one named, else the current one.
 
-        A named profile must exist (else 422) and, unless it is Gemini, be
+        A named profile must exist (else 422) and, unless it is the built-in one, be
         tested (else 409): e.g. the plugin's retry names the failed task's.
         """
         if profile_id is None:
             return self.current()
         if profile_id == BUILTIN_ID:
-            return BUILTIN_ID, BUILTIN_NAME
+            return BUILTIN_ID, self.builtin_name
         with self._lock:
             profile = self._read(profile_id)
             if profile is None:
@@ -230,7 +241,7 @@ class ProfileStore:
         fields = _validate(body, required=())
         with self._lock:
             if profile_id == BUILTIN_ID:
-                raise ProfileError(409, "内置配置 Gemini 由翻译服务的启动参数决定，不能修改")
+                raise ProfileError(409, f"内置配置 {self.builtin_name} 由翻译服务的启动参数决定，不能修改")
             old = self._existing(profile_id)
             profile = Profile(**{**old.__dict__, **fields})
             self._write(profile)
@@ -241,7 +252,7 @@ class ProfileStore:
         """Delete the profile; refused while ``users`` (unfinished tasks) hold it."""
         with self._lock:
             if profile_id == BUILTIN_ID:
-                raise ProfileError(409, "内置配置 Gemini 不能删除")
+                raise ProfileError(409, f"内置配置 {self.builtin_name} 不能删除")
             profile = self._existing(profile_id)
             if users:
                 raise ProfileError(409, f"还有 {users} 个未结束的论文任务使用这份配置，结束后才能删除")
@@ -284,7 +295,7 @@ class ProfileStore:
         """The settings a connection test of the profile uses, and their fingerprint."""
         with self._lock:
             if profile_id == BUILTIN_ID:
-                raise ProfileError(409, "内置配置 Gemini 不需要测试连接")
+                raise ProfileError(409, f"内置配置 {self.builtin_name} 不需要测试连接")
             profile = self._existing(profile_id)
             return profile.model_settings(), profile.fingerprint()
 
@@ -292,7 +303,7 @@ class ProfileStore:
         with self._lock:
             state = self._state()
             if profile_id == BUILTIN_ID:
-                name = BUILTIN_NAME
+                name = self.builtin_name
                 state["current"] = None
             else:
                 profile = self._existing(profile_id)
@@ -309,7 +320,7 @@ class ProfileStore:
     def _builtin(self, current_id: str) -> dict:
         answer = {
             "id": BUILTIN_ID,
-            "name": BUILTIN_NAME,
+            "name": self.builtin_name,
             "builtin": True,
             "current": current_id == BUILTIN_ID,
             "tested": True,
@@ -466,7 +477,7 @@ def _validate(body: dict, required: tuple[str, ...]) -> dict:
         if not isinstance(value, str) or not value.strip():
             raise ProfileError(400, f"{name} 不能为空")
         value = value.strip()
-        if len(value) > _LENGTHS[name] or any(unicodedata.category(c).startswith("C") for c in value):
+        if len(value) > _LENGTHS[name] or has_control_character(value):
             raise ProfileError(400, f"{name} 太长或含控制字符")
         if name != "name" and any(c.isspace() for c in value):
             raise ProfileError(400, f"{name} 不能含空白")
