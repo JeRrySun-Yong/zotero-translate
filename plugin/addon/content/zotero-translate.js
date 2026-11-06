@@ -24,7 +24,9 @@
  * parent item's attachments, among a standalone PDF's related items, and
  * when the source PDF is picked), and a standalone PDF with an undeleted
  * output naming it as `source` counts as translated even when no relation
- * could be saved. Not as an item relation, which would be hidden too: the Zotero
+ * could be saved. A damaged file or entry is skipped, not an error for the
+ * item menu or a submission (see attachmentIdentities). Not as an item
+ * relation, which would be hidden too: the Zotero
  * sync server accepts only its own relation predicates (dc:relation,
  * owl:sameAs, dc:replaces with Zotero item URIs; Mendeley's), so an
  * attachment with any other relation could never sync (M3 ticket 10).
@@ -457,10 +459,19 @@ var ZoteroTranslate = {
     return { libraryID: source.libraryID, collections: source.getCollections() };
   },
 
-  /** The attachments' identities ({taskId, output}), for the lifecycle. */
+  /** The attachments' identities ({taskId, output}), for the lifecycle.
+   *
+   *  The file can be damaged (edited by hand, cut short, written by another
+   *  version). A top level that is not an object counts as an empty file; an
+   *  entry that is not {libraryID (an integer), key (a non-empty string),
+   *  source (a string, or left out)} is skipped when the file is read, with
+   *  one log line saying how many. The skipped entries stay in the file
+   *  (`mark` writes the file whole, with them), and what they could have
+   *  told is lost only until the file is repaired: the item menu and a
+   *  submission must not fail on a file. */
   attachmentIdentities: {
     _path: null,
-    _byIdentity: null, // "<task ID>/<output>" -> {libraryID, key}
+    _byIdentity: null, // "<task ID>/<output>" -> {libraryID, key, source?}
     _loading: null,
     _writing: Promise.resolve(),
 
@@ -468,7 +479,21 @@ var ZoteroTranslate = {
       if (!this._loading) {
         this._path = PathUtils.join(Zotero.DataDirectory.dir, "zotero-translate", "attachments.json");
         this._loading = (async () => {
-          this._byIdentity = (await IOUtils.exists(this._path)) ? await IOUtils.readJSON(this._path) : {};
+          let data = {};
+          let damaged = 0;
+          if (await IOUtils.exists(this._path)) {
+            data = await IOUtils.readJSON(this._path);
+            if (data === null || typeof data !== "object" || Array.isArray(data)) {
+              data = {};
+              damaged = 1;
+            } else {
+              damaged = Object.values(data).filter((entry) => !this._valid(entry)).length;
+            }
+          }
+          this._byIdentity = data;
+          if (damaged) {
+            Zotero.logError(new Error(`附件身份文件 ${this._path} 有 ${damaged} 处损坏，已忽略（文件没有改）`));
+          }
         })();
         this._loading.catch(() => {
           this._loading = null; // read it again next time
@@ -476,6 +501,24 @@ var ZoteroTranslate = {
       }
       await this._loading;
       return this._byIdentity;
+    },
+
+    /** Whether `entry` is a usable record (see above). */
+    _valid(entry) {
+      return (
+        entry !== null &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        Number.isInteger(entry.libraryID) &&
+        typeof entry.key === "string" &&
+        entry.key !== "" &&
+        (entry.source === undefined || typeof entry.source === "string")
+      );
+    },
+
+    /** The usable entries, as the records themselves. */
+    async _entries() {
+      return Object.values(await this._load()).filter((entry) => this._valid(entry));
     },
 
     /** The attachment with this identity, unless it is gone or in the trash. */
@@ -488,7 +531,7 @@ var ZoteroTranslate = {
      *  counts as empty: the item menu and a submission must not fail on it. */
     async attachedKeys() {
       try {
-        return new Set(Object.values(await this._load()).map(this._itemKey));
+        return new Set((await this._entries()).map(this._itemKey));
       } catch (e) {
         Zotero.logError(e);
         return new Set();
@@ -501,7 +544,7 @@ var ZoteroTranslate = {
     async hasOutputOf(source) {
       let entries;
       try {
-        entries = Object.values(await this._load());
+        entries = await this._entries();
       } catch (e) {
         Zotero.logError(e);
         return false;
@@ -520,7 +563,7 @@ var ZoteroTranslate = {
 
     async find(target, identity) {
       const entry = (await this._load())[this._key(identity)];
-      const item = entry && (await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key));
+      const item = this._valid(entry) && (await Zotero.Items.getByLibraryAndKeyAsync(entry.libraryID, entry.key));
       return item && !item.deleted ? item.id : null;
     },
 
@@ -547,8 +590,7 @@ var ZoteroTranslate = {
      *  one in its library) with this title, added at or after `since`, that
      *  has no identity; null when there is none. */
     async unmarked(target, { title, since }) {
-      const byIdentity = await this._load();
-      const marked = new Set(Object.values(byIdentity).map(this._itemKey));
+      const marked = new Set((await this._entries()).map(this._itemKey));
       let items;
       if (target.parentItemID) {
         const parent = await Zotero.Items.getAsync(target.parentItemID);

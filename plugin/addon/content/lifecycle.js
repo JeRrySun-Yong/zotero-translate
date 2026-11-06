@@ -296,7 +296,8 @@ var ZoteroTranslateLifecycle = (() => {
        *  (`sourceOf(item)`: the item's source, or why it has none, a string,
        *  also shown in the task window), then announce the submission notice
        *  (core.js submissionNotice) with this batch's own titles and reasons;
-       *  none once stop() has come meanwhile.
+       *  none once stop() has come meanwhile. An item whose `sourceOf` throws
+       *  is logged and skipped, with a reason (M4 ticket 16): the others go on.
        *
        *  A source that already has a translation output (`translated`) is not
        *  submitted: it is counted among the skipped, and a second notice
@@ -307,7 +308,14 @@ var ZoteroTranslateLifecycle = (() => {
         const skipped = [];
         const asking = []; // sources waiting for "再翻译一次"
         for (const item of items) {
-          const source = await sourceOf(item);
+          let source;
+          try {
+            source = await sourceOf(item);
+          } catch (e) {
+            // One item the plugin cannot read must not stop the others.
+            logError(e);
+            source = `${item?.title ?? item?.getDisplayTitle?.() ?? "条目"}：读取条目出错，没有提交（${e.message}）`;
+          }
           if (typeof source === "string") {
             lifecycle.notice(source);
             skipped.push(source);

@@ -35,6 +35,7 @@ function item(id, libraryID, key, fields = {}) {
 }
 
 let items; // id -> item; reset by `world`
+const JSON_NULL = Symbol("a file that holds the JSON value null"); // `null` itself: no file
 
 /** The plugin's scope over `entries` (the identity file's content; null: no file;
  *  a string: an unreadable file) and `list` (items); returns {plugin, written, errors}. */
@@ -44,7 +45,7 @@ function world(list, entries = null) {
   const written = [];
   const errors = [];
   if (entries !== null) {
-    files.set(IDENTITY_FILE, entries);
+    files.set(IDENTITY_FILE, entries === JSON_NULL ? null : entries);
   }
   const context = vm.createContext({
     ZoteroTranslateCore: Core,
@@ -255,4 +256,93 @@ test("a paper with a parent item ignores the recorded sources", async () => {
   );
   items.get(11).parentItem = items.get(10);
   assert.equal((await plugin._sourceOf(items.get(10))).translated, false);
+});
+
+// ---- round 2: damaged entries in the identity file are skipped ----
+
+// Every kind of damaged entry; the two valid ones (an output of the standalone
+// PDF 30 and a renamed output of the parent item 10) must still count.
+const DAMAGED = {
+  "t0/mono": null,
+  "t0/dual": "MONO0001",
+  "t1/mono": 5,
+  "t1/dual": [],
+  "t2/mono": {},
+  "t2/dual": { libraryID: 1 },
+  "t3/mono": { key: "NOLIB001" },
+  "t3/dual": { libraryID: "1", key: "STRLIB01" },
+  "t4/mono": { libraryID: 1, key: 7 },
+  "t4/dual": { libraryID: 1, key: "" },
+  "t5/mono": { libraryID: 1, key: "BADSRC01", source: 7 },
+  "t5/dual": { libraryID: 1, key: "BADSRC02", source: null },
+  "t6/mono": { libraryID: 1.5, key: "FRACLIB1" },
+  "ok/standalone": { libraryID: 1, key: "MONO0001", source: "STANDALO" },
+  "ok/parented": { libraryID: 1, key: "RENAMED1" },
+};
+
+/** A standalone PDF (30) with an output (100), another standalone PDF (31), and
+ *  a parent item (10) with a renamed output (12) and its source (11). */
+function selection() {
+  return [
+    item(30, 1, "STANDALO", { title: "Standalone" }),
+    item(100, 1, "MONO0001", { title: "改名后的译文" }),
+    item(31, 1, "STANDAL2", { title: "Second standalone", related: ["BADSRC01"] }),
+    item(10, 1, "PARENT01", { regular: true, attachments: [11, 12] }),
+    item(11, 1, "SRC00001", { title: "Full Text PDF", parent: 10 }),
+    item(12, 1, "RENAMED1", { title: "我改过名的译文", parent: 10 }),
+    item(13, 1, "BADSRC01", { title: "Related but not recorded" }),
+    item(14, 1, "BADSRC02", { title: "Also not recorded" }),
+  ];
+}
+
+test("damaged entries of the identity file are skipped: every selected item still gets its source", async () => {
+  const { plugin, errors } = world(selection(), DAMAGED);
+  items.get(11).parentItem = items.get(10);
+  items.get(12).parentItem = items.get(10);
+  // As a batch submission does: one source per selected item, in turn.
+  const sources = [];
+  for (const id of [30, 31, 10, 11]) {
+    sources.push(await plugin._sourceOf(items.get(id)));
+  }
+  assert.deepEqual(
+    sources.map((source) => (typeof source === "string" ? source : [source.sourceItemID, source.translated])),
+    [
+      [30, true], // the valid entry names it as the source of an undeleted output
+      [31, false], // related items that are damaged entries or not recorded do not count
+      [11, true], // the parent item has the recorded, renamed output
+      [11, true],
+    ],
+  );
+  // The renamed output is no source for the parent item either.
+  assert.equal((await plugin.sourcePdf(items.get(10))).id, 11);
+  assert.equal(await plugin.sourcePdf(items.get(12)), null);
+  // The damage is logged once, not at every read.
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /附件身份文件/);
+});
+
+test("damaged entries do not stop the keys that are valid from being recognised", async () => {
+  const { plugin } = world(selection(), DAMAGED);
+  assert.deepEqual([...(await plugin.attachmentIdentities.attachedKeys())].sort(), ["1/MONO0001", "1/RENAMED1"]);
+  assert.equal(await plugin.attachmentIdentities.hasOutputOf(items.get(30)), true);
+  assert.equal(await plugin.attachmentIdentities.hasOutputOf(items.get(31)), false);
+});
+
+test("a top level that is not an object counts as an empty file", async () => {
+  for (const top of [JSON_NULL, 5, true, 0, [], [{ libraryID: 1, key: "MONO0001", source: "STANDALO" }]]) {
+    const { plugin, errors } = world(selection(), top);
+    const source = await plugin._sourceOf(items.get(30));
+    assert.equal(source.translated, false, String(top));
+    assert.deepEqual([...(await plugin.attachmentIdentities.attachedKeys())], [], String(top));
+    assert.equal(errors.length, 1, String(top));
+  }
+});
+
+test("marking over a damaged file keeps its entries and adds the new one", async () => {
+  const { plugin, written } = world(selection(), DAMAGED);
+  await plugin.attachmentIdentities.mark(100, { taskId: "t9", output: "mono", sourceItemID: 30 });
+  assert.deepEqual(written[0][1], { ...DAMAGED, "t9/mono": { libraryID: 1, key: "MONO0001", source: "STANDALO" } });
+  assert.equal(await plugin.attachmentIdentities.find({}, { taskId: "t9", output: "mono" }), 100);
+  assert.equal(await plugin.attachmentIdentities.find({}, { taskId: "t0", output: "mono" }), null);
+  assert.equal(await plugin.attachmentIdentities.find({}, { taskId: "t3", output: "dual" }), null);
 });

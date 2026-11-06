@@ -2402,6 +2402,24 @@ test("a mixed batch submits the new papers and asks about the translated ones; t
   assert.deepEqual(env.lifecycle.tasks.map((t) => t.title), ["B"]);
 });
 
+test("a source lookup that throws skips that item with a reason; the rest of the batch goes on (ticket 16 round 2)", async () => {
+  const errors = [];
+  const env = environment({ routes: { [UPLOAD]: json(201, { task_id: "t1" }) }, logError: (e) => errors.push(e.message) });
+  env.lifecycle.start();
+  const lookup = async (item) => {
+    if (item.title === "B") {
+      throw new TypeError("无法读取附件身份");
+    }
+    return item;
+  };
+  await env.lifecycle.submitBatch([SOURCE, sourceNamed("B", 21), sourceNamed("C", 22)], lookup);
+  assert.deepEqual(env.lifecycle.tasks.map((t) => t.title), ["AutoDesign", "C"]);
+  assert.deepEqual(errors, ["无法读取附件身份"]);
+  const reason = "B：读取条目出错，没有提交（无法读取附件身份）";
+  assert.deepEqual(env.announced.at(-1), { outcome: "submitted", headline: "已提交 2 篇", titles: ["AutoDesign", "C"], reasons: [reason] });
+  assert.deepEqual(env.lifecycle.notices, [reason]);
+});
+
 test("a PDF with an unfinished task is skipped before the 已有译文 ask; no PDF is skipped too", async () => {
   const env = await submitted();
   env.routes[UPLOAD] = json(201, { task_id: "t2" });
